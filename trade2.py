@@ -7,45 +7,65 @@ import requests
 from contextlib import redirect_stdout
 
 # ==================== 全局可调参数 ====================
+# 请根据市场情况和个人风险偏好调整以下参数
 
-MACRO_INDEX = 'sh.000300'               
-MARKET_INDEX = 'sh.000001'               
-MACRO_MA_SHORT = 20                       
-MACRO_MA_LONG = 60                         
+# ----- 宏观指数参数 -----
+MACRO_INDEX = "sh.000300"  # 用于判断宏观状态的指数代码（沪深300）
+MARKET_INDEX = "sh.000001"  # 用于市场成交额判断的指数代码（上证指数）
+MACRO_MA_SHORT = 20  # 宏观指数短期均线周期（默认20日）
+MACRO_MA_LONG = 60  # 宏观指数长期均线周期（默认60日）
 
-ETF_MA = 20                                
-ETF_VOL_MA = 5                              
+# ----- ETF技术指标参数 -----
+ETF_MA = 20  # ETF价格均线周期（默认20日）
+ETF_VOL_MA = 5  # ETF成交量均线周期（默认5日）
 
-MACD_SHORT = 12
-MACD_LONG = 26
-MACD_SIGNAL = 9
+# ----- MACD参数 -----
+MACD_SHORT = 12  # MACD快线周期（默认12）
+MACD_LONG = 26  # MACD慢线周期（默认26）
+MACD_SIGNAL = 9  # MACD信号线周期（默认9）
 
-KDJ_N = 9
-KDJ_M1 = 3
-KDJ_M2 = 3
+# ----- KDJ参数 -----
+KDJ_N = 9  # KDJ计算周期（默认9日）
+KDJ_M1 = 3  # KDJ K值平滑因子（默认3）
+KDJ_M2 = 3  # KDJ D值平滑因子（默认3）
 
-RSI_PERIOD = 14                            
+# ----- 情绪指标参数 -----
+RSI_PERIOD = 14  # RSI计算周期（用于情绪判断，默认14）
+# 情绪等级对应的仓位调整系数（值越大，仓位上限越高）
 SENTIMENT_FACTOR = {
-    'panic': 0.6,      
-    'pessimistic': 0.8, 
-    'optimistic': 1.0,  
-    'frenzy': 0.9       
+    "panic": 0.6,  # 恐慌（RSI<30）  → 仓位上限打6折
+    "pessimistic": 0.8,  # 悲观（30≤RSI<50）→ 8折
+    "optimistic": 1.0,  # 乐观（50≤RSI<70）→ 不变
+    "frenzy": 0.9,  # 狂热（RSI≥70）   → 9折（过热减仓）
 }
 
-STOP_LOSS = 0.10                             
-TRAILING_STOP = 0.08                          
-PROFIT_TARGETS = [0.20, 0.40]                  
+# ----- 风控参数 -----
+STOP_LOSS = 0.10  # 硬止损线：-10%（收益率低于该值强制止损）
+TRAILING_STOP = 0.08  # 移动止盈回撤阈值：8%（从峰值回撤超过该值清仓）
+PROFIT_TARGETS = [0.20, 0.40]  # 分批止盈目标：达到20%收益卖出1/3，40%再卖1/3
 
+# ----- 买入评分权重（总和必须为1）-----
 BUY_SCORE_WEIGHTS = {
-    'macro_not_bear': 0.15,          
-    'market_amount_above_ma': 0.15,   
-    'price_above_ma20_and_vol': 0.20, 
-    'outperform_macro': 0.15,          
-    'macd_golden_cross': 0.15,         
-    'kdj_golden_cross': 0.20            
+    "macro_not_bear": 0.15,  # 条件1：宏观非熊市
+    "market_amount_above_ma": 0.15,  # 条件2：市场成交额 > 20日均额
+    "price_above_ma20_and_vol": 0.20,  # 条件3：ETF价格 > 20日线 且 成交量 > 5日均量
+    "outperform_macro": 0.15,  # 条件4：近5日涨幅跑赢大盘
+    "macd_golden_cross": 0.15,  # 条件5：MACD金叉
+    "kdj_golden_cross": 0.20,  # 条件6：KDJ金叉
 }
 
+# ----- 仓位非线性映射函数（输入加权评分[0,1]，输出理论仓位比例[0,0.8]）-----
+# 可根据风险偏好调整分段阈值和对应仓位
 def map_score_to_ratio(score):
+    """
+    将买入评分映射为理论仓位比例（分段线性，高分仓位增速放缓）
+    评分区间与仓位比例对应关系：
+        [0.0, 0.2) -> 0.0
+        [0.2, 0.4) -> 0.25
+        [0.4, 0.6) -> 0.4
+        [0.6, 0.8) -> 0.6
+        [0.8, 1.0] -> 0.8
+    """
     if score < 0.2:
         return 0.0
     elif score < 0.4:
@@ -57,23 +77,26 @@ def map_score_to_ratio(score):
     else:
         return 0.8
 
-BUY_COOLDOWN = 1      
-SELL_COOLDOWN = 3     
+# ----- 冷静期参数（天数）-----
+BUY_COOLDOWN = 1  # 卖出后至少1天才能再次买入（防止频繁交易）
+SELL_COOLDOWN = 3  # 买入后至少3天才能卖出（除非极端行情，保护短线波动）
 
-EXTREME_MARKET_DROP = 0.03                    
-EXTREME_ETF_DEVIATION = 0.05                   
+# ----- 极端行情阈值（满足任一条件可忽略冷静期）-----
+EXTREME_MARKET_DROP = 0.02  # 大盘实时跌幅超过3%视为极端
+EXTREME_ETF_DEVIATION = 0.05  # ETF价格跌破60日线超过5%视为极端
 
+# ----- 宏观状态对应的总仓位上限（应用于每个ETF的买入目标）-----
 POSITION_LIMIT = {
-    'bull': 0.7,      
-    'oscillate': 0.5, 
-    'bear': 0.2       
+    "bull": 0.7,  # 牛市：单个ETF仓位上限70%
+    "oscillate": 0.5,  # 震荡市：上限50%
+    "bear": 0.2,  # 熊市：上限20%
 }
 
-TOTAL_CAPITAL = 1000000   
+# ----- 资金与文件参数 -----
+TOTAL_CAPITAL = 1000000  # 总资金（元），用于计算剩余可投资金额
+POSITION_FILE = "positions.csv"  # 持仓CSV文件路径（必须包含指定列）
 
-POSITION_FILE = 'positions.csv'               
-
-# ==================== 数据获取函数 ====================
+# =========================================================================
 
 def get_realtime_price_sina(code):
     try:
@@ -259,8 +282,6 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                 total_capital, total_market_value):
     """
     分析单个ETF，返回状态字符串和可能的操作信号
-    信号格式：{'action': 'BUY'/'SELL', 'reason': str, 'shares': int, 'price': float, 
-              'new_shares': int, 'new_cost': float, 'new_tp_level': float}  （new_* 为执行后的状态）
     """
     code = row['代码']
     name = row['名称']
@@ -323,9 +344,20 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
     if extreme:
         can_buy = can_sell = True
 
+    # ========== 计算当前仓位信息 ==========
+    current_value = shares * real_price
+    if shares > 0:
+        position_info = f"当前仓位: {shares}份, 市值 {current_value:.2f}元"
+        if full_amount > 0:
+            position_ratio = current_value / full_amount * 100
+            position_info += f" (占满仓金额 {position_ratio:.1f}%)"
+    else:
+        position_info = "当前仓位: 空仓"
+
     lines = []
     lines.append(f"【{name} ({code})】")
     lines.append(f"  实时价: {real_price:.3f} | 20日线: {ma20:.3f} | 60日线: {ma60:.3f}" if ma60 else f"  实时价: {real_price:.3f} | 20日线: {ma20:.3f}")
+    lines.append(f"  {position_info}")  # 新增：显示当前仓位信息
     lines.append(f"  成交量: {volume:.0f} (5日均: {vol_ma:.0f}) {'✅ 达标' if volume > vol_ma else '❌ 不足'}")
     lines.append(f"  近5日涨幅: {ret_etf_5d*100:+.2f}% | 沪深300同期: {ret_macro_5d*100:+.2f}% {'✅ 跑赢' if ret_etf_5d > ret_macro_5d else '❌ 跑输'}")
     lines.append(f"  MACD: {'✅ 金叉' if macd_golden else '❌ 非金叉'} | KDJ: {'✅ 金叉' if kdj_golden else '❌ 非金叉'}")
@@ -339,7 +371,9 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
     # ========== 卖出信号（持仓时） ==========
     if shares > 0:
         ret = (real_price - cost) / cost
-        lines.append(f"  持仓: {shares}份 | 成本: {cost:.3f} | 收益率: {ret*100:+.2f}%")
+        lines.append(
+            f"  持仓: {shares}份 | 成本: {cost:.3f} | 收益率: {ret*100:+.2f}%"
+        )  # 保留原有持仓行
 
         # 计算自买入以来的最高价（用于移动止盈）
         if pd.notna(buy_date):
