@@ -282,6 +282,17 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                 total_capital, total_market_value):
     """
     分析单个ETF，返回状态字符串和可能的操作信号
+    信号字段：
+        action: 'BUY'/'SELL'
+        reason: 触发原因
+        shares: 建议买卖份额（买入时为建议买入数，卖出时为卖出数）
+        price: 实时价（仅买入时有）
+        sell_pct: 卖出份额占原持仓的百分比（仅卖出时有）
+        buy_pct_after: 买入后市值占满仓金额的百分比（仅买入时有）
+        new_shares: 执行后份额
+        new_cost: 执行后成本
+        new_tp_level: 执行后止盈档位
+        new_row: 执行后CSV行对应的字典（可用于手动更新）
     """
     code = row['代码']
     name = row['名称']
@@ -344,7 +355,7 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
     if extreme:
         can_buy = can_sell = True
 
-    # ========== 计算当前仓位信息 ==========
+    # 当前市值和仓位占比
     current_value = shares * real_price
     if shares > 0:
         position_info = f"当前仓位: {shares}份, 市值 {current_value:.2f}元"
@@ -357,7 +368,7 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
     lines = []
     lines.append(f"【{name} ({code})】")
     lines.append(f"  实时价: {real_price:.3f} | 20日线: {ma20:.3f} | 60日线: {ma60:.3f}" if ma60 else f"  实时价: {real_price:.3f} | 20日线: {ma20:.3f}")
-    lines.append(f"  {position_info}")  # 新增：显示当前仓位信息
+    lines.append(f"  {position_info}")
     lines.append(f"  成交量: {volume:.0f} (5日均: {vol_ma:.0f}) {'✅ 达标' if volume > vol_ma else '❌ 不足'}")
     lines.append(f"  近5日涨幅: {ret_etf_5d*100:+.2f}% | 沪深300同期: {ret_macro_5d*100:+.2f}% {'✅ 跑赢' if ret_etf_5d > ret_macro_5d else '❌ 跑输'}")
     lines.append(f"  MACD: {'✅ 金叉' if macd_golden else '❌ 非金叉'} | KDJ: {'✅ 金叉' if kdj_golden else '❌ 非金叉'}")
@@ -366,14 +377,12 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
     if not can_sell:
         lines.append(f"  ⏳ 卖出冷静期: 上次买入距今 {days_since_buy if pd.notna(buy_date) else 'N/A'}天")
 
-    signal = None  # 信号字典
+    signal = None
 
     # ========== 卖出信号（持仓时） ==========
     if shares > 0:
         ret = (real_price - cost) / cost
-        lines.append(
-            f"  持仓: {shares}份 | 成本: {cost:.3f} | 收益率: {ret*100:+.2f}%"
-        )  # 保留原有持仓行
+        lines.append(f"  持仓: {shares}份 | 成本: {cost:.3f} | 收益率: {ret*100:+.2f}%")
 
         # 计算自买入以来的最高价（用于移动止盈）
         if pd.notna(buy_date):
@@ -395,9 +404,31 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                 new_shares = 0
                 new_cost = 0.0
                 new_tp_level = 0.0
+                sell_pct = 100.0
+                new_row = {
+                    "代码": code,
+                    "名称": name,
+                    "份额": new_shares,
+                    "成本": new_cost,
+                    "止盈档位": new_tp_level,
+                    "买入日期": "",
+                    "满仓金额": full_amount,
+                    "上次买入日期": (
+                        last_buy_date.strftime("%Y-%m-%d")
+                        if pd.notna(last_buy_date)
+                        else ""
+                    ),
+                    "上次卖出日期": today.strftime("%Y-%m-%d"),
+                }
                 signal = {
-                    'action': 'SELL', 'reason': '硬止损', 'shares': shares,
-                    'new_shares': new_shares, 'new_cost': new_cost, 'new_tp_level': new_tp_level
+                    "action": "SELL",
+                    "reason": "硬止损",
+                    "shares": shares,
+                    "sell_pct": sell_pct,
+                    "new_shares": new_shares,
+                    "new_cost": new_cost,
+                    "new_tp_level": new_tp_level,
+                    "new_row": new_row,
                 }
                 lines.append(f"  🔴  建议卖出全部 {shares}份 (硬止损)")
                 lines.append(f"     执行后: 份额 0, 成本 0, 止盈档位 0")
@@ -409,9 +440,31 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                 new_shares = 0
                 new_cost = 0.0
                 new_tp_level = 0.0
+                sell_pct = 100.0
+                new_row = {
+                    "代码": code,
+                    "名称": name,
+                    "份额": new_shares,
+                    "成本": new_cost,
+                    "止盈档位": new_tp_level,
+                    "买入日期": "",
+                    "满仓金额": full_amount,
+                    "上次买入日期": (
+                        last_buy_date.strftime("%Y-%m-%d")
+                        if pd.notna(last_buy_date)
+                        else ""
+                    ),
+                    "上次卖出日期": today.strftime("%Y-%m-%d"),
+                }
                 signal = {
-                    'action': 'SELL', 'reason': '移动止盈', 'shares': shares,
-                    'new_shares': new_shares, 'new_cost': new_cost, 'new_tp_level': new_tp_level
+                    "action": "SELL",
+                    "reason": "移动止盈",
+                    "shares": shares,
+                    "sell_pct": sell_pct,
+                    "new_shares": new_shares,
+                    "new_cost": new_cost,
+                    "new_tp_level": new_tp_level,
+                    "new_row": new_row,
                 }
                 lines.append(f"  🟡  建议卖出全部 {shares}份 (移动止盈)")
                 lines.append(f"     执行后: 份额 0, 成本 0, 止盈档位 0")
@@ -423,9 +476,31 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                 new_shares = 0
                 new_cost = 0.0
                 new_tp_level = 0.0
+                sell_pct = 100.0
+                new_row = {
+                    "代码": code,
+                    "名称": name,
+                    "份额": new_shares,
+                    "成本": new_cost,
+                    "止盈档位": new_tp_level,
+                    "买入日期": "",
+                    "满仓金额": full_amount,
+                    "上次买入日期": (
+                        last_buy_date.strftime("%Y-%m-%d")
+                        if pd.notna(last_buy_date)
+                        else ""
+                    ),
+                    "上次卖出日期": today.strftime("%Y-%m-%d"),
+                }
                 signal = {
-                    'action': 'SELL', 'reason': '跌破20日线', 'shares': shares,
-                    'new_shares': new_shares, 'new_cost': new_cost, 'new_tp_level': new_tp_level
+                    "action": "SELL",
+                    "reason": "跌破20日线",
+                    "shares": shares,
+                    "sell_pct": sell_pct,
+                    "new_shares": new_shares,
+                    "new_cost": new_cost,
+                    "new_tp_level": new_tp_level,
+                    "new_row": new_row,
                 }
                 lines.append(f"  🔴  建议卖出全部 {shares}份 (跌破20日线)")
                 lines.append(f"     执行后: 份额 0, 成本 0, 止盈档位 0")
@@ -443,9 +518,35 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                         new_shares = shares - sell_shares
                         new_cost = cost  # 部分卖出成本不变
                         new_tp_level = target
+                        sell_pct = (sell_shares / shares) * 100
+                        new_row = {
+                            "代码": code,
+                            "名称": name,
+                            "份额": new_shares,
+                            "成本": new_cost,
+                            "止盈档位": new_tp_level,
+                            "买入日期": (
+                                buy_date.strftime("%Y-%m-%d")
+                                if pd.notna(buy_date)
+                                else ""
+                            ),
+                            "满仓金额": full_amount,
+                            "上次买入日期": (
+                                last_buy_date.strftime("%Y-%m-%d")
+                                if pd.notna(last_buy_date)
+                                else ""
+                            ),
+                            "上次卖出日期": today.strftime("%Y-%m-%d"),
+                        }
                         signal = {
-                            'action': 'SELL', 'reason': f'止盈{int(target*100)}%', 'shares': sell_shares,
-                            'new_shares': new_shares, 'new_cost': new_cost, 'new_tp_level': new_tp_level
+                            "action": "SELL",
+                            "reason": f"止盈{int(target*100)}%",
+                            "shares": sell_shares,
+                            "sell_pct": sell_pct,
+                            "new_shares": new_shares,
+                            "new_cost": new_cost,
+                            "new_tp_level": new_tp_level,
+                            "new_row": new_row,
                         }
                         lines.append(f"  🟢  建议卖出 {sell_shares}份 (止盈{int(target*100)}%)")
                         lines.append(f"     执行后: 份额 {new_shares}, 成本 {new_cost:.3f}, 止盈档位 {new_tp_level*100:.0f}%")
@@ -481,11 +582,33 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
                         new_shares = shares + suggested_shares
                         total_cost = shares * cost + suggested_shares * real_price
                         new_cost = total_cost / new_shares if new_shares > 0 else 0
-                        new_tp_level = 0.0  # 重置止盈档位
+                        new_tp_level = 0.0
+                        buy_pct_after = (new_shares * real_price / full_amount) * 100
+                        new_row = {
+                            "代码": code,
+                            "名称": name,
+                            "份额": new_shares,
+                            "成本": new_cost,
+                            "止盈档位": new_tp_level,
+                            "买入日期": today.strftime("%Y-%m-%d"),
+                            "满仓金额": full_amount,
+                            "上次买入日期": today.strftime("%Y-%m-%d"),
+                            "上次卖出日期": (
+                                last_sell_date.strftime("%Y-%m-%d")
+                                if pd.notna(last_sell_date)
+                                else ""
+                            ),
+                        }
                         signal = {
-                            'action': 'BUY', 'reason': f'评分{score:.2f}宏观{macro_status}情绪{score:.2f}',
-                            'shares': suggested_shares, 'price': real_price,
-                            'new_shares': new_shares, 'new_cost': new_cost, 'new_tp_level': new_tp_level
+                            "action": "BUY",
+                            "reason": f"评分{score:.2f}宏观{macro_status}情绪{score:.2f}",
+                            "shares": suggested_shares,
+                            "price": real_price,
+                            "buy_pct_after": buy_pct_after,
+                            "new_shares": new_shares,
+                            "new_cost": new_cost,
+                            "new_tp_level": new_tp_level,
+                            "new_row": new_row,
                         }
                         lines.append(f"  🟢 建议买入 {suggested_shares}份 (目标仓位，剩余资金允许)")
                         lines.append(f"     执行后: 份额 {new_shares}, 成本 {new_cost:.3f}, 止盈档位 0%")
@@ -499,8 +622,14 @@ def analyze_etf(row, macro_status, macro_position_limit, sentiment_factor,
             else:
                 # 无满仓金额限制，只提示，不计算具体份额
                 signal = {
-                    'action': 'BUY', 'reason': f'评分{score:.2f}', 'shares': None, 'price': real_price,
-                    'new_shares': None, 'new_cost': None, 'new_tp_level': None
+                    "action": "BUY",
+                    "reason": f"评分{score:.2f}",
+                    "shares": None,
+                    "price": real_price,
+                    "new_shares": None,
+                    "new_cost": None,
+                    "new_tp_level": None,
+                    "new_row": None,
                 }
                 lines.append("  🟢 建议买入 (请根据资金自行决定数量)")
         else:
@@ -601,16 +730,63 @@ def main():
         if not signals:
             print("无操作建议")
         else:
-            for sig in signals:
+            for i, sig in enumerate(signals):
+                if i > 0:
+                    print("\n****")  # ETF之间用 **** 分隔
+
                 if sig['action'] == 'BUY':
                     if sig['shares'] is not None:
-                        print(f"买入 {sig['name']} ({sig['code']}) - 原因：{sig['reason']}，建议买入 {sig['shares']}份，现价：{sig['price']:.3f}")
+                        # 显示买入份额，并附上执行后仓位占满仓金额的百分比
+                        pct_info = (
+                            f" (执行后占满仓金额 {sig['buy_pct_after']:.1f}%)"
+                            if "buy_pct_after" in sig
+                            else ""
+                        )
+                        print(
+                            f"买入 {sig['name']} ({sig['code']}) - 原因：{sig['reason']}，建议买入 {sig['shares']}份{pct_info}，现价：{sig['price']:.3f}"
+                        )
                         print(f"  执行后: 份额 {sig['new_shares']}, 成本 {sig['new_cost']:.3f}, 止盈档位 0%")
+                        # 输出更新后的CSV行
+                        if sig["new_row"]:
+                            row_str = ",".join(
+                                [
+                                    sig["new_row"]["代码"],
+                                    sig["new_row"]["名称"],
+                                    str(sig["new_row"]["份额"]),
+                                    f"{sig['new_row']['成本']:.3f}",
+                                    str(sig["new_row"]["止盈档位"]),
+                                    sig["new_row"]["买入日期"],
+                                    str(sig["new_row"]["满仓金额"]),
+                                    sig["new_row"]["上次买入日期"],
+                                    sig["new_row"]["上次卖出日期"],
+                                ]
+                            )
+                            print(f"  CSV更新: {row_str}")
                     else:
                         print(f"买入 {sig['name']} ({sig['code']}) - 原因：{sig['reason']}，现价：{sig['price']:.3f}（请自行决定数量）")
-                else:
-                    print(f"卖出 {sig['name']} ({sig['code']}) - 原因：{sig['reason']}，建议卖出 {sig['shares']}份")
+                else:  # SELL
+                    # 显示卖出百分比和份额
+                    pct_display = f"{sig['sell_pct']:.0f}%" if "sell_pct" in sig else ""
+                    print(
+                        f"卖出 {sig['name']} ({sig['code']}) - 原因：{sig['reason']}，建议卖出 {pct_display} ({sig['shares']}份)"
+                    )
                     print(f"  执行后: 份额 {sig['new_shares']}, 成本 {sig['new_cost']:.3f}, 止盈档位 {sig['new_tp_level']*100:.0f}%")
+                    # 输出更新后的CSV行
+                    if sig["new_row"]:
+                        row_str = ",".join(
+                            [
+                                sig["new_row"]["代码"],
+                                sig["new_row"]["名称"],
+                                str(sig["new_row"]["份额"]),
+                                f"{sig['new_row']['成本']:.3f}",
+                                str(sig["new_row"]["止盈档位"]),
+                                sig["new_row"]["买入日期"],
+                                str(sig["new_row"]["满仓金额"]),
+                                sig["new_row"]["上次买入日期"],
+                                sig["new_row"]["上次卖出日期"],
+                            ]
+                        )
+                        print(f"  CSV更新: {row_str}")
 
     except Exception as e:
         print(f"程序出错: {e}")
