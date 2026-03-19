@@ -1,0 +1,12 @@
+{
+	"CodeFree.index": true,
+	"CodeFree.ignoreFileType": [
+		".so",
+		".cache",
+		".exe",
+		".dll",
+		".log"
+	],
+	"python.formatting.provider": "black",
+	"editor.formatOnSave": true
+}
