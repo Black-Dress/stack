@@ -460,30 +460,36 @@ def analyze_etf(
     # 检查止盈止损（优先级最高）
     sell_ratio, stop_reason = check_stop_profit(real_price, hist_df)
 
-    # 生成输出行
+    # 构建简化输出行
     lines = [f"【{name} ({code})】"]
-    lines.append(f"  实时价格: {real_price:.3f} | 20日均线: {ma20:.3f}")
-    lines.append(f"  成交量: {volume:.0f} | 5日均量: {vol_ma:.0f}")
+
+    # 价格与成交量行
+    vol_m = volume / 1e6
+    vol_ma_m = vol_ma / 1e6
     lines.append(
-        f"  MACD: {'金叉' if macd_golden else '非金叉'} | KDJ: {'金叉' if kdj_golden else '非金叉'} | RSI: {rsi:.1f}"
+        f"  价格:{real_price:.3f} | 20日线:{ma20:.3f} | 量:{vol_m:.2f}M/5日均:{vol_ma_m:.2f}M"
     )
+
+    # 技术指标行
+    macd_symbol = "✓" if macd_golden else "✗"
+    kdj_symbol = "✓" if kdj_golden else "✗"
     lines.append(
-        f"  布林带: 上轨 {boll_up:.3f} 下轨 {boll_low:.3f} | 威廉: {williams_r:.1f}"
+        f"  MACD:{macd_symbol} KDJ:{kdj_symbol} RSI:{rsi:.1f} | 布林:{boll_up:.3f}/{boll_low:.3f} | 威廉:{williams_r:.1f}"
     )
+
+    # 大盘状态与评分行
     lines.append(
-        f"  大盘状态: {macro_status} (因子{market_factor:.2f}) | 情绪系数: {sentiment_factor:.2f}"
+        f"  大盘:{macro_status}({market_factor:.2f}) 情绪:{sentiment_factor:.2f} | 最终评分:{final_score:.2f} | 仓位建议:{target_position*100:.0f}%"
     )
-    lines.append(f"  基础评分: {base_score:.2f} | 最终评分: {final_score:.2f}")
-    lines.append(f"  建议买入仓位比例: {target_position*100:.0f}%")
 
     signal = None
 
     if sell_ratio > 0:
         # 止盈止损信号
         if sell_ratio >= 1.0:
-            lines.append(f"  🔴 建议清仓（空仓） ({stop_reason})")
+            lines.append(f"  🔴 清仓:{stop_reason}")
         else:
-            lines.append(f"  🟡 建议卖出 {sell_ratio*100:.0f}% 持仓 ({stop_reason})")
+            lines.append(f"  🟡 卖出{sell_ratio*100:.0f}%:{stop_reason}")
         signal = {
             "action": "SELL",
             "ratio": sell_ratio,
@@ -496,19 +502,15 @@ def analyze_etf(
             recent_scores = [item["score"] for item in state["score_history"]]
             if all(s > BUY_THRESHOLD for s in recent_scores):
                 lines.append(
-                    f"  🟢 建议买入 (连续{CONFIRM_DAYS}天评分 > {BUY_THRESHOLD})"
+                    f"  🟢 买入{target_position*100:.0f}%:连续{CONFIRM_DAYS}天>{BUY_THRESHOLD}"
                 )
-                lines.append(f"     建议仓位比例: {target_position*100:.0f}%")
                 signal = {
                     "action": "BUY",
                     "ratio": target_position,
                     "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}",
                 }
             elif all(s < SELL_THRESHOLD for s in recent_scores):
-                lines.append(
-                    f"  🔴 建议卖出部分或全部 (连续{CONFIRM_DAYS}天评分 < {SELL_THRESHOLD})"
-                )
-                lines.append(f"     建议减仓比例: 50% (可根据风险调整)")
+                lines.append(f"  🔴 卖出50%:连续{CONFIRM_DAYS}天<{SELL_THRESHOLD}")
                 signal = {
                     "action": "SELL",
                     "ratio": 0.5,
@@ -516,11 +518,9 @@ def analyze_etf(
                     "is_clear": False,
                 }
             else:
-                lines.append("  ⚪ 建议观望（可根据现有持仓决定持有或空仓）")
+                lines.append("  ⚪ 观望")
         else:
-            lines.append(
-                f"  ⚪ 信号确认中（还需{CONFIRM_DAYS - len(state['score_history'])}天）"
-            )
+            lines.append(f"  ⚪ 确认中({len(state['score_history'])}/{CONFIRM_DAYS})")
 
     return "\n".join(lines), signal, state
 
