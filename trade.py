@@ -512,7 +512,7 @@ def analyze_etf(
         elif last_score < SELL_THRESHOLD:
             lines.append(f"  🔴 偏卖出确认中({days_sofar}/{CONFIRM_DAYS})")
         else:
-            lines.append(f"  ⚪ 中性确认中({days_sofar}/{CONFIRM_DAYS})")
+            lines.append(f"  ⚪ 中性，建议观望")
 
     return "\n".join(lines), signal, state
 
