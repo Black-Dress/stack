@@ -35,6 +35,11 @@ STRATEGY_WEIGHTS = {
     "market_amount_above_ma20": 0.10,  # 市场成交额高于20日均额
     "outperform_market": 0.20,  # 近5日跑赢大盘
     "underperform_market": -0.20,  # 近5日跑输大盘
+    # 止盈止损条件
+    "stop_loss_ma_break": -1.00,  # 跌破20日均线（清仓级别）
+    "trailing_stop_clear": -1.00,  # 从高点回撤超过8%（清仓级别）
+    "trailing_stop_half": -0.50,  # 从高点回撤超过5%（减半仓级别）
+    "profit_target_hit": -0.30,  # 达到涨幅目标（卖出部分）
 }
 
 # 仓位档位（0.2, 0.4, 0.6, 0.8, 1.0）
@@ -42,8 +47,9 @@ POSITION_LEVELS = [0.2, 0.4, 0.6, 0.8, 1.0]
 
 # 止盈止损参数（基于价格形态）
 STOP_LOSS_MA = 20  # 跌破该均线建议清仓
-TRAILING_STOP = 0.05  # 移动止盈回撤阈值（从近期高点回撤5%建议减半仓，回撤8%建议清仓）
-PROFIT_TARGETS = [0.20, 0.40]  # 从近期低点上涨20%、40%时建议卖出部分
+TRAILING_STOP_HALF = 0.05  # 从近期高点回撤5%建议减半仓
+TRAILING_STOP_CLEAR = 0.08  # 从近期高点回撤8%建议清仓
+PROFIT_TARGETS = [(0.20, 0.3), (0.40, 0.3)]  # (涨幅阈值, 卖出比例)
 
 # 信号确认周期（连续N天评分全部满足条件才触发）
 CONFIRM_DAYS = 3
@@ -56,6 +62,10 @@ MARKET_STATES = {
     "oscillate": 1.0,  # 震荡市：不变
     "bear": 0.8,  # 熊市：评分打8折
 }
+
+# 近期高点和低点回溯窗口
+RECENT_HIGH_WINDOW = 10
+RECENT_LOW_WINDOW = 20
 
 POSITION_FILE = "positions.csv"  # ETF列表文件，只需包含代码和名称两列
 STATE_FILE = "etf_state.json"  # 用于存储评分历史的JSON文件
@@ -163,7 +173,6 @@ def calculate_indicators(df, ma_short=20, vol_ma=5):
 def get_realtime_price_sina(code):
     """备用新浪接口"""
     try:
-        # 尝试不同的新浪接口域名
         domains = ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]
         for domain in domains:
             sina_code = code.replace(".", "")
@@ -277,8 +286,13 @@ def calculate_score(
     market_amount_above_ma20,
     ret_etf_5d,
     ret_market_5d,
+    # 止盈止损条件
+    break_ma,
+    trailing_half,
+    trailing_clear,
+    profit_hit,
 ):
-    """计算基础评分"""
+    """计算基础评分（包含止盈止损条件）"""
     score = 0.0
 
     # ETF自身指标
@@ -315,6 +329,16 @@ def calculate_score(
     else:
         score += STRATEGY_WEIGHTS["underperform_market"]
 
+    # 止盈止损条件
+    if break_ma:
+        score += STRATEGY_WEIGHTS["stop_loss_ma_break"]
+    if trailing_clear:
+        score += STRATEGY_WEIGHTS["trailing_stop_clear"]
+    elif trailing_half:  # 如果 clear 已触发，half 不再计入
+        score += STRATEGY_WEIGHTS["trailing_stop_half"]
+    if profit_hit:
+        score += STRATEGY_WEIGHTS["profit_target_hit"]
+
     return score
 
 
@@ -332,38 +356,6 @@ def map_score_to_position(score):
         return 0.2
     else:
         return 0.0
-
-
-def check_stop_profit(real_price, hist_df):
-    """基于价格形态检查止盈止损，返回建议卖出比例（0~1）和原因"""
-    if hist_df is None or len(hist_df) < 20:
-        return 0.0, "数据不足"
-
-    latest = hist_df.iloc[-1]
-    ma20 = latest["ma_short"]
-    recent_high = hist_df["high"].rolling(window=10).max().iloc[-1]
-    recent_low = hist_df["low"].rolling(window=20).min().iloc[-1]
-
-    # 1. 跌破20日均线 -> 清仓
-    if real_price < ma20:
-        return 1.0, "跌破20日均线"
-
-    # 2. 移动止盈：从近期高点回撤
-    drawdown = (recent_high - real_price) / recent_high if recent_high > 0 else 0
-    if drawdown >= 0.08:
-        return 1.0, f"从高点回撤{drawdown:.1%}，触发清仓"
-    elif drawdown >= 0.05:
-        return 0.5, f"从高点回撤{drawdown:.1%}，建议减半仓"
-
-    # 3. 分批止盈：从近期低点上涨
-    if recent_low > 0:
-        gain = (real_price - recent_low) / recent_low
-        if gain >= 0.40:
-            return 0.3, f"从低点上涨{gain:.1%}，建议卖出30%"
-        elif gain >= 0.20:
-            return 0.3, f"从低点上涨{gain:.1%}，建议卖出30%"
-
-    return 0.0, "无止盈止损信号"
 
 
 def analyze_etf(
@@ -418,7 +410,19 @@ def analyze_etf(
     else:
         ret_etf_5d = 0
 
-    # 计算基础评分
+    # 计算近期高点和低点（用于止盈止损条件）
+    recent_high = hist_df["high"].rolling(window=RECENT_HIGH_WINDOW).max().iloc[-1]
+    recent_low = hist_df["low"].rolling(window=RECENT_LOW_WINDOW).min().iloc[-1]
+    drawdown = (recent_high - real_price) / recent_high if recent_high > 0 else 0
+    gain = (real_price - recent_low) / recent_low if recent_low > 0 else 0
+
+    # 止盈止损条件布尔值
+    break_ma = real_price < ma20
+    trailing_clear = drawdown >= TRAILING_STOP_CLEAR
+    trailing_half = drawdown >= TRAILING_STOP_HALF and not trailing_clear
+    profit_hit = any(gain >= threshold for threshold, _ in PROFIT_TARGETS)
+
+    # 计算基础评分（传入止盈止损条件）
     base_score = calculate_score(
         real_price,
         ma20,
@@ -435,6 +439,10 @@ def analyze_etf(
         market_amount_above_ma20,
         ret_etf_5d,
         ret_market_5d,
+        break_ma,
+        trailing_half,
+        trailing_clear,
+        profit_hit,
     )
     final_score = base_score * market_factor * sentiment_factor
     target_position = map_score_to_position(final_score)
@@ -443,7 +451,6 @@ def analyze_etf(
     today_str = today.strftime("%Y-%m-%d")
     if "score_history" not in state:
         state["score_history"] = []
-    # 如果今天已有记录，则替换；否则追加
     found = False
     for item in state["score_history"]:
         if item.get("date") == today_str:
@@ -452,75 +459,60 @@ def analyze_etf(
             break
     if not found:
         state["score_history"].append({"date": today_str, "score": final_score})
-    # 按日期排序，并只保留最近 CONFIRM_DAYS 天
     state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])
     if len(state["score_history"]) > CONFIRM_DAYS:
         state["score_history"] = state["score_history"][-CONFIRM_DAYS:]
 
-    # 检查止盈止损（优先级最高）
-    sell_ratio, stop_reason = check_stop_profit(real_price, hist_df)
-
     # 构建简化输出行
     lines = [f"【{name} ({code})】"]
-
-    # 价格与成交量行
     vol_m = volume / 1e6
     vol_ma_m = vol_ma / 1e6
     lines.append(
         f"  价格:{real_price:.3f} | 20日线:{ma20:.3f} | 量:{vol_m:.2f}M/5日均:{vol_ma_m:.2f}M"
     )
-
-    # 技术指标行
     macd_symbol = "✓" if macd_golden else "✗"
     kdj_symbol = "✓" if kdj_golden else "✗"
     lines.append(
         f"  MACD:{macd_symbol} KDJ:{kdj_symbol} RSI:{rsi:.1f} | 布林:{boll_up:.3f}/{boll_low:.3f} | 威廉:{williams_r:.1f}"
     )
-
-    # 大盘状态与评分行
     lines.append(
         f"  大盘:{macro_status}({market_factor:.2f}) 情绪:{sentiment_factor:.2f} | 最终评分:{final_score:.2f} | 仓位建议:{target_position*100:.0f}%"
     )
 
     signal = None
 
-    if sell_ratio > 0:
-        # 止盈止损信号
-        if sell_ratio >= 1.0:
-            lines.append(f"  🔴 清仓:{stop_reason}")
+    # 信号确认：检查最近 CONFIRM_DAYS 天的评分是否全部满足条件
+    if len(state["score_history"]) >= CONFIRM_DAYS:
+        recent_scores = [item["score"] for item in state["score_history"]]
+        if all(s > BUY_THRESHOLD for s in recent_scores):
+            lines.append(
+                f"  🟢 买入{target_position*100:.0f}%:连续{CONFIRM_DAYS}天>{BUY_THRESHOLD}"
+            )
+            signal = {
+                "action": "BUY",
+                "ratio": target_position,
+                "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}",
+            }
+        elif all(s < SELL_THRESHOLD for s in recent_scores):
+            lines.append(f"  🔴 卖出50%:连续{CONFIRM_DAYS}天<{SELL_THRESHOLD}")
+            signal = {
+                "action": "SELL",
+                "ratio": 0.5,
+                "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}",
+                "is_clear": False,
+            }
         else:
-            lines.append(f"  🟡 卖出{sell_ratio*100:.0f}%:{stop_reason}")
-        signal = {
-            "action": "SELL",
-            "ratio": sell_ratio,
-            "reason": stop_reason,
-            "is_clear": sell_ratio >= 1.0,
-        }
+            lines.append("  ⚪ 观望")
     else:
-        # 信号确认：检查最近 CONFIRM_DAYS 天的评分是否全部满足条件
-        if len(state["score_history"]) >= CONFIRM_DAYS:
-            recent_scores = [item["score"] for item in state["score_history"]]
-            if all(s > BUY_THRESHOLD for s in recent_scores):
-                lines.append(
-                    f"  🟢 买入{target_position*100:.0f}%:连续{CONFIRM_DAYS}天>{BUY_THRESHOLD}"
-                )
-                signal = {
-                    "action": "BUY",
-                    "ratio": target_position,
-                    "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}",
-                }
-            elif all(s < SELL_THRESHOLD for s in recent_scores):
-                lines.append(f"  🔴 卖出50%:连续{CONFIRM_DAYS}天<{SELL_THRESHOLD}")
-                signal = {
-                    "action": "SELL",
-                    "ratio": 0.5,
-                    "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}",
-                    "is_clear": False,
-                }
-            else:
-                lines.append("  ⚪ 观望")
+        # 确认中，细化显示倾向
+        days_sofar = len(state["score_history"])
+        last_score = state["score_history"][-1]["score"]
+        if last_score > BUY_THRESHOLD:
+            lines.append(f"  🟢 偏买入确认中({days_sofar}/{CONFIRM_DAYS})")
+        elif last_score < SELL_THRESHOLD:
+            lines.append(f"  🔴 偏卖出确认中({days_sofar}/{CONFIRM_DAYS})")
         else:
-            lines.append(f"  ⚪ 确认中({len(state['score_history'])}/{CONFIRM_DAYS})")
+            lines.append(f"  ⚪ 中性确认中({days_sofar}/{CONFIRM_DAYS})")
 
     return "\n".join(lines), signal, state
 
@@ -536,7 +528,6 @@ def main():
 
         # 加载JSON状态
         all_state = load_state()
-        # 确保每个ETF在状态中有条目
         for _, row in etf_list.iterrows():
             code = row["代码"]
             if code not in all_state:
@@ -555,7 +546,7 @@ def main():
         if market_df is None or market_df.empty:
             print("无法获取大盘指数数据")
             return
-        market_df = calculate_indicators(market_df, ma_short=20, vol_ma=20)  # 20日均额
+        market_df = calculate_indicators(market_df, ma_short=20, vol_ma=20)
 
         # 宏观状态和因子
         macro_status, market_factor = get_macro_status(macro_df)
@@ -572,7 +563,6 @@ def main():
         market_amount_ma20 = market_latest["amount_ma"]
         market_amount_above_ma20 = market_amount > market_amount_ma20
 
-        # 大盘近5日涨幅
         if len(market_df) >= 5:
             ret_market_5d = (market_close / market_df.iloc[-5]["close"]) - 1
         else:
@@ -606,7 +596,6 @@ def main():
 
         signals = []
 
-        # 逐个分析
         for idx, row in etf_list.iterrows():
             code = row["代码"]
             name = row["名称"]
@@ -632,8 +621,28 @@ def main():
             if signal:
                 signals.append({**signal, "code": code, "name": name})
 
-        # 保存更新后的状态
         save_state(all_state)
+
+        if signals:
+            print("\n" + "=" * 70)
+            print("操作信号汇总")
+            print("=" * 70)
+            for sig in signals:
+                if sig["action"] == "BUY":
+                    print(
+                        f"买入 {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
+                    )
+                else:
+                    if sig.get("is_clear"):
+                        print(
+                            f"清仓 {sig['name']} ({sig['code']}) - 建议卖出全部持仓 (原因: {sig['reason']})"
+                        )
+                    else:
+                        print(
+                            f"卖出 {sig['name']} ({sig['code']}) - 建议卖出比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
+                        )
+        else:
+            print("\n⚪ 无操作信号，所有ETF建议观望")
 
     except Exception as e:
         print(f"程序出错: {e}")
