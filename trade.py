@@ -183,11 +183,9 @@ def get_realtime_price_sina(code):
 def get_realtime_index_sina(code="sh000001"):
     """备用新浪接口"""
     try:
-        # 尝试不同的新浪接口域名
         domains = ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]
         for domain in domains:
-            sina_code = code.replace(".", "")
-            url = f"http://{domain}/list={sina_code}"
+            url = f"http://{domain}/list={code}"
             headers = {"Referer": "http://finance.sina.com.cn"}
             r = requests.get(url, headers=headers, timeout=3)
             if r.status_code == 200:
@@ -211,10 +209,19 @@ def load_positions():
 
 
 def load_state():
-    """加载JSON状态文件，返回字典（只包含评分历史）"""
+    """加载JSON状态文件，返回字典（评分历史为带日期的列表）"""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # 兼容旧格式：如果发现列表内是数值，则清空（无法追溯日期）
+        for code, value in data.items():
+            if isinstance(value, dict) and "score_history" in value:
+                if value["score_history"] and all(
+                    isinstance(x, (int, float)) for x in value["score_history"]
+                ):
+                    print(f"检测到旧版评分历史（无日期），已重置 {code} 的评分。")
+                    value["score_history"] = []
+        return data
     return {}
 
 
@@ -375,7 +382,7 @@ def analyze_etf(
 ):
     """
     分析单个ETF，生成状态字符串和操作建议
-    state: 该ETF的状态字典，仅包含 score_history（历史评分）
+    state: 该ETF的状态字典，包含 score_history（列表，元素为 {"date": str, "score": float}）
     """
     real_price = get_realtime_price_sina(code)
     if real_price is None:
@@ -432,10 +439,21 @@ def analyze_etf(
     final_score = base_score * market_factor * sentiment_factor
     target_position = map_score_to_position(final_score)
 
-    # 更新状态中的评分历史（追加今天评分，并保持最近CONFIRM_DAYS天）
+    # 更新带日期的评分历史
+    today_str = today.strftime("%Y-%m-%d")
     if "score_history" not in state:
         state["score_history"] = []
-    state["score_history"].append(final_score)
+    # 如果今天已有记录，则替换；否则追加
+    found = False
+    for item in state["score_history"]:
+        if item.get("date") == today_str:
+            item["score"] = final_score
+            found = True
+            break
+    if not found:
+        state["score_history"].append({"date": today_str, "score": final_score})
+    # 按日期排序，并只保留最近 CONFIRM_DAYS 天
+    state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])
     if len(state["score_history"]) > CONFIRM_DAYS:
         state["score_history"] = state["score_history"][-CONFIRM_DAYS:]
 
@@ -473,9 +491,9 @@ def analyze_etf(
             "is_clear": sell_ratio >= 1.0,
         }
     else:
-        # 信号确认：检查最近三天的评分是否全部满足条件
+        # 信号确认：检查最近 CONFIRM_DAYS 天的评分是否全部满足条件
         if len(state["score_history"]) >= CONFIRM_DAYS:
-            recent_scores = state["score_history"][-CONFIRM_DAYS:]  # 最近三天的评分
+            recent_scores = [item["score"] for item in state["score_history"]]
             if all(s > BUY_THRESHOLD for s in recent_scores):
                 lines.append(
                     f"  🟢 建议买入 (连续{CONFIRM_DAYS}天评分 > {BUY_THRESHOLD})"
@@ -617,27 +635,27 @@ def main():
         # 保存更新后的状态
         save_state(all_state)
 
-        ## 输出信号汇总
-        # if signals:
-        #    print("\n" + "=" * 70)
-        #    print("操作信号汇总")
-        #    print("=" * 70)
-        #    for sig in signals:
-        #        if sig['action'] == 'BUY':
-        #            print(
-        #                f"买入 {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
-        #            )
-        #        else:
-        #            if sig.get("is_clear"):
-        #                print(
-        #                    f"清仓 {sig['name']} ({sig['code']}) - 建议卖出全部持仓 (原因: {sig['reason']})"
-        #                )
-        #            else:
-        #                print(
-        #                    f"卖出 {sig['name']} ({sig['code']}) - 建议卖出比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
-        #                )
-        # else:
-        #    print("\n⚪ 无操作信号，所有ETF建议观望")
+        # 输出信号汇总
+        if signals:
+            print("\n" + "=" * 70)
+            print("操作信号汇总")
+            print("=" * 70)
+            for sig in signals:
+                if sig["action"] == "BUY":
+                    print(
+                        f"买入 {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
+                    )
+                else:
+                    if sig.get("is_clear"):
+                        print(
+                            f"清仓 {sig['name']} ({sig['code']}) - 建议卖出全部持仓 (原因: {sig['reason']})"
+                        )
+                    else:
+                        print(
+                            f"卖出 {sig['name']} ({sig['code']}) - 建议卖出比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
+                        )
+        else:
+            print("\n⚪ 无操作信号，所有ETF建议观望")
 
     except Exception as e:
         print(f"程序出错: {e}")
