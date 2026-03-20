@@ -635,28 +635,6 @@ def main():
         # 保存更新后的状态
         save_state(all_state)
 
-        # 输出信号汇总
-        if signals:
-            print("\n" + "=" * 70)
-            print("操作信号汇总")
-            print("=" * 70)
-            for sig in signals:
-                if sig["action"] == "BUY":
-                    print(
-                        f"买入 {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
-                    )
-                else:
-                    if sig.get("is_clear"):
-                        print(
-                            f"清仓 {sig['name']} ({sig['code']}) - 建议卖出全部持仓 (原因: {sig['reason']})"
-                        )
-                    else:
-                        print(
-                            f"卖出 {sig['name']} ({sig['code']}) - 建议卖出比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})"
-                        )
-        else:
-            print("\n⚪ 无操作信号，所有ETF建议观望")
-
     except Exception as e:
         print(f"程序出错: {e}")
     finally:
