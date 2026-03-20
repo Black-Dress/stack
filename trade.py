@@ -64,8 +64,8 @@ MARKET_STATES = {
 }
 
 # 近期高点和低点回溯窗口
-RECENT_HIGH_WINDOW = 10
-RECENT_LOW_WINDOW = 20
+RECENT_HIGH_WINDOW = 7
+RECENT_LOW_WINDOW = 14
 
 POSITION_FILE = "positions.csv"  # ETF列表文件，只需包含代码和名称两列
 STATE_FILE = "etf_state.json"  # 用于存储评分历史的JSON文件
