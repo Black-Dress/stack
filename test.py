@@ -1,54 +1,63 @@
-from contextlib import redirect_stdout
-import os
-import baostock as bs
 import akshare as ak
+import requests
+import json
 
-def silent_login():
-    """静默登录baostock"""
-    with open(os.devnull, 'w') as f, redirect_stdout(f):
-        lg = bs.login()
-    if lg.error_code != '0':
-        print(f'登录失败: {lg.error_msg}')
-        return False
-    return True
+def get_index_akshare(code="sh000001"):
+    """获取指数实时行情"""
+    try:
+        if code == "sh000001":
+            df = ak.stock_zh_index_daily(symbol="sh000001")
+        elif code == "sh000300":
+            df = ak.stock_zh_index_daily(symbol="sh000300")
+        if not df.empty:
+            return df.iloc[-1]["close"]
+        return None
+    except Exception as e:
+        print(f"AkShare请求失败: {e}")
+        return None
 
-def silent_logout():
-    """静默登出baostock"""
-    with open(os.devnull, 'w') as f, redirect_stdout(f):
-        bs.logout()
-        
-def get_etf_history_ak(code, start_date, end_date):
+def get_realtime_index_tencent(code='sh000001'):
     """
-    使用 akshare 获取 ETF 历史数据
-    code 格式：sh512480 或 512480
+    腾讯财经实时指数
+    code格式：sh000001 上证指数，sz399001 深证成指
     """
-    # 转换代码格式：akshare 通常使用 'sh512480' 或 'sz159915'
-    # 如果您的 code 是 'sh.512480'，需要转换为 'sh512480'
-    ak_code = code.replace('.', '')
-    df = ak.fund_etf_hist_em(symbol=ak_code, period="daily", 
-                              start_date=start_date.replace('-', ''),
-                              end_date=end_date.replace('-', ''),
-                              adjust="qfq")  # 前复权
-    return df
+    try:
+        url = f'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+        params = {
+            'param': f'{code},day,,,1',
+            '_var': 'kline_day'
+        }
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code == 200:
+            data = r.text
+            # 腾讯返回的是JSONP格式，需要解析
+            json_str = data.split('=')[1].strip(';')
+            json_data = json.loads(json_str)
+            if json_data['code'] == 0:
+                return float(json_data['data'][code]['day'][0][2])  # 最新价
+        return None
+    except Exception as e:
+        print(f"腾讯财经接口请求失败: {e}")
+        return None
 
-def main():
-    silent_login()
-    rs = bs.query_history_k_data_plus("sh.512480", "date,close", 
-                                   start_date="2025-01-01", 
-                                   end_date="2025-12-31")
-    if rs.error_code != '0':
-        print(f"错误: {rs.error_msg}")
-    else:
-        data_list = []
-        while (rs.error_code == '0') & rs.next():
-            data_list.append(rs.get_row_data())
-        if data_list:
-            print(f"获取到 {len(data_list)} 条记录")
-            for row in data_list[:5]:  # 打印前5条
-                print(row)
-        else:
-            print("没有获取到数据")
-            
-    silent_logout()
-if __name__ == '__main__':
-    main()
+def get_realtime_price_sina_fallback(code):
+    """备用新浪接口"""
+    try:
+        # 尝试不同的新浪接口域名
+        domains = ['hq.sinajs.cn', 'hq2.sinajs.cn', 'hq3.sinajs.cn']
+        for domain in domains:
+            sina_code = code.replace('.', '')
+            url = f'http://{domain}/list={sina_code}'
+            headers = {'Referer': 'http://finance.sina.com.cn'}
+            r = requests.get(url, headers=headers, timeout=3)
+            if r.status_code == 200:
+                data = r.text
+                parts = data.split('"')[1].split(',')
+                if len(parts) > 3 and parts[3]:
+                    return float(parts[3])
+        return None
+    except:
+        return None
+
+if __name__ == "__main__":
+    print(get_realtime_price_sina_fallback('sh000001'))
