@@ -62,9 +62,3 @@ RECENT_LOW_WINDOW = 20
 # ==================== 文件路径 ====================
 POSITION_FILE = "positions.csv"
 STATE_FILE = "etf_state.json"
-
-# ==================== 回测参数 ====================
-BACKTEST_START = "2024-01-01"
-BACKTEST_END = "2025-03-20"
-INITIAL_CAPITAL = 1000000
-MAX_SINGLE_POSITION = 0.2   # 单只ETF最大仓位比例
