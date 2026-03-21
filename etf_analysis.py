@@ -1,12 +1,77 @@
 # etf_analysis.py
-# 单个ETF分析逻辑
+# 单个ETF分析逻辑（优化版）
 
 import numpy as np
 from config import (
     STRATEGY_WEIGHTS, BUY_THRESHOLD, SELL_THRESHOLD, CONFIRM_DAYS,
     TRAILING_STOP_HALF, TRAILING_STOP_CLEAR, PROFIT_TARGETS,
-    RECENT_HIGH_WINDOW, RECENT_LOW_WINDOW
+    RECENT_HIGH_WINDOW, RECENT_LOW_WINDOW, ATR_PERIOD, ATR_STOP_MULT, ATR_TRAILING_MULT,
+    QUICK_BUY_THRESHOLD, RISK_WARNING_DAYS, RISK_WARNING_THRESHOLD,
+    WEEKLY_MA, WEEKLY_WEIGHT
 )
+
+def _get_recent_high_low(hist_df, row_idx):
+    if 'recent_high_10' in hist_df.columns and 'recent_low_20' in hist_df.columns:
+        return hist_df.iloc[row_idx]['recent_high_10'], hist_df.iloc[row_idx]['recent_low_20']
+    else:
+        high_series = hist_df['high'].rolling(window=RECENT_HIGH_WINDOW).max()
+        low_series = hist_df['low'].rolling(window=RECENT_LOW_WINDOW).min()
+        return high_series.iloc[row_idx], low_series.iloc[row_idx]
+
+def _check_signal_confirm(score_history, target_position):
+    if len(score_history) < CONFIRM_DAYS:
+        return None, None
+    recent_scores = [item["score"] for item in score_history]
+    if all(s > BUY_THRESHOLD for s in recent_scores):
+        return "BUY", {"action": "BUY", "ratio": target_position,
+                       "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}"}
+    elif all(s < SELL_THRESHOLD for s in recent_scores):
+        return "SELL", {"action": "SELL", "ratio": 0.5,
+                        "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}",
+                        "is_clear": False}
+    return None, None
+
+def _check_quick_signal(score_history, last_score):
+    """快速买入信号：最近两天评分连续上升且今天评分>QUICK_BUY_THRESHOLD"""
+    if len(score_history) >= 2:
+        prev_score = score_history[-2]["score"]
+        if last_score > prev_score and last_score > QUICK_BUY_THRESHOLD:
+            return True
+    return False
+
+def _check_risk_warning(score_history):
+    """风险提示：连续RISK_WARNING_DAYS天评分低于RISK_WARNING_THRESHOLD且未触发卖出"""
+    if len(score_history) >= RISK_WARNING_DAYS:
+        recent = [item["score"] for item in score_history[-RISK_WARNING_DAYS:]]
+        if all(s < RISK_WARNING_THRESHOLD for s in recent):
+            return True
+    return False
+
+def _format_output(name, code, real_price, ma20, volume, vol_ma,
+                   macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
+                   macro_status, market_factor, sentiment_factor,
+                   final_score, target_position, confirm_info, signal_info, risk_warning):
+    vol_m = volume / 1e6
+    vol_ma_m = vol_ma / 1e6
+    lines = [f"【{name} ({code})】"]
+    lines.append(f"  价格:{real_price:.3f} | 20日线:{ma20:.3f} | 量:{vol_m:.2f}M/5日均:{vol_ma_m:.2f}M")
+    macd_symbol = '✓' if macd_golden else '✗'
+    kdj_symbol = '✓' if kdj_golden else '✗'
+    lines.append(f"  MACD:{macd_symbol} KDJ:{kdj_symbol} RSI:{rsi:.1f} | 布林:{boll_up:.3f}/{boll_low:.3f} | 威廉:{williams_r:.1f}")
+    lines.append(f"  大盘:{macro_status}({market_factor:.2f}) 情绪:{sentiment_factor:.2f} | 最终评分:{final_score:.2f} | 仓位建议:{target_position*100:.0f}%")
+    if risk_warning:
+        lines.append(f"  ⚠️ 风险提示：连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}")
+    if signal_info:
+        lines.append(signal_info['text'])
+    else:
+        days, last_score = confirm_info['days'], confirm_info['last_score']
+        if last_score > BUY_THRESHOLD:
+            lines.append(f"  🟢 偏买入确认中({days}/{CONFIRM_DAYS})")
+        elif last_score < SELL_THRESHOLD:
+            lines.append(f"  🔴 偏卖出确认中({days}/{CONFIRM_DAYS})")
+        else:
+            lines.append(f"  ⚪ 中性确认中({days}/{CONFIRM_DAYS})")
+    return "\n".join(lines)
 
 def calculate_score(
     real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi,
@@ -14,57 +79,42 @@ def calculate_score(
     market_above_ma20, market_above_ma60, market_amount_above_ma20,
     ret_etf_5d, ret_market_5d,
     break_ma, trailing_half, trailing_clear, profit_hit,
+    weekly_above_ma, weekly_below_ma,
     weights=None
 ):
-    """计算基础评分，支持动态权重"""
     if weights is None:
         weights = STRATEGY_WEIGHTS
+
+    conditions = {
+        "price_above_ma20": real_price > ma20,
+        "volume_above_ma5": volume > vol_ma,
+        "macd_golden_cross": macd_golden,
+        "kdj_golden_cross": kdj_golden,
+        "bollinger_break_up": real_price > boll_up,
+        "williams_oversold": williams_r > 80,
+        "price_below_ma20": real_price < ma20,
+        "bollinger_break_down": real_price < boll_low,
+        "williams_overbought": williams_r < 20,
+        "rsi_overbought": rsi > 70,
+        "market_above_ma20": market_above_ma20,
+        "market_above_ma60": market_above_ma60,
+        "market_amount_above_ma20": market_amount_above_ma20,
+        "outperform_market": ret_etf_5d > ret_market_5d,
+        "underperform_market": not (ret_etf_5d > ret_market_5d),
+        "stop_loss_ma_break": break_ma,
+        "trailing_stop_clear": trailing_clear,
+        "trailing_stop_half": trailing_half,
+        "profit_target_hit": profit_hit,
+        "weekly_above_ma20": weekly_above_ma,
+        "weekly_below_ma20": weekly_below_ma,
+    }
     score = 0.0
-
-    # ETF自身指标
-    if real_price > ma20:
-        score += weights.get("price_above_ma20", 0)
-    if volume > vol_ma:
-        score += weights.get("volume_above_ma5", 0)
-    if macd_golden:
-        score += weights.get("macd_golden_cross", 0)
-    if kdj_golden:
-        score += weights.get("kdj_golden_cross", 0)
-    if real_price > boll_up:
-        score += weights.get("bollinger_break_up", 0)
-    if williams_r > 80:
-        score += weights.get("williams_oversold", 0)
-    if real_price < ma20:
-        score += weights.get("price_below_ma20", 0)
-    if real_price < boll_low:
-        score += weights.get("bollinger_break_down", 0)
-    if williams_r < 20:
-        score += weights.get("williams_overbought", 0)
-    if rsi > 70:
-        score += weights.get("rsi_overbought", 0)
-
-    # 大盘指标
-    if market_above_ma20:
-        score += weights.get("market_above_ma20", 0)
-    if market_above_ma60:
-        score += weights.get("market_above_ma60", 0)
-    if market_amount_above_ma20:
-        score += weights.get("market_amount_above_ma20", 0)
-    if ret_etf_5d > ret_market_5d:
-        score += weights.get("outperform_market", 0)
-    else:
-        score += weights.get("underperform_market", 0)
-
-    # 止盈止损条件
-    if break_ma:
-        score += weights.get("stop_loss_ma_break", 0)
-    if trailing_clear:
-        score += weights.get("trailing_stop_clear", 0)
-    elif trailing_half:
-        score += weights.get("trailing_stop_half", 0)
-    if profit_hit:
-        score += weights.get("profit_target_hit", 0)
-
+    for key, cond in conditions.items():
+        if cond:
+            weight = weights.get(key, 0)
+            score += weight
+            if key not in weights:
+                print(f"警告：权重字典缺少键 '{key}'，使用0")
     return score
 
 def map_score_to_position(score):
@@ -82,15 +132,11 @@ def map_score_to_position(score):
         return 0.0
 
 def analyze_etf_signal(
-    code, name, real_price, hist_df,
+    code, name, real_price, hist_df, weekly_df,
     macro_status, market_factor, sentiment_factor,
     market_above_ma20, market_above_ma60, market_amount_above_ma20,
     ret_market_5d, today, state, weights=None
 ):
-    """
-    分析单个ETF，返回状态字符串和操作建议
-    state: 该ETF的状态字典，包含 score_history（列表，元素为 {"date": str, "score": float}）
-    """
     if hist_df is None or len(hist_df) < 20:
         return f"【{name} ({code})】\n  历史数据不足", None, state
 
@@ -106,6 +152,7 @@ def analyze_etf_signal(
     boll_up = latest["boll_up"]
     boll_low = latest["boll_low"]
     williams_r = latest["williams_r"]
+    atr = latest["atr"]  # 从数据中获取ATR
 
     # 判断金叉
     if len(hist_df) >= 2:
@@ -121,16 +168,34 @@ def analyze_etf_signal(
     else:
         ret_etf_5d = 0
 
-    # 近期高点和低点
-    recent_high = hist_df['high'].rolling(window=RECENT_HIGH_WINDOW).max().iloc[-1]
-    recent_low = hist_df['low'].rolling(window=RECENT_LOW_WINDOW).min().iloc[-1]
+    # 近期高低点
+    recent_high, recent_low = _get_recent_high_low(hist_df, -1)
+    if np.isnan(recent_high):
+        recent_high = hist_df['high'].max()
+    if np.isnan(recent_low):
+        recent_low = hist_df['low'].min()
+
     drawdown = (recent_high - real_price) / recent_high if recent_high > 0 else 0
     gain = (real_price - recent_low) / recent_low if recent_low > 0 else 0
 
+    # 基于ATR的动态止损
+    atr_pct = atr / real_price if real_price > 0 else 0
+    trailing_clear = drawdown >= (ATR_STOP_MULT * atr_pct)
+    trailing_half = drawdown >= (ATR_TRAILING_MULT * atr_pct) and not trailing_clear
+
     break_ma = real_price < ma20
-    trailing_clear = drawdown >= TRAILING_STOP_CLEAR
-    trailing_half = drawdown >= TRAILING_STOP_HALF and not trailing_clear
     profit_hit = any(gain >= threshold for threshold, _ in PROFIT_TARGETS)
+
+    # 周线判断
+    weekly_above_ma = False
+    weekly_below_ma = False
+    if weekly_df is not None and not weekly_df.empty:
+        weekly_latest = weekly_df.iloc[-1]
+        weekly_close = weekly_latest['close']
+        weekly_ma = weekly_latest.get('ma_short', np.nan)
+        if not np.isnan(weekly_ma):
+            weekly_above_ma = weekly_close > weekly_ma
+            weekly_below_ma = weekly_close < weekly_ma
 
     # 计算基础评分
     base_score = calculate_score(
@@ -140,12 +205,15 @@ def analyze_etf_signal(
         market_above_ma20, market_above_ma60, market_amount_above_ma20,
         ret_etf_5d, ret_market_5d,
         break_ma, trailing_half, trailing_clear, profit_hit,
+        weekly_above_ma, weekly_below_ma,
         weights
     )
     final_score = base_score * market_factor * sentiment_factor
+    if np.isnan(final_score):
+        final_score = 0.0
     target_position = map_score_to_position(final_score)
 
-    # 更新评分历史（带日期）
+    # 更新评分历史
     today_str = today.strftime('%Y-%m-%d')
     if "score_history" not in state:
         state["score_history"] = []
@@ -161,35 +229,31 @@ def analyze_etf_signal(
     if len(state["score_history"]) > CONFIRM_DAYS:
         state["score_history"] = state["score_history"][-CONFIRM_DAYS:]
 
-    # 构建输出行
-    lines = [f"【{name} ({code})】"]
-    vol_m = volume / 1e6
-    vol_ma_m = vol_ma / 1e6
-    lines.append(f"  价格:{real_price:.3f} | 20日线:{ma20:.3f} | 量:{vol_m:.2f}M/5日均:{vol_ma_m:.2f}M")
-    macd_symbol = '✓' if macd_golden else '✗'
-    kdj_symbol = '✓' if kdj_golden else '✗'
-    lines.append(f"  MACD:{macd_symbol} KDJ:{kdj_symbol} RSI:{rsi:.1f} | 布林:{boll_up:.3f}/{boll_low:.3f} | 威廉:{williams_r:.1f}")
-    lines.append(f"  大盘:{macro_status}({market_factor:.2f}) 情绪:{sentiment_factor:.2f} | 最终评分:{final_score:.2f} | 仓位建议:{target_position*100:.0f}%")
+    # 信号确认（优先普通信号，其次快速信号）
+    signal_type, signal = _check_signal_confirm(state["score_history"], target_position)
+    if not signal:
+        # 检查快速买入信号
+        if len(state["score_history"]) >= 2:
+            last_score = state["score_history"][-1]["score"]
+            if _check_quick_signal(state["score_history"], last_score):
+                # 快速信号仓位减半（风险控制）
+                quick_ratio = min(target_position * 0.5, 0.5)
+                signal = {"action": "BUY", "ratio": quick_ratio,
+                          "reason": f"快速信号（评分上升且>{QUICK_BUY_THRESHOLD}）"}
+                signal_type = "BUY_QUICK"
 
-    signal = None
-    if len(state["score_history"]) >= CONFIRM_DAYS:
-        recent_scores = [item["score"] for item in state["score_history"]]
-        if all(s > BUY_THRESHOLD for s in recent_scores):
-            lines.append(f"  🟢 买入{target_position*100:.0f}%:连续{CONFIRM_DAYS}天>{BUY_THRESHOLD}")
-            signal = {"action": "BUY", "ratio": target_position, "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}"}
-        elif all(s < SELL_THRESHOLD for s in recent_scores):
-            lines.append(f"  🔴 卖出50%:连续{CONFIRM_DAYS}天<{SELL_THRESHOLD}")
-            signal = {"action": "SELL", "ratio": 0.5, "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}", "is_clear": False}
-        else:
-            lines.append("  ⚪ 观望")
-    else:
-        days = len(state["score_history"])
-        last_score = state["score_history"][-1]["score"]
-        if last_score > BUY_THRESHOLD:
-            lines.append(f"  🟢 偏买入确认中({days}/{CONFIRM_DAYS})")
-        elif last_score < SELL_THRESHOLD:
-            lines.append(f"  🔴 偏卖出确认中({days}/{CONFIRM_DAYS})")
-        else:
-            lines.append(f"  ⚪ 中性确认中({days}/{CONFIRM_DAYS})")
+    # 风险提示
+    risk_warning = _check_risk_warning(state["score_history"])
 
-    return "\n".join(lines), signal, state
+    confirm_info = {
+        'days': len(state["score_history"]),
+        'last_score': state["score_history"][-1]["score"]
+    }
+    output = _format_output(
+        name, code, real_price, ma20, volume, vol_ma,
+        macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
+        macro_status, market_factor, sentiment_factor,
+        final_score, target_position, confirm_info, signal, risk_warning
+    )
+
+    return output, signal, state

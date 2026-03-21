@@ -5,17 +5,16 @@ import datetime
 from config import (
     POSITION_FILE, STATE_FILE, MACRO_INDEX, MARKET_INDEX,
     MACRO_MA_SHORT, MACRO_MA_LONG, ETF_MA, ETF_VOL_MA,
-    STRATEGY_WEIGHTS
+    STRATEGY_WEIGHTS, ATR_PERIOD
 )
 from data import (
     silent_login, silent_logout, load_positions, load_state, save_state,
-    get_daily_data, calculate_indicators, get_realtime_price_sina, get_realtime_index_sina
+    get_daily_data, calculate_indicators, get_realtime_price_sina, get_realtime_index_sina,
+    get_weekly_data
 )
 from etf_analysis import analyze_etf_signal
-# from ai import deepseek_generate_weights   # 需要时取消注释
 
 def real_time_analysis():
-    """实时分析模式"""
     print("正在加载ETF列表...")
     try:
         etf_list = load_positions(POSITION_FILE)
@@ -33,7 +32,6 @@ def real_time_analysis():
         print("无法获取大盘指数数据")
         return
 
-    # 检查今天是否为交易日
     if today not in market_df.index:
         print(f"今天 {today_str} 不是交易日，程序退出。")
         return
@@ -46,7 +44,6 @@ def real_time_analysis():
     macro_df = calculate_indicators(macro_df, ma_short=MACRO_MA_SHORT)
     macro_df['ma_long'] = macro_df['close'].rolling(window=MACRO_MA_LONG).mean()
 
-    # 计算技术指标
     market_df = calculate_indicators(market_df, ma_short=20, vol_ma=20)
 
     # 宏观状态和情绪函数（内嵌）
@@ -97,14 +94,6 @@ def real_time_analysis():
     else:
         ret_market_5d = 0
 
-    # 动态权重（可选）
-    use_ai = False  # 如需启用AI，设为True并配置API Key
-    if use_ai:
-        # api_key = input("请输入DeepSeek API Key: ").strip()
-        # weights = deepseek_generate_weights(...)
-        # if weights: STRATEGY_WEIGHTS.update(weights)
-        pass
-
     # 加载状态
     all_state = load_state(STATE_FILE)
     for _, row in etf_list.iterrows():
@@ -112,13 +101,19 @@ def real_time_analysis():
         if code not in all_state:
             all_state[code] = {}
 
-    # 获取所有ETF历史数据
+    # 获取所有ETF历史数据（日线）
     etf_hist_cache = {}
     for code in etf_list['代码'].unique():
         df = get_daily_data(code, start_date, today_str)
         if df is not None and not df.empty:
             df = calculate_indicators(df, ma_short=ETF_MA, vol_ma=ETF_VOL_MA)
             etf_hist_cache[code] = df
+
+    # 获取周线数据（用于每个ETF）
+    weekly_cache = {}
+    for code in etf_list['代码'].unique():
+        weekly = get_weekly_data(code, start_date, today_str)
+        weekly_cache[code] = weekly
 
     real_index = get_realtime_index_sina("sh000001")
     index_info = f"实时大盘: {real_index:.2f}" if real_index else "实时大盘: 获取失败"
@@ -133,6 +128,7 @@ def real_time_analysis():
         code = row['代码']
         name = row['名称']
         hist_df = etf_hist_cache.get(code)
+        weekly_df = weekly_cache.get(code)
         state = all_state.get(code, {})
         real_price = get_realtime_price_sina(code)
         if real_price is None:
@@ -140,7 +136,7 @@ def real_time_analysis():
             continue
 
         status, signal, new_state = analyze_etf_signal(
-            code, name, real_price, hist_df,
+            code, name, real_price, hist_df, weekly_df,
             macro_status, market_factor, sentiment_factor,
             market_above_ma20, market_above_ma60, market_amount_above_ma20,
             ret_market_5d, today, state,
@@ -152,10 +148,8 @@ def real_time_analysis():
         if signal:
             signals.append({**signal, 'code': code, 'name': name})
 
-    # 保存状态
     save_state(all_state, STATE_FILE)
 
-    # 信号汇总
     if signals:
         print("\n" + "=" * 70)
         print("操作信号汇总")
@@ -163,6 +157,8 @@ def real_time_analysis():
         for sig in signals:
             if sig['action'] == 'BUY':
                 print(f"买入 {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})")
+            elif sig['action'] == 'BUY_QUICK':
+                print(f"买入（快速） {sig['name']} ({sig['code']}) - 建议仓位比例: {sig['ratio']*100:.0f}% (原因: {sig['reason']})")
             else:
                 if sig.get('is_clear'):
                     print(f"清仓 {sig['name']} ({sig['code']}) - 建议卖出全部持仓 (原因: {sig['reason']})")

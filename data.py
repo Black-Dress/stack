@@ -9,9 +9,8 @@ import datetime
 import requests
 import baostock as bs
 from contextlib import redirect_stdout
-from config import RSI_PERIOD
+from config import RSI_PERIOD, ATR_PERIOD, WEEKLY_MA
 
-# ---------- 登录/登出 ----------
 def silent_login():
     with open(os.devnull, "w") as f, redirect_stdout(f):
         lg = bs.login()
@@ -24,7 +23,6 @@ def silent_logout():
     with open(os.devnull, "w") as f, redirect_stdout(f):
         bs.logout()
 
-# ---------- 历史数据 ----------
 def get_daily_data(code, start_date, end_date, fields="date,code,open,high,low,close,volume,amount"):
     rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d")
     if rs.error_code != "0":
@@ -44,7 +42,6 @@ def get_daily_data(code, start_date, end_date, fields="date,code,open,high,low,c
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-# ---------- 技术指标计算 ----------
 def calculate_macd(df, short=12, long_=26, signal=9):
     exp1 = df["close"].ewm(span=short, adjust=False).mean()
     exp2 = df["close"].ewm(span=long_, adjust=False).mean()
@@ -87,19 +84,43 @@ def calculate_rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+def calculate_atr(df, period=14):
+    """计算ATR"""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    return atr
+
 def calculate_indicators(df, ma_short=20, vol_ma=5):
     df = df.copy()
     df["ma_short"] = df["close"].rolling(window=ma_short).mean()
-    df["vol_ma"] = df["volume"].rolling(window=vol_ma).mean()
-    df["amount_ma"] = df["amount"].rolling(window=vol_ma).mean()
+    if vol_ma is not None:
+        df["vol_ma"] = df["volume"].rolling(window=vol_ma).mean()
+    df["amount_ma"] = df["amount"].rolling(window=vol_ma).mean() if vol_ma is not None else None
     df = calculate_macd(df)
     df = calculate_kdj(df)
     df = calculate_bollinger(df)
     df = calculate_williams(df)
     df["rsi"] = calculate_rsi(df["close"], RSI_PERIOD)
+    df["atr"] = calculate_atr(df, ATR_PERIOD)
     return df
 
-# ---------- 实时价格（新浪备用） ----------
+def get_weekly_data(code, start_date, end_date):
+    """获取周线数据（每周最后一个交易日）并计算20周均线"""
+    df = get_daily_data(code, start_date, end_date)
+    if df is None or df.empty:
+        return None
+    # 重采样为周线（使用周五作为周结束）
+    weekly = df.resample('W-FRI').last()
+    # 计算20周均线
+    weekly['ma_short'] = weekly['close'].rolling(window=WEEKLY_MA).mean()
+    return weekly
+
 def get_realtime_price_sina(code):
     try:
         domains = ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]
@@ -133,12 +154,10 @@ def get_realtime_index_sina(code="sh000001"):
     except:
         return None
 
-# ---------- 状态存储（JSON） ----------
 def load_state(state_file):
     if os.path.exists(state_file):
         with open(state_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # 兼容旧格式
         for code, value in data.items():
             if isinstance(value, dict) and "score_history" in value:
                 if value["score_history"] and all(isinstance(x, (int, float)) for x in value["score_history"]):
@@ -151,7 +170,6 @@ def save_state(state, state_file):
     with open(state_file, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ---------- ETF列表加载 ----------
 def load_positions(position_file):
     if not os.path.exists(position_file):
         raise FileNotFoundError(f"ETF列表文件 {position_file} 不存在。")
