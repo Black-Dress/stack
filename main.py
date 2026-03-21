@@ -2,6 +2,7 @@
 # 主程序入口
 
 import datetime
+from ai import deepseek_generate_weights
 from config import (
     POSITION_FILE, STATE_FILE, MACRO_INDEX, MARKET_INDEX,
     MACRO_MA_SHORT, MACRO_MA_LONG, ETF_MA, ETF_VOL_MA,
@@ -122,6 +123,20 @@ def real_time_analysis():
     print(f"大盘站上20日线：{'是' if market_above_ma20 else '否'} | 站上60日线：{'是' if market_above_ma60 else '否'}")
     print(f"市场成交额：{market_amount/1e8:.2f}亿 | 20日均额：{market_amount_ma20/1e8:.2f}亿 | 大于均额：{'是' if market_amount_above_ma20 else '否'}")
     print("=" * 70)
+
+    weights = deepseek_generate_weights(
+    macro_status, sentiment_factor,
+    market_above_ma20, market_above_ma60, market_amount_above_ma20,
+    api_key="your_key",
+    use_cache=True,                # 开启缓存
+    model="deepseek-lite"          # 使用轻量级模型节省成本
+    )
+    if weights:
+        STRATEGY_WEIGHTS.update(weights)
+        print("已更新动态权重")
+    else:
+        print("使用默认权重")
+
 
     signals = []
     for _, row in etf_list.iterrows():
