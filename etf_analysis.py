@@ -1,13 +1,12 @@
 # etf_analysis.py
-# 单个ETF分析逻辑（优化版）
+# 单个ETF分析逻辑
 
 import numpy as np
 from config import (
     STRATEGY_WEIGHTS, BUY_THRESHOLD, SELL_THRESHOLD, CONFIRM_DAYS,
-    TRAILING_STOP_HALF, TRAILING_STOP_CLEAR, PROFIT_TARGETS,
-    RECENT_HIGH_WINDOW, RECENT_LOW_WINDOW, ATR_PERIOD, ATR_STOP_MULT, ATR_TRAILING_MULT,
-    QUICK_BUY_THRESHOLD, RISK_WARNING_DAYS, RISK_WARNING_THRESHOLD,
-    WEEKLY_MA, WEEKLY_WEIGHT
+    PROFIT_TARGETS, RECENT_HIGH_WINDOW, RECENT_LOW_WINDOW,
+    ATR_STOP_MULT, ATR_TRAILING_MULT, QUICK_BUY_THRESHOLD,
+    RISK_WARNING_DAYS, RISK_WARNING_THRESHOLD
 )
 
 def _get_recent_high_low(hist_df, row_idx):
@@ -32,7 +31,6 @@ def _check_signal_confirm(score_history, target_position):
     return None, None
 
 def _check_quick_signal(score_history, last_score):
-    """快速买入信号：最近两天评分连续上升且今天评分>QUICK_BUY_THRESHOLD"""
     if len(score_history) >= 2:
         prev_score = score_history[-2]["score"]
         if last_score > prev_score and last_score > QUICK_BUY_THRESHOLD:
@@ -40,7 +38,6 @@ def _check_quick_signal(score_history, last_score):
     return False
 
 def _check_risk_warning(score_history):
-    """风险提示：连续RISK_WARNING_DAYS天评分低于RISK_WARNING_THRESHOLD且未触发卖出"""
     if len(score_history) >= RISK_WARNING_DAYS:
         recent = [item["score"] for item in score_history[-RISK_WARNING_DAYS:]]
         if all(s < RISK_WARNING_THRESHOLD for s in recent):
@@ -152,7 +149,7 @@ def analyze_etf_signal(
     boll_up = latest["boll_up"]
     boll_low = latest["boll_low"]
     williams_r = latest["williams_r"]
-    atr = latest["atr"]  # 从数据中获取ATR
+    atr = latest["atr"]
 
     # 判断金叉
     if len(hist_df) >= 2:
@@ -168,7 +165,7 @@ def analyze_etf_signal(
     else:
         ret_etf_5d = 0
 
-    # 近期高低点
+    # 近期高点和低点
     recent_high, recent_low = _get_recent_high_low(hist_df, -1)
     if np.isnan(recent_high):
         recent_high = hist_df['high'].max()
@@ -178,7 +175,7 @@ def analyze_etf_signal(
     drawdown = (recent_high - real_price) / recent_high if recent_high > 0 else 0
     gain = (real_price - recent_low) / recent_low if recent_low > 0 else 0
 
-    # 基于ATR的动态止损
+    # ATR动态止损
     atr_pct = atr / real_price if real_price > 0 else 0
     trailing_clear = drawdown >= (ATR_STOP_MULT * atr_pct)
     trailing_half = drawdown >= (ATR_TRAILING_MULT * atr_pct) and not trailing_clear
@@ -229,20 +226,17 @@ def analyze_etf_signal(
     if len(state["score_history"]) > CONFIRM_DAYS:
         state["score_history"] = state["score_history"][-CONFIRM_DAYS:]
 
-    # 信号确认（优先普通信号，其次快速信号）
+    # 信号确认
     signal_type, signal = _check_signal_confirm(state["score_history"], target_position)
     if not signal:
-        # 检查快速买入信号
         if len(state["score_history"]) >= 2:
             last_score = state["score_history"][-1]["score"]
             if _check_quick_signal(state["score_history"], last_score):
-                # 快速信号仓位减半（风险控制）
                 quick_ratio = min(target_position * 0.5, 0.5)
                 signal = {"action": "BUY", "ratio": quick_ratio,
                           "reason": f"快速信号（评分上升且>{QUICK_BUY_THRESHOLD}）"}
                 signal_type = "BUY_QUICK"
 
-    # 风险提示
     risk_warning = _check_risk_warning(state["score_history"])
 
     confirm_info = {

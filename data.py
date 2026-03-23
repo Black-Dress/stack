@@ -9,7 +9,7 @@ import datetime
 import requests
 import baostock as bs
 from contextlib import redirect_stdout
-from config import RSI_PERIOD, ATR_PERIOD, WEEKLY_MA
+from config import RSI_PERIOD, ATR_PERIOD, WEEKLY_MA, MARKET_STATES
 
 def silent_login():
     with open(os.devnull, "w") as f, redirect_stdout(f):
@@ -85,7 +85,6 @@ def calculate_rsi(series, period=14):
     return rsi
 
 def calculate_atr(df, period=14):
-    """计算ATR"""
     high = df['high']
     low = df['low']
     close = df['close']
@@ -108,16 +107,17 @@ def calculate_indicators(df, ma_short=20, vol_ma=5):
     df = calculate_williams(df)
     df["rsi"] = calculate_rsi(df["close"], RSI_PERIOD)
     df["atr"] = calculate_atr(df, ATR_PERIOD)
+    # 预计算近期高低点（性能优化）
+    df['recent_high_10'] = df['high'].rolling(window=10).max()
+    df['recent_low_20'] = df['low'].rolling(window=20).min()
     return df
 
 def get_weekly_data(code, start_date, end_date):
-    """获取周线数据（每周最后一个交易日）并计算20周均线"""
+    """获取周线数据并计算20周均线"""
     df = get_daily_data(code, start_date, end_date)
     if df is None or df.empty:
         return None
-    # 重采样为周线（使用周五作为周结束）
     weekly = df.resample('W-FRI').last()
-    # 计算20周均线
     weekly['ma_short'] = weekly['close'].rolling(window=WEEKLY_MA).mean()
     return weekly
 
@@ -177,3 +177,29 @@ def load_positions(position_file):
     if "代码" not in df.columns or "名称" not in df.columns:
         raise ValueError("CSV文件必须包含 '代码' 和 '名称' 列。")
     return df[["代码", "名称"]]
+
+def get_macro_status(macro_df, market_states):
+    latest = macro_df.iloc[-1]
+    close = latest["close"]
+    ma20 = latest["ma_short"]
+    ma60 = latest.get("ma_long", ma20)
+    if close > ma20 and close > ma60:
+        return "bull", market_states["bull"]
+    elif close < ma20 and close < ma60:
+        return "bear", market_states["bear"]
+    else:
+        return "oscillate", market_states["oscillate"]
+
+def get_sentiment_factor(macro_df, rsi_period):
+    if macro_df is None or len(macro_df) < rsi_period + 1:
+        return 1.0
+    rsi_series = calculate_rsi(macro_df["close"], rsi_period)
+    latest_rsi = rsi_series.iloc[-1]
+    if latest_rsi < 30:
+        return 0.6
+    elif latest_rsi < 50:
+        return 0.8
+    elif latest_rsi < 70:
+        return 1.0
+    else:
+        return 0.9
