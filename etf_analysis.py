@@ -22,12 +22,22 @@ def _check_signal_confirm(score_history, target_position):
         return None, None
     recent_scores = [item["score"] for item in score_history]
     if all(s > BUY_THRESHOLD for s in recent_scores):
-        return "BUY", {"action": "BUY", "ratio": target_position,
-                       "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}"}
+        signal = {
+            "action": "BUY",
+            "ratio": target_position,
+            "reason": f"连续{CONFIRM_DAYS}天评分>{BUY_THRESHOLD}",
+            "text": f"  🟢 买入{target_position*100:.0f}%:连续{CONFIRM_DAYS}天>{BUY_THRESHOLD}"
+        }
+        return "BUY", signal
     elif all(s < SELL_THRESHOLD for s in recent_scores):
-        return "SELL", {"action": "SELL", "ratio": 0.5,
-                        "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}",
-                        "is_clear": False}
+        signal = {
+            "action": "SELL",
+            "ratio": 0.5,
+            "reason": f"连续{CONFIRM_DAYS}天评分<{SELL_THRESHOLD}",
+            "is_clear": False,
+            "text": f"  🔴 卖出50%:连续{CONFIRM_DAYS}天<{SELL_THRESHOLD}"
+        }
+        return "SELL", signal
     return None, None
 
 def _check_quick_signal(score_history, last_score):
@@ -59,6 +69,7 @@ def _format_output(name, code, real_price, ma20, volume, vol_ma,
     if risk_warning:
         lines.append(f"  ⚠️ 风险提示：连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}")
     if signal_info:
+        # signal_info 现在包含 'text' 键
         lines.append(signal_info['text'])
     else:
         days, last_score = confirm_info['days'], confirm_info['last_score']
@@ -233,8 +244,12 @@ def analyze_etf_signal(
             last_score = state["score_history"][-1]["score"]
             if _check_quick_signal(state["score_history"], last_score):
                 quick_ratio = min(target_position * 0.5, 0.5)
-                signal = {"action": "BUY", "ratio": quick_ratio,
-                          "reason": f"快速信号（评分上升且>{QUICK_BUY_THRESHOLD}）"}
+                signal = {
+                    "action": "BUY",
+                    "ratio": quick_ratio,
+                    "reason": f"快速信号（评分上升且>{QUICK_BUY_THRESHOLD}）",
+                    "text": f"  🟢 买入（快速）{quick_ratio*100:.0f}%:快速信号"
+                }
                 signal_type = "BUY_QUICK"
 
     risk_warning = _check_risk_warning(state["score_history"])

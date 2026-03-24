@@ -98,20 +98,23 @@ def _analyze_etf_parallel(etf_list, etf_hist_cache, weekly_cache, state_dict, ma
             ))
         for future in futures:
             try:
-                status, signal, code, new_state = future.result()
+                status, signal, code, name, new_state = future.result()
                 print(status)
                 print("-" * 40)
                 state_dict[code] = new_state
                 if signal:
-                    signals.append({**signal, 'code': code})
+                    signal['name'] = name
+                    signal['code'] = code
+                    signals.append(signal)
             except Exception as e:
                 logger.error(f"分析ETF时出错: {e}")
     return signals, state_dict
 
 def _analyze_single_etf(code, name, hist_df, weekly_df, state, market_status, today, weights):
+    from etf_analysis import analyze_etf_signal
     real_price = get_realtime_price_sina(code)
     if real_price is None:
-        return f"【{name} ({code})】\n  获取实时价格失败", None, code, state
+        return f"【{name} ({code})】\n  获取实时价格失败", None, code, name, state
 
     status, signal, new_state = analyze_etf_signal(
         code, name, real_price, hist_df, weekly_df,
@@ -124,7 +127,7 @@ def _analyze_single_etf(code, name, hist_df, weekly_df, state, market_status, to
         market_status['ret_market_5d'],
         today, state, weights
     )
-    return status, signal, code, new_state
+    return status, signal, code, name, new_state
 
 def _output_signals(signals):
     if not signals:
