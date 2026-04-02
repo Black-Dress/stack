@@ -1,0 +1,29 @@
+{
+  "1025512a7cd5bf40f5ef2ddd1af45ed2": {
+    "buy": {
+      "price_above_ma20": 0.0,
+      "volume_above_ma5": 0.0,
+      "macd_golden_cross": 0.0,
+      "kdj_golden_cross": 0.0,
+      "bollinger_break_up": 0.3333333333333333,
+      "williams_oversold": 0.6666666666666666,
+      "market_above_ma20": 0.0,
+      "market_above_ma60": 0.0,
+      "market_amount_above_ma20": 0.0,
+      "outperform_market": 0.0,
+      "weekly_above_ma20": 0.0
+    },
+    "sell": {
+      "price_below_ma20": 0.0,
+      "bollinger_break_down": 0.0,
+      "williams_overbought": 0.0,
+      "rsi_overbought": 0.0,
+      "underperform_market": 0.0,
+      "stop_loss_ma_break": 1.0,
+      "trailing_stop_clear": 0.0,
+      "trailing_stop_half": 0.0,
+      "profit_target_hit": 0.0,
+      "weekly_below_ma20": 0.0
+    }
+  }
+}

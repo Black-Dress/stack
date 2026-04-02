@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ETF 智能分析系统（精简版）
+ETF 智能分析系统（优化版）
 功能：实时分析 ETF，输出评分和操作建议（买入/卖出/持有）。
 依赖：baostock, pandas, numpy, requests, openai
 """
@@ -31,8 +31,8 @@ ATR_PERIOD = 14
 ATR_STOP_MULT = 2.0
 ATR_TRAILING_MULT = 1.0
 PROFIT_TARGET = 0.15
-CONFIRM_DAYS = 3
-BUY_THRESHOLD = 0.3
+CONFIRM_DAYS = 2
+BUY_THRESHOLD = 0.4
 SELL_THRESHOLD = -0.2
 QUICK_BUY_THRESHOLD = 0.5
 MARKET_STATES = {"bull": 1.2, "oscillate": 1.0, "bear": 0.8}
@@ -90,7 +90,6 @@ def silent_logout():
     with open(os.devnull, "w") as f, redirect_stdout(f):
         bs.logout()
 
-
 def get_daily_data(code, start_date, end_date):
     rs = bs.query_history_k_data_plus(
         code,
@@ -112,7 +111,6 @@ def get_daily_data(code, start_date, end_date):
     for col in ["open", "high", "low", "close", "volume", "amount"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
-
 
 def get_weekly_data(code, start_date, end_date):
     df = get_daily_data(code, start_date, end_date)
@@ -140,11 +138,9 @@ def get_realtime_price_sina(code):
 def get_realtime_index_sina(code="sh000001"):
     return get_realtime_price_sina(code)
 
-
 def load_positions():
     df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
     return df[["代码", "名称"]]
-
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -158,6 +154,18 @@ def save_state(state):
 
 
 # ---------------------------- 技术指标 ----------------------------
+def calculate_atr(df, period=14):
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            abs(df["high"] - df["close"].shift()),
+            abs(df["low"] - df["close"].shift()),
+        ],
+        axis=1,
+    ).max(1)
+    return tr.rolling(period).mean()
+
+
 def calculate_indicators(df, need_amount_ma=True):
     df = df.copy()
     df["ma_short"] = df["close"].rolling(window=ETF_MA).mean()
@@ -190,19 +198,10 @@ def calculate_indicators(df, need_amount_ma=True):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     df["rsi"] = 100 - 100 / (1 + gain / loss)
     # ATR
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            abs(df["high"] - df["close"].shift()),
-            abs(df["low"] - df["close"].shift()),
-        ],
-        axis=1,
-    ).max(1)
-    df["atr"] = tr.rolling(ATR_PERIOD).mean()
+    df["atr"] = calculate_atr(df, ATR_PERIOD)
     df["recent_high_10"] = df["high"].rolling(10).max()
     df["recent_low_20"] = df["low"].rolling(20).min()
     return df
-
 
 def get_macro_status(macro_df):
     latest = macro_df.iloc[-1]
@@ -229,16 +228,17 @@ def get_sentiment_factor(macro_df):
     return 0.9
 
 
-# ---------------------------- AI 权重 ----------------------------
+# ---------------------------- AI 权重（优化版） ----------------------------
 def _get_cache_key(
     macro_status,
     sentiment_factor,
     market_above_ma20,
     market_above_ma60,
     market_amount_above_ma20,
+    volatility,
 ):
     return hashlib.md5(
-        f"{macro_status}_{sentiment_factor}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}".encode()
+        f"{macro_status}_{sentiment_factor}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{volatility:.3f}".encode()
     ).hexdigest()
 
 
@@ -255,20 +255,97 @@ def _save_cache(cache):
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
-def _validate_weights(weights, expected_keys, name):
+def _validate_and_filter_weights(weights, expected_keys, name):
+    """校验并过滤权重：只保留expected_keys中的键，缺失补0，然后归一化"""
     if not isinstance(weights, dict):
-        return False
-    for k in expected_keys:
-        if k not in weights:
-            weights[k] = 0.0
-    for k, v in weights.items():
+        logger.error(f"{name} 不是字典，使用默认权重")
+        return None
+    filtered = {k: weights.get(k, 0.0) for k in expected_keys}
+    for k, v in filtered.items():
         if not isinstance(v, (int, float)) or v < 0 or v > 1:
-            weights[k] = max(0.0, min(1.0, v))
-    total = sum(weights.values())
-    if abs(total - 1) > 1e-6:
-        for k in weights:
-            weights[k] /= total
-    return True
+            filtered[k] = max(0.0, min(1.0, v))
+    total = sum(filtered.values())
+    if total == 0:
+        for k in filtered:
+            filtered[k] = 1.0 / len(filtered)
+    elif abs(total - 1.0) > 1e-6:
+        for k in filtered:
+            filtered[k] /= total
+    return filtered
+
+
+def build_optimized_prompt(
+    macro_status,
+    sentiment_factor,
+    market_above_ma20,
+    market_above_ma60,
+    market_amount_above_ma20,
+    volatility,
+):
+    buy_keys = [
+        "price_above_ma20",
+        "volume_above_ma5",
+        "macd_golden_cross",
+        "kdj_golden_cross",
+        "bollinger_break_up",
+        "williams_oversold",
+        "market_above_ma20",
+        "market_above_ma60",
+        "market_amount_above_ma20",
+        "outperform_market",
+        "weekly_above_ma20",
+    ]
+    sell_keys = [
+        "price_below_ma20",
+        "bollinger_break_down",
+        "williams_overbought",
+        "rsi_overbought",
+        "underperform_market",
+        "stop_loss_ma_break",
+        "trailing_stop_clear",
+        "trailing_stop_half",
+        "profit_target_hit",
+        "weekly_below_ma20",
+    ]
+    prompt = f"""
+你是一个量化交易策略专家。当前市场环境如下：
+- 宏观状态：{macro_status}（bull牛市、oscillate震荡市、bear熊市）
+- 情绪系数：{sentiment_factor}（0.6=恐慌，0.8=偏弱，1.0=中性，0.9=偏热）
+- 大盘站上20日均线：{"是" if market_above_ma20 else "否"}
+- 大盘站上60日均线：{"是" if market_above_ma60 else "否"}
+- 市场成交额高于20日均额：{"是" if market_amount_above_ma20 else "否"}
+- 市场波动率(ATR/收盘价)：{volatility:.3f}（<0.01低波动，>0.02高波动）
+
+请根据以下规则分配买入权重和卖出权重，所有权重为0-1之间的浮点数，每个部分总和为1。
+
+【买入权重规则】
+1. 牛市且大盘站上60日线：趋势类因子(price_above_ma20, market_above_ma60, weekly_above_ma20)总权重应≥0.5，单个因子0.15-0.30。
+2. 震荡市：反转类因子(williams_oversold, bollinger_break_up)总权重应≥0.4，单个因子0.20-0.40。
+3. 熊市：买入总权重建议≤0.3，可分配给超跌反弹因子(williams_oversold, bollinger_break_up)，其他趋势因子设为0。
+4. 高波动时(>0.02)：降低price_above_ma20权重，提高williams_oversold和volume_above_ma5。
+5. 低波动时(<0.01)：可适当提高macd_golden_cross和kdj_golden_cross。
+
+【卖出权重规则】
+1. 熊市且大盘跌破60日线：止损类因子(stop_loss_ma_break, trailing_stop_clear)总权重应≥0.6，单个因子可达0.4-0.8。
+2. 牛市：止盈类因子(profit_target_hit)和超买因子(rsi_overbought)总权重应≥0.5。
+3. 震荡市：平衡止损和止盈，各约0.5。
+4. 高波动时：提高profit_target_hit权重（因容易触发止盈），降低trailing_stop_clear阈值效应。
+5. 任何市场下，若认为应完全空仓：买入所有权重设为0，卖出权重全部给stop_loss_ma_break（设为1.0）。
+
+【约束条件】
+- 禁止添加任何未列出的键（如“空仓”、“观望”等）。
+- 单个因子权重不得超过0.6（除熊市卖出止损因子可到0.8外）。
+- 每个部分所有权重必须为正数（可0），总和为1（允许浮点误差）。
+
+【输出格式示例】
+牛市示例：
+{{"buy": {{"price_above_ma20":0.25,"market_above_ma60":0.20,"weekly_above_ma20":0.15,"volume_above_ma5":0.10,"outperform_market":0.10,"macd_golden_cross":0.10,"kdj_golden_cross":0.10}}, "sell": {{"profit_target_hit":0.40,"rsi_overbought":0.30,"underperform_market":0.30}}}}
+熊市示例：
+{{"buy": {{"williams_oversold":0.20,"bollinger_break_up":0.10}}, "sell": {{"stop_loss_ma_break":0.70,"trailing_stop_clear":0.30}}}}
+
+请严格按照JSON格式输出，不要包含任何解释文字。
+"""
+    return prompt
 
 
 def deepseek_generate_weights(
@@ -277,6 +354,7 @@ def deepseek_generate_weights(
     market_above_ma20,
     market_above_ma60,
     market_amount_above_ma20,
+    volatility,
     api_key,
     use_cache=True,
 ):
@@ -286,20 +364,41 @@ def deepseek_generate_weights(
         market_above_ma20,
         market_above_ma60,
         market_amount_above_ma20,
+        volatility,
     )
     if use_cache:
         cache = _load_cache()
         if cache_key in cache:
-            return cache[cache_key]["buy"], cache[cache_key]["sell"]
-    prompt = f"""
-市场环境：宏观状态={macro_status}，情绪系数={sentiment_factor}，大盘站上20日线={"是" if market_above_ma20 else "否"}，站上60日线={"是" if market_above_ma60 else "否"}，成交额高于20日均额={"是" if market_amount_above_ma20 else "否"}。
-请输出买入权重和卖出权重，JSON格式：{{"buy":{{...}},"sell":{{...}}}}，每个内部权重和为1。"""
+            cached = cache[cache_key]
+            if "buy" in cached and "sell" in cached:
+                buy = _validate_and_filter_weights(
+                    cached["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入权重"
+                )
+                sell = _validate_and_filter_weights(
+                    cached["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出权重"
+                )
+                if buy and sell:
+                    return buy, sell
+                else:
+                    logger.warning("缓存权重无效，重新生成")
+
+    prompt = build_optimized_prompt(
+        macro_status,
+        sentiment_factor,
+        market_above_ma20,
+        market_above_ma60,
+        market_amount_above_ma20,
+        volatility,
+    )
     try:
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "输出严格JSON，不要解释。"},
+                {
+                    "role": "system",
+                    "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
+                },
                 {"role": "user", "content": prompt},
             ],
             max_tokens=800,
@@ -307,21 +406,29 @@ def deepseek_generate_weights(
             timeout=10,
         )
         import re
-        data = json.loads(
-            re.search(r"\{.*\}", resp.choices[0].message.content, re.DOTALL).group()
+        content = resp.choices[0].message.content
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not json_match:
+            raise ValueError("未找到JSON")
+        data = json.loads(json_match.group())
+        if "buy" not in data or "sell" not in data:
+            raise ValueError("JSON缺少buy或sell字段")
+        buy_weights = _validate_and_filter_weights(
+            data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
         )
-        buy, sell = data["buy"], data["sell"]
-        if _validate_weights(
-            buy, DEFAULT_BUY_WEIGHTS.keys(), "buy"
-        ) and _validate_weights(sell, DEFAULT_SELL_WEIGHTS.keys(), "sell"):
-            if use_cache:
-                cache = _load_cache()
-                cache[cache_key] = {"buy": buy, "sell": sell}
-                _save_cache(cache)
-            return buy, sell
+        sell_weights = _validate_and_filter_weights(
+            data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
+        )
+        if buy_weights is None or sell_weights is None:
+            raise ValueError("权重校验失败")
+        if use_cache:
+            cache = _load_cache()
+            cache[cache_key] = {"buy": buy_weights, "sell": sell_weights}
+            _save_cache(cache)
+        return buy_weights, sell_weights
     except Exception as e:
-        logger.error(f"AI权重生成失败: {e}")
-    return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+        logger.error(f"AI权重生成失败: {e}，使用默认权重")
+        return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
 
 
 # ---------------------------- 评分与信号 ----------------------------
@@ -347,9 +454,9 @@ def strength(
     market_above_ma60,
     market_amount_above_ma20,
     is_buy,
+    buy_weights,
+    sell_weights,
 ):
-    """统一计算买入或卖出分"""
-
     def cap(x):
         return max(0.0, min(1.0, x))
 
@@ -375,7 +482,7 @@ def strength(
             ),
             "weekly_above_ma20": 1 if weekly_above else 0,
         }
-        weights = DEFAULT_BUY_WEIGHTS
+        weights = buy_weights
     else:
         factors = {
             "price_below_ma20": (
@@ -415,12 +522,11 @@ def strength(
             ),
             "weekly_below_ma20": 1 if weekly_below else 0,
         }
-        weights = DEFAULT_SELL_WEIGHTS
-    return sum(weights[k] * factors.get(k, 0) for k in weights)
+        weights = sell_weights
+    return sum(weights.get(k, 0) * factors.get(k, 0) for k in weights)
 
 
 def get_action(score, score_history):
-    """根据评分和评分历史返回 BUY/SELL/HOLD"""
     if len(score_history) >= CONFIRM_DAYS:
         recent = [s["score"] for s in score_history[-CONFIRM_DAYS:]]
         if all(s > BUY_THRESHOLD for s in recent):
@@ -457,7 +563,7 @@ def analyze_etf(
     atr_pct = d["atr"] / real_price if real_price > 0 else 0
     recent_high = d.get("recent_high_10", hist_df["high"].rolling(10).max().iloc[-1])
     recent_low = d.get("recent_low_20", hist_df["low"].rolling(20).min().iloc[-1])
-    # 金叉（修复：使用显式判断 None）
+    # 金叉
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
         macd_golden = (
@@ -502,6 +608,8 @@ def analyze_etf(
         market["market_above_ma60"],
         market["market_amount_above_ma20"],
         True,
+        buy_w,
+        sell_w,
     )
     sell_score = strength(
         real_price,
@@ -525,6 +633,8 @@ def analyze_etf(
         market["market_above_ma60"],
         market["market_amount_above_ma20"],
         False,
+        buy_w,
+        sell_w,
     )
     raw = buy_score - sell_score
     final = raw * market["market_factor"] * market["sentiment_factor"]
@@ -552,9 +662,10 @@ def analyze_etf(
         ]
         if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
             risk_warning = True
-    # 构建输出（简洁版）
+    # 输出
     output = f"【{name}({code})】 {real_price:.3f} 评分:{final:.2f} 操作:{action}"
-    
+    if risk_warning:
+        output += f" 风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
     signal = (
         {"action": action, "name": name, "code": code, "score": final}
         if action in ("BUY", "SELL")
@@ -583,7 +694,10 @@ def main():
         return
     macro_df = calculate_indicators(macro_df, need_amount_ma=False)
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
-    market_df = calculate_indicators(market_df, need_amount_ma=True)  # 需要 amount_ma
+    market_df = calculate_indicators(market_df, need_amount_ma=True)
+    # 计算市场波动率（最近20日ATR/收盘价均值）
+    market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
+    volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
     macro_status, market_factor = get_macro_status(macro_df)
     sentiment = get_sentiment_factor(macro_df)
     mkt = market_df.iloc[-1]
@@ -611,6 +725,7 @@ def main():
             market_info["market_above_ma20"],
             market_info["market_above_ma60"],
             market_info["market_amount_above_ma20"],
+            volatility,
             api_key,
         )
         if bw and sw:
@@ -621,7 +736,6 @@ def main():
     else:
         logger.info("未设置DEEPSEEK_API_KEY，使用默认权重")
     # 并行分析
-    signals = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -652,19 +766,15 @@ def main():
         for f in futures:
             out, sig, new_state = f.result()
             print(out)
-            # 更新全局状态（通过提取代码）
             import re
 
             m = re.search(r"【.*?\((.*?)\)】", out)
             if m:
                 code = m.group(1)
                 state[code] = new_state
-            if sig:
-                signals.append(sig)
+            # 不汇总信号
     save_state(state)
-
     silent_logout()
-
 
 if __name__ == "__main__":
     main()
