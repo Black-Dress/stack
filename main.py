@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ETF 智能分析系统（优化版）
+ETF 智能分析系统（优化版）- 市场状态精细化 + 信号优先级排序
 功能：实时分析 ETF，输出评分和操作建议（买入/卖出/持有）。
 依赖：baostock, pandas, numpy, requests, openai
 """
@@ -31,11 +31,10 @@ ATR_PERIOD = 14
 ATR_STOP_MULT = 2.0
 ATR_TRAILING_MULT = 1.0
 PROFIT_TARGET = 0.15
-CONFIRM_DAYS = 2
-BUY_THRESHOLD = 0.4
+CONFIRM_DAYS = 3
+BUY_THRESHOLD = 0.5
 SELL_THRESHOLD = -0.2
-QUICK_BUY_THRESHOLD = 0.5
-MARKET_STATES = {"bull": 1.2, "oscillate": 1.0, "bear": 0.8}
+QUICK_BUY_THRESHOLD = 0.6
 RECENT_HIGH_WINDOW = 10
 RECENT_LOW_WINDOW = 20
 WEEKLY_MA = 20
@@ -152,7 +151,6 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-
 # ---------------------------- 技术指标 ----------------------------
 def calculate_atr(df, period=14):
     tr = pd.concat(
@@ -164,7 +162,6 @@ def calculate_atr(df, period=14):
         axis=1,
     ).max(1)
     return tr.rolling(period).mean()
-
 
 def calculate_indicators(df, need_amount_ma=True):
     df = df.copy()
@@ -203,14 +200,6 @@ def calculate_indicators(df, need_amount_ma=True):
     df["recent_low_20"] = df["low"].rolling(20).min()
     return df
 
-def get_macro_status(macro_df):
-    latest = macro_df.iloc[-1]
-    if latest["close"] > latest["ma_short"] and latest["close"] > latest["ma_long"]:
-        return "bull", MARKET_STATES["bull"]
-    elif latest["close"] < latest["ma_short"] and latest["close"] < latest["ma_long"]:
-        return "bear", MARKET_STATES["bear"]
-    return "oscillate", MARKET_STATES["oscillate"]
-
 def get_sentiment_factor(macro_df):
     if len(macro_df) < RSI_PERIOD + 1:
         return 1.0
@@ -228,7 +217,7 @@ def get_sentiment_factor(macro_df):
     return 0.9
 
 
-# ---------------------------- AI 权重（优化版） ----------------------------
+# ---------------------------- AI 权重生成（优化版） ----------------------------
 def _get_cache_key(
     macro_status,
     sentiment_factor,
@@ -253,7 +242,6 @@ def _load_cache():
 def _save_cache(cache):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
-
 
 def _validate_and_filter_weights(weights, expected_keys, name):
     """校验并过滤权重：只保留expected_keys中的键，缺失补0，然后归一化"""
@@ -429,6 +417,158 @@ def deepseek_generate_weights(
     except Exception as e:
         logger.error(f"AI权重生成失败: {e}，使用默认权重")
         return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+
+
+# ---------------------------- 市场状态精细化 ----------------------------
+def refine_market_state(market_df, api_key, use_cache=True):
+    """调用AI分析大盘数据，返回精细市场状态和推荐市场因子"""
+    # 缓存key基于最近20日数据的哈希
+    cache_key = (
+        f"market_state_{hashlib.md5(market_df.tail(20).to_json().encode()).hexdigest()}"
+    )
+    if use_cache:
+        cache = _load_cache()
+        if cache_key in cache and "market_state" in cache[cache_key]:
+            state = cache[cache_key]["market_state"]
+            factor = cache[cache_key]["market_factor"]
+            logger.info(f"使用缓存市场状态: {state}, 因子: {factor}")
+            return state, factor
+
+    # 准备最近20日的数据摘要
+    recent = market_df.tail(20)
+    close_pct = recent["close"].pct_change().mean()
+    vol_pct = recent["volume"].pct_change().mean()
+    volatility = (recent["close"].pct_change().std()) * 100  # 日波动率百分比
+    above_ma20 = recent["close"].iloc[-1] > recent["ma_short"].iloc[-1]
+    above_ma60 = (
+        recent["close"].iloc[-1] > recent["ma_long"].iloc[-1]
+        if "ma_long" in recent
+        else above_ma20
+    )
+
+    prompt = f"""
+你是一个市场分析专家。请根据以下大盘指数(上证)最近20日的数据，判断当前市场状态，并给出一个推荐的市场因子系数（0.6-1.4，1.0为中性，>1.0为积极，<1.0为防御）。
+数据摘要：
+- 最近20日平均日涨跌幅：{close_pct:.4f}
+- 最近20日平均成交量变化率：{vol_pct:.4f}
+- 日波动率（标准差%）：{volatility:.2f}%
+- 当前价格是否站上20日均线：{"是" if above_ma20 else "否"}
+- 当前价格是否站上60日均线：{"是" if above_ma60 else "否"}
+
+请输出JSON格式：{{"state": "市场状态标签", "factor": 市场因子系数}}
+可选市场状态标签：强势牛市、正常牛市、震荡偏强、震荡偏弱、弱势反弹、熊市下跌中继、熊市加速下跌。
+不要包含其他解释。
+"""
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "输出严格JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+            temperature=0.0,
+            timeout=10,
+        )
+        import re
+
+        content = resp.choices[0].message.content
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            state = data.get("state", "震荡偏弱")
+            factor = float(data.get("factor", 1.0))
+            factor = max(0.6, min(1.4, factor))
+            if use_cache:
+                cache = _load_cache()
+                cache[cache_key] = {"market_state": state, "market_factor": factor}
+                _save_cache(cache)
+            return state, factor
+    except Exception as e:
+        logger.error(f"市场状态AI分析失败: {e}")
+    # 降级：使用原有规则
+    if above_ma20 and above_ma60:
+        return "正常牛市", 1.2
+    elif not above_ma20 and not above_ma60:
+        return "熊市下跌", 0.8
+    else:
+        return "震荡偏弱", 1.0
+
+
+# ---------------------------- 信号优先级排序 ----------------------------
+def rank_signals(signals, etf_hist_cache, api_key):
+    """对买入/卖出信号进行优先级排序，返回排序后的信号列表"""
+    if not signals:
+        return signals
+    # 构建每个信号的详细数据
+    signal_details = []
+    for sig in signals:
+        code = sig["code"]
+        hist = etf_hist_cache.get(code)
+        if hist is not None and len(hist) >= 5:
+            last = hist.iloc[-1]
+            vol_ratio = last["volume"] / last["vol_ma"] if last["vol_ma"] > 0 else 1
+            rsi = last["rsi"]
+            williams = last["williams_r"]
+            ret_5d = (
+                (last["close"] / hist.iloc[-5]["close"] - 1) if len(hist) >= 5 else 0
+            )
+        else:
+            vol_ratio, rsi, williams, ret_5d = 1, 50, -50, 0
+        signal_details.append(
+            {
+                "code": code,
+                "name": sig["name"],
+                "action": sig["action"],
+                "score": sig["score"],
+                "vol_ratio": vol_ratio,
+                "rsi": rsi,
+                "williams": williams,
+                "ret_5d": ret_5d,
+            }
+        )
+    prompt = f"""
+你是一个交易策略顾问。以下是一些ETF的交易信号，请根据信号强度、技术指标和近期表现，分别对BUY信号和SELL信号进行优先级排序（从高到低）。
+每个信号包含以下信息：
+- 代码/名称
+- 操作(BUY/SELL)
+- 综合评分(score)
+- 成交量比率(vol_ratio，>1放量)
+- RSI值
+- 威廉指标(williams)
+- 近5日涨幅(ret_5d)
+
+数据：
+{json.dumps(signal_details, indent=2, ensure_ascii=False)}
+
+请输出JSON数组，每个元素为{{"code": "代码", "priority": 排序序号(1最高)}}，先列出BUY信号，再列出SELL信号。如果某类信号为空，则输出空数组。
+不要包含其他解释。
+"""
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "输出严格JSON数组。"},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=500,
+            temperature=0.0,
+            timeout=10,
+        )
+        content = resp.choices[0].message.content
+        import re
+
+        json_match = re.search(r"\[.*\]", content, re.DOTALL)
+        if json_match:
+            ranked = json.loads(json_match.group())
+            # 根据优先级重新排序原始信号列表
+            order_map = {item["code"]: item["priority"] for item in ranked}
+            signals.sort(key=lambda x: order_map.get(x["code"], 999))
+    except Exception as e:
+        logger.error(f"信号排序失败: {e}")
+    return signals
 
 
 # ---------------------------- 评分与信号 ----------------------------
@@ -695,14 +835,36 @@ def main():
     macro_df = calculate_indicators(macro_df, need_amount_ma=False)
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
     market_df = calculate_indicators(market_df, need_amount_ma=True)
-    # 计算市场波动率（最近20日ATR/收盘价均值）
     market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
-    macro_status, market_factor = get_macro_status(macro_df)
+
+    # 市场状态精细化
+    api_key = "sk-d99ea0f5b8274d918bc1fc6662ec92f0"
+    if api_key:
+        market_state, market_factor = refine_market_state(market_df, api_key)
+        logger.info(f"AI市场状态: {market_state}, 因子: {market_factor}")
+    else:
+        # 降级：使用简单规则
+        if market_df.iloc[-1]["close"] > market_df.iloc[-1][
+            "ma_short"
+        ] and market_df.iloc[-1]["close"] > market_df.iloc[-1].get(
+            "ma_long", market_df.iloc[-1]["ma_short"]
+        ):
+            market_state, market_factor = "正常牛市", 1.2
+        elif market_df.iloc[-1]["close"] < market_df.iloc[-1][
+            "ma_short"
+        ] and market_df.iloc[-1]["close"] < market_df.iloc[-1].get(
+            "ma_long", market_df.iloc[-1]["ma_short"]
+        ):
+            market_state, market_factor = "熊市下跌", 0.8
+        else:
+            market_state, market_factor = "震荡偏弱", 1.0
+        logger.info(f"使用简单规则市场状态: {market_state}, 因子: {market_factor}")
+
     sentiment = get_sentiment_factor(macro_df)
     mkt = market_df.iloc[-1]
     market_info = {
-        "macro_status": macro_status,
+        "macro_status": market_state,  # 使用精细化状态
         "market_factor": market_factor,
         "sentiment_factor": sentiment,
         "market_above_ma20": mkt["close"] > mkt["ma_short"],
@@ -717,10 +879,9 @@ def main():
     # 加载ETF数据
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
-    api_key = os.getenv("DEEPSEEK_API_KEY")
     if api_key:
         bw, sw = deepseek_generate_weights(
-            macro_status,
+            market_state,
             sentiment,
             market_info["market_above_ma20"],
             market_info["market_above_ma60"],
@@ -735,7 +896,10 @@ def main():
             logger.warning("使用默认权重")
     else:
         logger.info("未设置DEEPSEEK_API_KEY，使用默认权重")
+
     # 并行分析
+    signals = []
+    etf_hist_cache = {}  # 用于信号排序
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -746,6 +910,7 @@ def main():
                 if hist is not None
                 else None
             )
+            etf_hist_cache[code] = hist  # 缓存
             weekly = get_weekly_data(code, start, today_str)
             s = state.get(code, {})
             futures.append(
@@ -767,13 +932,29 @@ def main():
             out, sig, new_state = f.result()
             print(out)
             import re
-
             m = re.search(r"【.*?\((.*?)\)】", out)
             if m:
                 code = m.group(1)
                 state[code] = new_state
-            # 不汇总信号
+            if sig:
+                signals.append(sig)
     save_state(state)
+
+    # 信号优先级排序
+    if signals and api_key:
+        signals = rank_signals(signals, etf_hist_cache, api_key)
+        print("\n【信号优先级排序】")
+        for sig in signals:
+            print(
+                f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}"
+            )
+    elif signals:
+        print("\n【信号汇总】")
+        for sig in signals:
+            print(
+                f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}"
+            )
+
     silent_logout()
 
 if __name__ == "__main__":
