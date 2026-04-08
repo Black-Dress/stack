@@ -43,6 +43,7 @@ ATR_STOP_MULT = 2.0
 ATR_TRAILING_MULT = 1.0
 PROFIT_TARGET = 0.15
 CONFIRM_DAYS = 2
+# 配置（可动态调整）
 BUY_THRESHOLD = 0.3
 SELL_THRESHOLD = -0.2
 QUICK_BUY_THRESHOLD = 0.5
@@ -327,6 +328,21 @@ def build_optimized_prompt(
 4. 高波动时：提高profit_target_hit权重（因容易触发止盈），降低trailing_stop_clear阈值效应。
 5. 任何市场下，若认为应完全空仓：买入所有权重设为0，卖出权重全部给stop_loss_ma_break（设为1.0）。
 
+【阈值和窗口参数】
+请根据市场环境动态调整以下参数：
+- BUY_THRESHOLD: 买入阈值 (0.1-0.5)
+- SELL_THRESHOLD: 卖出阈值 (-0.5 到 -0.1)
+- QUICK_BUY_THRESHOLD: 快速买入阈值 (0.3-0.7)
+- QUICK_SELL_THRESHOLD: 快速卖出阈值 (-0.7 到 -0.3)
+- RECENT_HIGH_WINDOW: 近期高点窗口 (5-20)
+- RECENT_LOW_WINDOW: 近期低点窗口 (10-30)
+
+规则：
+- 牛市：提高买入阈值，降低卖出阈值，增加窗口以捕捉趋势。
+- 熊市：降低买入阈值，提高卖出阈值，减少窗口以快速止损。
+- 高波动：提高快速阈值，减少窗口。
+- 低波动：降低阈值，增加窗口。
+
 【约束条件】
 - 禁止添加任何未列出的键（如“空仓”、“观望”等）。
 - 单个因子权重不得超过0.6（除熊市卖出止损因子可到0.8外）。
@@ -334,9 +350,9 @@ def build_optimized_prompt(
 
 【输出格式示例】
 牛市示例：
-{{"buy": {{"price_above_ma20":0.25,"market_above_ma60":0.20,"weekly_above_ma20":0.15,"volume_above_ma5":0.10,"outperform_market":0.10,"macd_golden_cross":0.10,"kdj_golden_cross":0.10}}, "sell": {{"profit_target_hit":0.40,"rsi_overbought":0.30,"underperform_market":0.30}}}}
+{{"buy": {{"price_above_ma20":0.25,"market_above_ma60":0.20,"weekly_above_ma20":0.15,"volume_above_ma5":0.10,"outperform_market":0.10,"macd_golden_cross":0.10,"kdj_golden_cross":0.10}}, "sell": {{"profit_target_hit":0.40,"rsi_overbought":0.30,"underperform_market":0.30}}, "thresholds": {{"BUY_THRESHOLD": 0.35, "SELL_THRESHOLD": -0.25, "QUICK_BUY_THRESHOLD": 0.55, "QUICK_SELL_THRESHOLD": -0.45, "RECENT_HIGH_WINDOW": 15, "RECENT_LOW_WINDOW": 25}}}}
 熊市示例：
-{{"buy": {{"williams_oversold":0.20,"bollinger_break_up":0.10}}, "sell": {{"stop_loss_ma_break":0.70,"trailing_stop_clear":0.30}}}}
+{{"buy": {{"williams_oversold":0.20,"bollinger_break_up":0.10}}, "sell": {{"stop_loss_ma_break":0.70,"trailing_stop_clear":0.30}}, "thresholds": {{"BUY_THRESHOLD": 0.25, "SELL_THRESHOLD": -0.15, "QUICK_BUY_THRESHOLD": 0.45, "QUICK_SELL_THRESHOLD": -0.35, "RECENT_HIGH_WINDOW": 8, "RECENT_LOW_WINDOW": 15}}}}
 
 请严格按照JSON格式输出，不要包含任何解释文字。
 """
@@ -365,17 +381,18 @@ def deepseek_generate_weights(
         cache = _load_cache()
         if cache_key in cache:
             cached = cache[cache_key]
-            if "buy" in cached and "sell" in cached:
+            if "buy" in cached and "sell" in cached and "thresholds" in cached:
                 buy = _validate_and_filter_weights(
                     cached["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入权重"
                 )
                 sell = _validate_and_filter_weights(
                     cached["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出权重"
                 )
-                if buy and sell:
-                    return buy, sell
+                thresholds = cached["thresholds"]
+                if buy and sell and thresholds:
+                    return buy, sell, thresholds
                 else:
-                    logger.warning("缓存权重无效，重新生成")
+                    logger.warning("缓存权重或阈值无效，重新生成")
 
     prompt = build_optimized_prompt(
         macro_status,
@@ -406,24 +423,59 @@ def deepseek_generate_weights(
         if not json_match:
             raise ValueError("未找到JSON")
         data = json.loads(json_match.group())
-        if "buy" not in data or "sell" not in data:
-            raise ValueError("JSON缺少buy或sell字段")
+        if "buy" not in data or "sell" not in data or "thresholds" not in data:
+            raise ValueError("JSON缺少buy、sell或thresholds字段")
         buy_weights = _validate_and_filter_weights(
             data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
         )
         sell_weights = _validate_and_filter_weights(
             data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
         )
+        thresholds = data["thresholds"]
+        # 简单校验阈值范围
+        thresholds["BUY_THRESHOLD"] = max(
+            0.1, min(0.5, thresholds.get("BUY_THRESHOLD", 0.3))
+        )
+        thresholds["SELL_THRESHOLD"] = max(
+            -0.5, min(-0.1, thresholds.get("SELL_THRESHOLD", -0.2))
+        )
+        thresholds["QUICK_BUY_THRESHOLD"] = max(
+            0.3, min(0.7, thresholds.get("QUICK_BUY_THRESHOLD", 0.5))
+        )
+        thresholds["QUICK_SELL_THRESHOLD"] = max(
+            -0.7, min(-0.3, thresholds.get("QUICK_SELL_THRESHOLD", -0.4))
+        )
+        thresholds["RECENT_HIGH_WINDOW"] = max(
+            5, min(20, thresholds.get("RECENT_HIGH_WINDOW", 10))
+        )
+        thresholds["RECENT_LOW_WINDOW"] = max(
+            10, min(30, thresholds.get("RECENT_LOW_WINDOW", 20))
+        )
         if buy_weights is None or sell_weights is None:
             raise ValueError("权重校验失败")
         if use_cache:
             cache = _load_cache()
-            cache[cache_key] = {"buy": buy_weights, "sell": sell_weights}
+            cache[cache_key] = {
+                "buy": buy_weights,
+                "sell": sell_weights,
+                "thresholds": thresholds,
+            }
             _save_cache(cache)
-        return buy_weights, sell_weights
+        return buy_weights, sell_weights, thresholds
     except Exception as e:
         logger.error(f"AI权重生成失败: {e}，使用默认权重")
-        return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+        return (
+            DEFAULT_BUY_WEIGHTS.copy(),
+            DEFAULT_SELL_WEIGHTS.copy(),
+            {
+                "BUY_THRESHOLD": 0.3,
+                "SELL_THRESHOLD": -0.2,
+                "QUICK_BUY_THRESHOLD": 0.5,
+                "QUICK_SELL_THRESHOLD": -0.4,
+                "RECENT_HIGH_WINDOW": 10,
+                "RECENT_LOW_WINDOW": 20,
+            },
+        )
 
 
 # ---------------------------- 市场状态精细化 ----------------------------
@@ -458,6 +510,11 @@ def refine_market_state(market_df, api_key, use_cache=True):
 - 日波动率（标准差%）：{volatility:.2f}%
 - 当前价格是否站上20日均线：{"是" if above_ma20 else "否"}
 - 当前价格是否站上60日均线：{"是" if above_ma60 else "否"}
+- 当天收盘价：{recent["close"].iloc[-1]:.2f}
+- 当天涨跌幅：{(recent["close"].iloc[-1] / recent["close"].iloc[-2] - 1) * 100:.2f}%（相对于前一天）
+- 当天成交量：{recent["volume"].iloc[-1]}
+- 当天成交额：{recent["amount"].iloc[-1]}
+- 当天是否放量：{"是" if recent["volume"].iloc[-1] > recent["vol_ma"].iloc[-1] else "否"}（相对于5日均量）
 
 请输出JSON格式：{{"state": "市场状态标签", "factor": 市场因子系数}}
 可选市场状态标签：强势牛市、正常牛市、震荡偏强、震荡偏弱、弱势反弹、熊市下跌中继、熊市加速下跌。
@@ -516,8 +573,29 @@ def rank_signals(signals, etf_hist_cache, api_key):
             ret_5d = (
                 (last["close"] / hist.iloc[-5]["close"] - 1) if len(hist) >= 5 else 0
             )
+            today_change = (
+                (last["close"] / hist.iloc[-2]["close"] - 1) if len(hist) >= 2 else 0
+            )
+            macd_dif = last["macd_dif"]
+            kdj_k = last["kdj_k"]
+            boll_position = (
+                (last["close"] - last["boll_mid"]) / last["boll_std"]
+                if last["boll_std"] > 0
+                else 0
+            )
+            atr_pct = last["atr"] / last["close"] if last["close"] > 0 else 0
         else:
-            vol_ratio, rsi, williams, ret_5d = 1, 50, -50, 0
+            (
+                vol_ratio,
+                rsi,
+                williams,
+                ret_5d,
+                today_change,
+                macd_dif,
+                kdj_k,
+                boll_position,
+                atr_pct,
+            ) = (1, 50, -50, 0, 0, 0, 50, 0, 0)
         signal_details.append(
             {
                 "code": code,
@@ -528,6 +606,11 @@ def rank_signals(signals, etf_hist_cache, api_key):
                 "rsi": rsi,
                 "williams": williams,
                 "ret_5d": ret_5d,
+                "today_change": today_change,
+                "macd_dif": macd_dif,
+                "kdj_k": kdj_k,
+                "boll_position": boll_position,
+                "atr_pct": atr_pct,
             }
         )
     prompt = f"""
@@ -540,6 +623,11 @@ def rank_signals(signals, etf_hist_cache, api_key):
 - RSI值
 - 威廉指标(williams)
 - 近5日涨幅(ret_5d)
+- 当天涨跌幅(today_change)
+- MACD差值(macd_dif，正值看涨)
+- KDJ K值(kdj_k，>80超买，<20超卖)
+- 布林带位置(boll_position，>2上轨，<-2下轨)
+- ATR波动率(atr_pct，>0.02高波动)
 
 数据：
 {json.dumps(signal_details, indent=2, ensure_ascii=False)}
@@ -890,7 +978,7 @@ def main():
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
     if api_key:
-        bw, sw = deepseek_generate_weights(
+        bw, sw, thresholds = deepseek_generate_weights(
             market_state,
             sentiment,
             market_info["market_above_ma20"],
@@ -899,11 +987,17 @@ def main():
             volatility,
             api_key,
         )
-        if bw and sw:
+        if bw and sw and thresholds:
             buy_w, sell_w = bw, sw
-            logger.info("使用AI动态权重")
+            BUY_THRESHOLD = thresholds["BUY_THRESHOLD"]
+            SELL_THRESHOLD = thresholds["SELL_THRESHOLD"]
+            QUICK_BUY_THRESHOLD = thresholds["QUICK_BUY_THRESHOLD"]
+            QUICK_SELL_THRESHOLD = thresholds["QUICK_SELL_THRESHOLD"]
+            RECENT_HIGH_WINDOW = thresholds["RECENT_HIGH_WINDOW"]
+            RECENT_LOW_WINDOW = thresholds["RECENT_LOW_WINDOW"]
+            logger.info("使用AI动态权重和阈值")
         else:
-            logger.warning("AI权重生成失败，使用默认权重")
+            logger.warning("AI权重或阈值生成失败，使用默认权重")
     else:
         logger.info("未设置DEEPSEEK_API_KEY，使用默认权重")
 
