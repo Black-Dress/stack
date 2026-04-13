@@ -16,6 +16,7 @@ import pandas as pd
 import baostock as bs
 import hashlib
 import openai
+import re
 from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 
@@ -65,6 +66,16 @@ DEFAULT_SELL_WEIGHTS = {
     "rsi_overbought": 0.15, "underperform_market": 0.20, "stop_loss_ma_break": 1.00,
     "trailing_stop_clear": 1.00, "trailing_stop_half": 0.50, "profit_target_hit": 0.30,
     "weekly_below_ma20": 0.20,
+}
+
+# 默认参数（会被AI覆盖）
+DEFAULT_PARAMS = {
+    "CONFIRM_DAYS": 3,
+    "BUY_THRESHOLD": 0.5,
+    "SELL_THRESHOLD": -0.2,
+    "QUICK_BUY_THRESHOLD": 0.6,
+    "RECENT_HIGH_WINDOW": 10,
+    "RECENT_LOW_WINDOW": 20,
 }
 
 # ---------------------------- 数据获取 ----------------------------
@@ -139,7 +150,10 @@ def calculate_atr(df, period=14):
     tr = pd.concat([df["high"]-df["low"], abs(df["high"]-df["close"].shift()), abs(df["low"]-df["close"].shift())], axis=1).max(1)
     return tr.rolling(period).mean()
 
-def calculate_indicators(df, need_amount_ma=True):
+
+def calculate_indicators(
+    df, need_amount_ma=True, recent_high_window=10, recent_low_window=20
+):
     df = df.copy()
     df["ma_short"] = df["close"].rolling(window=ETF_MA).mean()
     df["vol_ma"] = df["volume"].rolling(window=ETF_VOL_MA).mean()
@@ -172,9 +186,12 @@ def calculate_indicators(df, need_amount_ma=True):
     df["rsi"] = 100 - 100/(1+gain/loss)
     # ATR
     df["atr"] = calculate_atr(df, ATR_PERIOD)
-    df["recent_high_10"] = df["high"].rolling(10).max()
-    df["recent_low_20"] = df["low"].rolling(20).min()
+    df[f"recent_high_{recent_high_window}"] = (
+        df["high"].rolling(recent_high_window).max()
+    )
+    df[f"recent_low_{recent_low_window}"] = df["low"].rolling(recent_low_window).min()
     return df
+
 
 def get_sentiment_factor(macro_df):
     if len(macro_df) < RSI_PERIOD+1:
@@ -317,6 +334,142 @@ def deepseek_generate_weights(macro_status, sentiment_factor, market_above_ma20,
     except Exception as e:
         logger.error(f"AI权重生成失败: {e}，使用默认权重")
         return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+
+
+def build_optimized_prompt_for_params(
+    macro_status,
+    sentiment_factor,
+    market_above_ma20,
+    market_above_ma60,
+    market_amount_above_ma20,
+    volatility,
+):
+    prompt = f"""
+你是一个量化交易策略专家。当前市场环境如下：
+- 宏观状态：{macro_status}（bull牛市、oscillate震荡市、bear熊市）
+- 情绪系数：{sentiment_factor}（0.6=恐慌，0.8=偏弱，1.0=中性，0.9=偏热）
+- 大盘站上20日均线：{"是" if market_above_ma20 else "否"}
+- 大盘站上60日均线：{"是" if market_above_ma60 else "否"}
+- 市场成交额高于20日均额：{"是" if market_amount_above_ma20 else "否"}
+- 市场波动率(ATR/收盘价)：{volatility:.3f}（<0.01低波动，>0.02高波动）
+
+请根据市场环境调整以下交易参数，所有参数为整数或浮点数。
+
+【参数调整规则】
+1. CONFIRM_DAYS（确认天数，1-5）：高波动时增加到4-5以避免假信号，低波动时减少到2-3以快速响应。
+2. BUY_THRESHOLD（买入阈值，0.3-0.7）：牛市降低到0.4-0.5，熊市提高到0.6-0.7，震荡市0.5左右。
+3. SELL_THRESHOLD（卖出阈值，-0.5到-0.1）：熊市降低到-0.3到-0.2，牛市提高到-0.1左右。
+4. QUICK_BUY_THRESHOLD（快速买入阈值，0.5-0.8）：高波动时提高到0.7-0.8，低波动时降低到0.5-0.6。
+5. RECENT_HIGH_WINDOW（近期高点窗口，5-20）：高波动时缩短到5-10，低波动时延长到15-20。
+6. RECENT_LOW_WINDOW（近期低点窗口，10-30）：高波动时缩短到10-15，低波动时延长到20-30。
+
+【输出格式示例】
+{{"CONFIRM_DAYS":3,"BUY_THRESHOLD":0.5,"SELL_THRESHOLD":-0.2,"QUICK_BUY_THRESHOLD":0.6,"RECENT_HIGH_WINDOW":10,"RECENT_LOW_WINDOW":20}}
+
+请严格按照JSON格式输出，不要包含任何解释文字。
+"""
+    return prompt
+
+
+def _validate_and_filter_params(params, expected_keys, name):
+    """校验并过滤参数：只保留expected_keys中的键，缺失补默认值"""
+    if not isinstance(params, dict):
+        logger.error(f"{name} 不是字典，使用默认参数")
+        return None
+    filtered = {}
+    defaults = DEFAULT_PARAMS
+    for k in expected_keys:
+        v = params.get(k, defaults[k])
+        if k == "CONFIRM_DAYS" and not (1 <= v <= 5):
+            v = defaults[k]
+        elif k in ["BUY_THRESHOLD", "SELL_THRESHOLD", "QUICK_BUY_THRESHOLD"] and not (
+            -1 <= v <= 1
+        ):
+            v = defaults[k]
+        elif k == "RECENT_HIGH_WINDOW" and not (5 <= v <= 20):
+            v = defaults[k]
+        elif k == "RECENT_LOW_WINDOW" and not (10 <= v <= 30):
+            v = defaults[k]
+        filtered[k] = v
+    return filtered
+
+
+def deepseek_generate_params(
+    macro_status,
+    sentiment_factor,
+    market_above_ma20,
+    market_above_ma60,
+    market_amount_above_ma20,
+    volatility,
+    api_key,
+    use_cache=True,
+):
+    import re
+
+    cache_key = (
+        _get_cache_key(
+            macro_status,
+            sentiment_factor,
+            market_above_ma20,
+            market_above_ma60,
+            market_amount_above_ma20,
+            volatility,
+        )
+        + "_params"
+    )
+    if use_cache:
+        cache = _load_cache()
+        if cache_key in cache and "params" in cache[cache_key]:
+            params = _validate_and_filter_params(
+                cache[cache_key]["params"], DEFAULT_PARAMS.keys(), "缓存参数"
+            )
+            if params:
+                return params
+            else:
+                logger.warning("缓存参数无效，重新生成")
+
+    prompt = build_optimized_prompt_for_params(
+        macro_status,
+        sentiment_factor,
+        market_above_ma20,
+        market_above_ma60,
+        market_amount_above_ma20,
+        volatility,
+    )
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+        resp = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=400,
+            temperature=0.0,
+            timeout=10,
+        )
+        content = resp.choices[0].message.content
+        import re
+
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not json_match:
+            raise ValueError("未找到JSON")
+        data = json.loads(json_match.group())
+        params = _validate_and_filter_params(data, DEFAULT_PARAMS.keys(), "AI参数")
+        if params is None:
+            raise ValueError("参数校验失败")
+        if use_cache:
+            cache = _load_cache()
+            cache[cache_key] = {"params": params}
+            _save_cache(cache)
+        return params
+    except Exception as e:
+        logger.error(f"AI参数生成失败: {e}，使用默认参数")
+        return DEFAULT_PARAMS.copy()
+
 
 # ---------------------------- 市场状态精细化 ----------------------------
 def refine_market_state(market_df, api_key, use_cache=True):
@@ -472,32 +625,64 @@ def strength(price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up,
         weights = sell_weights
     return sum(weights.get(k,0)*factors.get(k,0) for k in weights)
 
-def get_action(score, score_history):
-    if len(score_history) >= CONFIRM_DAYS:
-        recent = [s["score"] for s in score_history[-CONFIRM_DAYS:]]
-        if all(s > BUY_THRESHOLD for s in recent):
+
+def get_action(
+    score,
+    score_history,
+    confirm_days,
+    buy_threshold,
+    sell_threshold,
+    quick_buy_threshold,
+):
+    if len(score_history) >= confirm_days:
+        recent = [s["score"] for s in score_history[-confirm_days:]]
+        if all(s > buy_threshold for s in recent):
             return "BUY"
-        if all(s < SELL_THRESHOLD for s in recent):
+        if all(s < sell_threshold for s in recent):
             return "SELL"
     if len(score_history) >= 2:
-        if score_history[-1]["score"] > QUICK_BUY_THRESHOLD and score_history[-1]["score"] > score_history[-2]["score"]:
+        if (
+            score_history[-1]["score"] > quick_buy_threshold
+            and score_history[-1]["score"] > score_history[-2]["score"]
+        ):
             return "BUY"
-    if score > BUY_THRESHOLD:
+    if score > buy_threshold:
         return "BUY"
-    elif score < SELL_THRESHOLD:
+    elif score < sell_threshold:
         return "SELL"
     else:
         return "HOLD"
 
-def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state, buy_w, sell_w):
+
+def analyze_etf(
+    code,
+    name,
+    real_price,
+    hist_df,
+    weekly_df,
+    market,
+    today,
+    state,
+    buy_w,
+    sell_w,
+    params,
+):
     if hist_df is None or len(hist_df) < 20:
         return f"{name}({code}) 数据不足", None, state
     d = hist_df.iloc[-1]
     ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
     rsi, boll_up, boll_low, williams_r = d["rsi"], d["boll_up"], d["boll_low"], d["williams_r"]
     atr_pct = d["atr"]/real_price if real_price>0 else 0
-    recent_high = d.get("recent_high_10", hist_df["high"].rolling(10).max().iloc[-1])
-    recent_low = d.get("recent_low_20", hist_df["low"].rolling(20).min().iloc[-1])
+    recent_high_window = params["RECENT_HIGH_WINDOW"]
+    recent_low_window = params["RECENT_LOW_WINDOW"]
+    recent_high = d.get(
+        f"recent_high_{recent_high_window}",
+        hist_df["high"].rolling(recent_high_window).max().iloc[-1],
+    )
+    recent_low = d.get(
+        f"recent_low_{recent_low_window}",
+        hist_df["low"].rolling(recent_low_window).min().iloc[-1],
+    )
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
         macd_golden = 1 if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"]) else 0
@@ -532,8 +717,17 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
             break
     if not found:
         state["score_history"].append({"date": today_str, "score": final})
-    state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[-CONFIRM_DAYS:]
-    action = get_action(final, state["score_history"])
+    state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[
+        -params["CONFIRM_DAYS"] :
+    ]
+    action = get_action(
+        final,
+        state["score_history"],
+        params["CONFIRM_DAYS"],
+        params["BUY_THRESHOLD"],
+        params["SELL_THRESHOLD"],
+        params["QUICK_BUY_THRESHOLD"],
+    )
     risk_warning = False
     if len(state["score_history"]) >= RISK_WARNING_DAYS:
         recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
@@ -544,6 +738,7 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
         output += f" 风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
     signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY","SELL") else None
     return output, signal, state
+
 
 # ---------------------------- 主程序 ----------------------------
 def main():
@@ -562,12 +757,16 @@ def main():
     if market_df is None or macro_df is None:
         print("获取宏观数据失败")
         return
-    macro_df = calculate_indicators(macro_df, need_amount_ma=False)
+    macro_df = calculate_indicators(
+        macro_df, need_amount_ma=False, recent_high_window=10, recent_low_window=20
+    )
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
-    market_df = calculate_indicators(market_df, need_amount_ma=True)
+    market_df = calculate_indicators(
+        market_df, need_amount_ma=True, recent_high_window=10, recent_low_window=20
+    )
     market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
-    
+
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if api_key:
         market_state, market_factor = refine_market_state(market_df, api_key)
@@ -580,7 +779,7 @@ def main():
         else:
             market_state, market_factor = "震荡偏弱", 1.0
         logger.info(f"简单规则市场状态: {market_state}, 因子: {market_factor}")
-    
+
     sentiment = get_sentiment_factor(macro_df)
     mkt = market_df.iloc[-1]
     market_info = {
@@ -594,18 +793,41 @@ def main():
     }
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+    params = DEFAULT_PARAMS.copy()
     if api_key:
-        bw, sw = deepseek_generate_weights(market_state, sentiment, market_info["market_above_ma20"],
-                                           market_info["market_above_ma60"], market_info["market_amount_above_ma20"],
-                                           volatility, api_key)
+        bw, sw = deepseek_generate_weights(
+            market_state,
+            sentiment,
+            market_info["market_above_ma20"],
+            market_info["market_above_ma60"],
+            market_info["market_amount_above_ma20"],
+            volatility,
+            api_key,
+            use_cache=False,
+        )
         if bw and sw:
             buy_w, sell_w = bw, sw
             logger.info("使用AI动态权重")
         else:
             logger.warning("AI权重生成失败，使用默认权重")
+        p = deepseek_generate_params(
+            market_state,
+            sentiment,
+            market_info["market_above_ma20"],
+            market_info["market_above_ma60"],
+            market_info["market_amount_above_ma20"],
+            volatility,
+            api_key,
+            use_cache=False,
+        )
+        if p:
+            params = p
+            logger.info(f"使用AI动态参数: {params}")
+        else:
+            logger.warning("AI参数生成失败，使用默认参数")
     else:
-        logger.info("未设置DEEPSEEK_API_KEY，使用默认权重")
-    
+        logger.info("未设置DEEPSEEK_API_KEY，使用默认权重和参数")
+
     signals = []
     etf_hist_cache = {}
     with ThreadPoolExecutor(max_workers=5) as ex:
@@ -613,11 +835,35 @@ def main():
         for _, row in etf_list.iterrows():
             code, name = row["代码"], row["名称"]
             hist = get_daily_data(code, start, today_str)
-            hist = calculate_indicators(hist, need_amount_ma=False) if hist is not None else None
+            hist = (
+                calculate_indicators(
+                    hist,
+                    need_amount_ma=False,
+                    recent_high_window=params["RECENT_HIGH_WINDOW"],
+                    recent_low_window=params["RECENT_LOW_WINDOW"],
+                )
+                if hist is not None
+                else None
+            )
             etf_hist_cache[code] = hist
             weekly = get_weekly_data(code, start, today_str)
             s = state.get(code, {})
-            futures.append(ex.submit(analyze_etf, code, name, get_realtime_price_sina(code), hist, weekly, market_info, today, s, buy_w, sell_w))
+            futures.append(
+                ex.submit(
+                    analyze_etf,
+                    code,
+                    name,
+                    get_realtime_price_sina(code),
+                    hist,
+                    weekly,
+                    market_info,
+                    today,
+                    s,
+                    buy_w,
+                    sell_w,
+                    params,
+                )
+            )
         for f in futures:
             out, sig, new_state = f.result()
             print(out)
@@ -629,7 +875,7 @@ def main():
             if sig:
                 signals.append(sig)
     save_state(state)
-    
+
     if signals and api_key:
         signals = rank_signals(signals, etf_hist_cache, api_key)
         print("\n【信号优先级排序】")
@@ -639,7 +885,7 @@ def main():
         print("\n【信号汇总】")
         for sig in signals:
             print(f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}")
-    
+
     silent_logout()
 
 if __name__ == "__main__":
