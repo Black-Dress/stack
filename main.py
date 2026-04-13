@@ -21,9 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ---------------------------- 日志配置（屏蔽 HTTP 请求日志） ----------------------------
 # 设置根日志级别为 INFO，保留自定义 INFO 日志
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # 屏蔽 OpenAI 及其底层 HTTP 库的 INFO 日志（去除 "HTTP Request: POST ..." 输出）
@@ -42,12 +40,10 @@ ATR_PERIOD = 14
 ATR_STOP_MULT = 2.0
 ATR_TRAILING_MULT = 1.0
 PROFIT_TARGET = 0.15
-CONFIRM_DAYS = 2
-# 配置（可动态调整）
-BUY_THRESHOLD = 0.3
+CONFIRM_DAYS = 3
+BUY_THRESHOLD = 0.5
 SELL_THRESHOLD = -0.2
-QUICK_BUY_THRESHOLD = 0.5
-QUICK_SELL_THRESHOLD = -0.4
+QUICK_BUY_THRESHOLD = 0.6
 RECENT_HIGH_WINDOW = 10
 RECENT_LOW_WINDOW = 20
 WEEKLY_MA = 20
@@ -59,28 +55,15 @@ CACHE_FILE = "weight_cache.json"
 
 # 默认权重（会被AI覆盖）
 DEFAULT_BUY_WEIGHTS = {
-    "price_above_ma20": 0.30,
-    "volume_above_ma5": 0.20,
-    "macd_golden_cross": 0.15,
-    "kdj_golden_cross": 0.15,
-    "bollinger_break_up": 0.10,
-    "williams_oversold": 0.10,
-    "market_above_ma20": 0.10,
-    "market_above_ma60": 0.10,
-    "market_amount_above_ma20": 0.10,
-    "outperform_market": 0.20,
-    "weekly_above_ma20": 0.20,
+    "price_above_ma20": 0.30, "volume_above_ma5": 0.20, "macd_golden_cross": 0.15,
+    "kdj_golden_cross": 0.15, "bollinger_break_up": 0.10, "williams_oversold": 0.10,
+    "market_above_ma20": 0.10, "market_above_ma60": 0.10, "market_amount_above_ma20": 0.10,
+    "outperform_market": 0.20, "weekly_above_ma20": 0.20,
 }
 DEFAULT_SELL_WEIGHTS = {
-    "price_below_ma20": 0.40,
-    "bollinger_break_down": 0.20,
-    "williams_overbought": 0.10,
-    "rsi_overbought": 0.15,
-    "underperform_market": 0.20,
-    "stop_loss_ma_break": 1.00,
-    "trailing_stop_clear": 1.00,
-    "trailing_stop_half": 0.50,
-    "profit_target_hit": 0.30,
+    "price_below_ma20": 0.40, "bollinger_break_down": 0.20, "williams_overbought": 0.10,
+    "rsi_overbought": 0.15, "underperform_market": 0.20, "stop_loss_ma_break": 1.00,
+    "trailing_stop_clear": 1.00, "trailing_stop_half": 0.50, "profit_target_hit": 0.30,
     "weekly_below_ma20": 0.20,
 }
 
@@ -98,13 +81,8 @@ def silent_logout():
         bs.logout()
 
 def get_daily_data(code, start_date, end_date):
-    rs = bs.query_history_k_data_plus(
-        code,
-        "date,code,open,high,low,close,volume,amount",
-        start_date=start_date,
-        end_date=end_date,
-        frequency="d",
-    )
+    rs = bs.query_history_k_data_plus(code, "date,code,open,high,low,close,volume,amount",
+                                      start_date=start_date, end_date=end_date, frequency="d")
     if rs.error_code != "0":
         return None
     data = []
@@ -115,14 +93,13 @@ def get_daily_data(code, start_date, end_date):
     df = pd.DataFrame(data, columns=rs.fields)
     df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
-    for col in ["open", "high", "low", "close", "volume", "amount"]:
+    for col in ["open","high","low","close","volume","amount"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 def get_weekly_data(code, start_date, end_date):
     df = get_daily_data(code, start_date, end_date)
-    if df is None:
-        return None
+    if df is None: return None
     weekly = df.resample("W-FRI").last()
     weekly["ma_short"] = weekly["close"].rolling(window=WEEKLY_MA).mean()
     return weekly
@@ -131,9 +108,7 @@ def get_realtime_price_sina(code):
     try:
         for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
             url = f"http://{domain}/list={code.replace('.','')}"
-            r = requests.get(
-                url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3
-            )
+            r = requests.get(url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3)
             if r.status_code == 200:
                 parts = r.text.split('"')[1].split(",")
                 if len(parts) > 3 and parts[3]:
@@ -161,14 +136,7 @@ def save_state(state):
 
 # ---------------------------- 技术指标 ----------------------------
 def calculate_atr(df, period=14):
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            abs(df["high"] - df["close"].shift()),
-            abs(df["low"] - df["close"].shift()),
-        ],
-        axis=1,
-    ).max(1)
+    tr = pd.concat([df["high"]-df["low"], abs(df["high"]-df["close"].shift()), abs(df["low"]-df["close"].shift())], axis=1).max(1)
     return tr.rolling(period).mean()
 
 def calculate_indicators(df, need_amount_ma=True):
@@ -186,22 +154,22 @@ def calculate_indicators(df, need_amount_ma=True):
     low_n = df["low"].rolling(9).min()
     high_n = df["high"].rolling(9).max()
     rsv = (df["close"] - low_n) / (high_n - low_n) * 100
-    df["kdj_k"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
-    df["kdj_d"] = df["kdj_k"].ewm(alpha=1 / 3, adjust=False).mean()
+    df["kdj_k"] = rsv.ewm(alpha=1/3, adjust=False).mean()
+    df["kdj_d"] = df["kdj_k"].ewm(alpha=1/3, adjust=False).mean()
     # 布林
     df["boll_mid"] = df["close"].rolling(20).mean()
     df["boll_std"] = df["close"].rolling(20).std()
-    df["boll_up"] = df["boll_mid"] + 2 * df["boll_std"]
-    df["boll_low"] = df["boll_mid"] - 2 * df["boll_std"]
+    df["boll_up"] = df["boll_mid"] + 2*df["boll_std"]
+    df["boll_low"] = df["boll_mid"] - 2*df["boll_std"]
     # 威廉
     high_14 = df["high"].rolling(14).max()
     low_14 = df["low"].rolling(14).min()
     df["williams_r"] = (high_14 - df["close"]) / (high_14 - low_14) * -100
     # RSI
     delta = df["close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df["rsi"] = 100 - 100 / (1 + gain / loss)
+    gain = delta.where(delta>0,0).rolling(14).mean()
+    loss = (-delta.where(delta<0,0)).rolling(14).mean()
+    df["rsi"] = 100 - 100/(1+gain/loss)
     # ATR
     df["atr"] = calculate_atr(df, ATR_PERIOD)
     df["recent_high_10"] = df["high"].rolling(10).max()
@@ -209,35 +177,21 @@ def calculate_indicators(df, need_amount_ma=True):
     return df
 
 def get_sentiment_factor(macro_df):
-    if len(macro_df) < RSI_PERIOD + 1:
+    if len(macro_df) < RSI_PERIOD+1:
         return 1.0
     delta = macro_df["close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
-    rsi = 100 - 100 / (1 + gain / loss)
+    gain = delta.where(delta>0,0).rolling(RSI_PERIOD).mean()
+    loss = (-delta.where(delta<0,0)).rolling(RSI_PERIOD).mean()
+    rsi = 100 - 100/(1+gain/loss)
     latest_rsi = rsi.iloc[-1]
-    if latest_rsi < 30:
-        return 0.6
-    if latest_rsi < 50:
-        return 0.8
-    if latest_rsi < 70:
-        return 1.0
+    if latest_rsi < 30: return 0.6
+    if latest_rsi < 50: return 0.8
+    if latest_rsi < 70: return 1.0
     return 0.9
 
-
 # ---------------------------- AI 权重生成（优化版） ----------------------------
-def _get_cache_key(
-    macro_status,
-    sentiment_factor,
-    market_above_ma20,
-    market_above_ma60,
-    market_amount_above_ma20,
-    volatility,
-):
-    return hashlib.md5(
-        f"{macro_status}_{sentiment_factor}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{volatility:.3f}".encode()
-    ).hexdigest()
-
+def _get_cache_key(macro_status, sentiment_factor, market_above_ma20, market_above_ma60, market_amount_above_ma20, volatility):
+    return hashlib.md5(f"{macro_status}_{sentiment_factor}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{volatility:.3f}".encode()).hexdigest()
 
 def _load_cache():
     if os.path.exists(CACHE_FILE):
@@ -269,40 +223,14 @@ def _validate_and_filter_weights(weights, expected_keys, name):
             filtered[k] /= total
     return filtered
 
-
-def build_optimized_prompt(
-    macro_status,
-    sentiment_factor,
-    market_above_ma20,
-    market_above_ma60,
-    market_amount_above_ma20,
-    volatility,
-):
-    buy_keys = [
-        "price_above_ma20",
-        "volume_above_ma5",
-        "macd_golden_cross",
-        "kdj_golden_cross",
-        "bollinger_break_up",
-        "williams_oversold",
-        "market_above_ma20",
-        "market_above_ma60",
-        "market_amount_above_ma20",
-        "outperform_market",
-        "weekly_above_ma20",
-    ]
-    sell_keys = [
-        "price_below_ma20",
-        "bollinger_break_down",
-        "williams_overbought",
-        "rsi_overbought",
-        "underperform_market",
-        "stop_loss_ma_break",
-        "trailing_stop_clear",
-        "trailing_stop_half",
-        "profit_target_hit",
-        "weekly_below_ma20",
-    ]
+def build_optimized_prompt(macro_status, sentiment_factor, market_above_ma20, market_above_ma60,
+                           market_amount_above_ma20, volatility):
+    buy_keys = ["price_above_ma20", "volume_above_ma5", "macd_golden_cross", "kdj_golden_cross",
+                "bollinger_break_up", "williams_oversold", "market_above_ma20", "market_above_ma60",
+                "market_amount_above_ma20", "outperform_market", "weekly_above_ma20"]
+    sell_keys = ["price_below_ma20", "bollinger_break_down", "williams_overbought", "rsi_overbought",
+                 "underperform_market", "stop_loss_ma_break", "trailing_stop_clear", "trailing_stop_half",
+                 "profit_target_hit", "weekly_below_ma20"]
     prompt = f"""
 你是一个量化交易策略专家。当前市场环境如下：
 - 宏观状态：{macro_status}（bull牛市、oscillate震荡市、bear熊市）
@@ -328,21 +256,6 @@ def build_optimized_prompt(
 4. 高波动时：提高profit_target_hit权重（因容易触发止盈），降低trailing_stop_clear阈值效应。
 5. 任何市场下，若认为应完全空仓：买入所有权重设为0，卖出权重全部给stop_loss_ma_break（设为1.0）。
 
-【阈值和窗口参数】
-请根据市场环境动态调整以下参数：
-- BUY_THRESHOLD: 买入阈值 (0.1-0.5)
-- SELL_THRESHOLD: 卖出阈值 (-0.5 到 -0.1)
-- QUICK_BUY_THRESHOLD: 快速买入阈值 (0.3-0.7)
-- QUICK_SELL_THRESHOLD: 快速卖出阈值 (-0.7 到 -0.3)
-- RECENT_HIGH_WINDOW: 近期高点窗口 (5-20)
-- RECENT_LOW_WINDOW: 近期低点窗口 (10-30)
-
-规则：
-- 牛市：提高买入阈值，降低卖出阈值，增加窗口以捕捉趋势。
-- 熊市：降低买入阈值，提高卖出阈值，减少窗口以快速止损。
-- 高波动：提高快速阈值，减少窗口。
-- 低波动：降低阈值，增加窗口。
-
 【约束条件】
 - 禁止添加任何未列出的键（如“空仓”、“观望”等）。
 - 单个因子权重不得超过0.6（除熊市卖出止损因子可到0.8外）。
@@ -350,72 +263,39 @@ def build_optimized_prompt(
 
 【输出格式示例】
 牛市示例：
-{{"buy": {{"price_above_ma20":0.25,"market_above_ma60":0.20,"weekly_above_ma20":0.15,"volume_above_ma5":0.10,"outperform_market":0.10,"macd_golden_cross":0.10,"kdj_golden_cross":0.10}}, "sell": {{"profit_target_hit":0.40,"rsi_overbought":0.30,"underperform_market":0.30}}, "thresholds": {{"BUY_THRESHOLD": 0.35, "SELL_THRESHOLD": -0.25, "QUICK_BUY_THRESHOLD": 0.55, "QUICK_SELL_THRESHOLD": -0.45, "RECENT_HIGH_WINDOW": 15, "RECENT_LOW_WINDOW": 25}}}}
+{{"buy": {{"price_above_ma20":0.25,"market_above_ma60":0.20,"weekly_above_ma20":0.15,"volume_above_ma5":0.10,"outperform_market":0.10,"macd_golden_cross":0.10,"kdj_golden_cross":0.10}}, "sell": {{"profit_target_hit":0.40,"rsi_overbought":0.30,"underperform_market":0.30}}}}
 熊市示例：
-{{"buy": {{"williams_oversold":0.20,"bollinger_break_up":0.10}}, "sell": {{"stop_loss_ma_break":0.70,"trailing_stop_clear":0.30}}, "thresholds": {{"BUY_THRESHOLD": 0.25, "SELL_THRESHOLD": -0.15, "QUICK_BUY_THRESHOLD": 0.45, "QUICK_SELL_THRESHOLD": -0.35, "RECENT_HIGH_WINDOW": 8, "RECENT_LOW_WINDOW": 15}}}}
+{{"buy": {{"williams_oversold":0.20,"bollinger_break_up":0.10}}, "sell": {{"stop_loss_ma_break":0.70,"trailing_stop_clear":0.30}}}}
 
 请严格按照JSON格式输出，不要包含任何解释文字。
 """
     return prompt
 
-
-def deepseek_generate_weights(
-    macro_status,
-    sentiment_factor,
-    market_above_ma20,
-    market_above_ma60,
-    market_amount_above_ma20,
-    volatility,
-    api_key,
-    use_cache=True,
-):
-    cache_key = _get_cache_key(
-        macro_status,
-        sentiment_factor,
-        market_above_ma20,
-        market_above_ma60,
-        market_amount_above_ma20,
-        volatility,
-    )
+def deepseek_generate_weights(macro_status, sentiment_factor, market_above_ma20, market_above_ma60,
+                              market_amount_above_ma20, volatility, api_key, use_cache=True):
+    cache_key = _get_cache_key(macro_status, sentiment_factor, market_above_ma20, market_above_ma60,
+                               market_amount_above_ma20, volatility)
     if use_cache:
         cache = _load_cache()
         if cache_key in cache:
             cached = cache[cache_key]
-            if "buy" in cached and "sell" in cached and "thresholds" in cached:
-                buy = _validate_and_filter_weights(
-                    cached["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入权重"
-                )
-                sell = _validate_and_filter_weights(
-                    cached["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出权重"
-                )
-                thresholds = cached["thresholds"]
-                if buy and sell and thresholds:
-                    return buy, sell, thresholds
+            if "buy" in cached and "sell" in cached:
+                buy = _validate_and_filter_weights(cached["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入权重")
+                sell = _validate_and_filter_weights(cached["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出权重")
+                if buy and sell:
+                    return buy, sell
                 else:
-                    logger.warning("缓存权重或阈值无效，重新生成")
+                    logger.warning("缓存权重无效，重新生成")
 
-    prompt = build_optimized_prompt(
-        macro_status,
-        sentiment_factor,
-        market_above_ma20,
-        market_above_ma60,
-        market_amount_above_ma20,
-        volatility,
-    )
+    prompt = build_optimized_prompt(macro_status, sentiment_factor, market_above_ma20, market_above_ma60,
+                                    market_amount_above_ma20, volatility)
     try:
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=800,
-            temperature=0.0,
-            timeout=10,
+            messages=[{"role":"system","content":"你是一个量化交易专家，输出严格符合要求的JSON。"},
+                      {"role":"user","content":prompt}],
+            max_tokens=800, temperature=0.0, timeout=10
         )
         import re
         content = resp.choices[0].message.content
@@ -423,67 +303,25 @@ def deepseek_generate_weights(
         if not json_match:
             raise ValueError("未找到JSON")
         data = json.loads(json_match.group())
-        if "buy" not in data or "sell" not in data or "thresholds" not in data:
-            raise ValueError("JSON缺少buy、sell或thresholds字段")
-        buy_weights = _validate_and_filter_weights(
-            data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
-        )
-        sell_weights = _validate_and_filter_weights(
-            data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
-        )
-        thresholds = data["thresholds"]
-        # 简单校验阈值范围
-        thresholds["BUY_THRESHOLD"] = max(
-            0.1, min(0.5, thresholds.get("BUY_THRESHOLD", 0.3))
-        )
-        thresholds["SELL_THRESHOLD"] = max(
-            -0.5, min(-0.1, thresholds.get("SELL_THRESHOLD", -0.2))
-        )
-        thresholds["QUICK_BUY_THRESHOLD"] = max(
-            0.3, min(0.7, thresholds.get("QUICK_BUY_THRESHOLD", 0.5))
-        )
-        thresholds["QUICK_SELL_THRESHOLD"] = max(
-            -0.7, min(-0.3, thresholds.get("QUICK_SELL_THRESHOLD", -0.4))
-        )
-        thresholds["RECENT_HIGH_WINDOW"] = max(
-            5, min(20, thresholds.get("RECENT_HIGH_WINDOW", 10))
-        )
-        thresholds["RECENT_LOW_WINDOW"] = max(
-            10, min(30, thresholds.get("RECENT_LOW_WINDOW", 20))
-        )
+        if "buy" not in data or "sell" not in data:
+            raise ValueError("JSON缺少buy或sell字段")
+        buy_weights = _validate_and_filter_weights(data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重")
+        sell_weights = _validate_and_filter_weights(data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重")
         if buy_weights is None or sell_weights is None:
             raise ValueError("权重校验失败")
         if use_cache:
             cache = _load_cache()
-            cache[cache_key] = {
-                "buy": buy_weights,
-                "sell": sell_weights,
-                "thresholds": thresholds,
-            }
+            cache[cache_key] = {"buy": buy_weights, "sell": sell_weights}
             _save_cache(cache)
-        return buy_weights, sell_weights, thresholds
+        return buy_weights, sell_weights
     except Exception as e:
         logger.error(f"AI权重生成失败: {e}，使用默认权重")
-        return (
-            DEFAULT_BUY_WEIGHTS.copy(),
-            DEFAULT_SELL_WEIGHTS.copy(),
-            {
-                "BUY_THRESHOLD": 0.3,
-                "SELL_THRESHOLD": -0.2,
-                "QUICK_BUY_THRESHOLD": 0.5,
-                "QUICK_SELL_THRESHOLD": -0.4,
-                "RECENT_HIGH_WINDOW": 10,
-                "RECENT_LOW_WINDOW": 20,
-            },
-        )
-
+        return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
 
 # ---------------------------- 市场状态精细化 ----------------------------
 def refine_market_state(market_df, api_key, use_cache=True):
     """调用AI分析大盘数据，返回精细市场状态和推荐市场因子"""
-    cache_key = (
-        f"market_state_{hashlib.md5(market_df.tail(20).to_json().encode()).hexdigest()}"
-    )
+    cache_key = f"market_state_{hashlib.md5(market_df.tail(20).to_json().encode()).hexdigest()}"
     if use_cache:
         cache = _load_cache()
         if cache_key in cache and "market_state" in cache[cache_key]:
@@ -492,15 +330,11 @@ def refine_market_state(market_df, api_key, use_cache=True):
             return state, factor
 
     recent = market_df.tail(20)
-    close_pct = recent["close"].pct_change().mean()
-    vol_pct = recent["volume"].pct_change().mean()
-    volatility = (recent["close"].pct_change().std()) * 100
-    above_ma20 = recent["close"].iloc[-1] > recent["ma_short"].iloc[-1]
-    above_ma60 = (
-        recent["close"].iloc[-1] > recent["ma_long"].iloc[-1]
-        if "ma_long" in recent
-        else above_ma20
-    )
+    close_pct = recent['close'].pct_change().mean()
+    vol_pct = recent['volume'].pct_change().mean()
+    volatility = (recent['close'].pct_change().std()) * 100
+    above_ma20 = recent['close'].iloc[-1] > recent['ma_short'].iloc[-1]
+    above_ma60 = recent['close'].iloc[-1] > recent['ma_long'].iloc[-1] if 'ma_long' in recent else above_ma20
 
     prompt = f"""
 你是一个市场分析专家。请根据以下大盘指数(上证)最近20日的数据，判断当前市场状态，并给出一个推荐的市场因子系数（0.6-1.4，1.0为中性，>1.0为积极，<1.0为防御）。
@@ -510,11 +344,6 @@ def refine_market_state(market_df, api_key, use_cache=True):
 - 日波动率（标准差%）：{volatility:.2f}%
 - 当前价格是否站上20日均线：{"是" if above_ma20 else "否"}
 - 当前价格是否站上60日均线：{"是" if above_ma60 else "否"}
-- 当天收盘价：{recent["close"].iloc[-1]:.2f}
-- 当天涨跌幅：{(recent["close"].iloc[-1] / recent["close"].iloc[-2] - 1) * 100:.2f}%（相对于前一天）
-- 当天成交量：{recent["volume"].iloc[-1]}
-- 当天成交额：{recent["amount"].iloc[-1]}
-- 当天是否放量：{"是" if recent["volume"].iloc[-1] > recent["vol_ma"].iloc[-1] else "否"}（相对于5日均量）
 
 请输出JSON格式：{{"state": "市场状态标签", "factor": 市场因子系数}}
 可选市场状态标签：强势牛市、正常牛市、震荡偏强、震荡偏弱、弱势反弹、熊市下跌中继、熊市加速下跌。
@@ -524,16 +353,10 @@ def refine_market_state(market_df, api_key, use_cache=True):
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "输出严格JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=200,
-            temperature=0.0,
-            timeout=10,
+            messages=[{"role":"system","content":"输出严格JSON。"},{"role":"user","content":prompt}],
+            max_tokens=200, temperature=0.0, timeout=10
         )
         import re
-
         content = resp.choices[0].message.content
         json_match = re.search(r"\{.*\}", content, re.DOTALL)
         if json_match:
@@ -556,63 +379,26 @@ def refine_market_state(market_df, api_key, use_cache=True):
     else:
         return "震荡偏弱", 1.0
 
-
 # ---------------------------- 信号优先级排序 ----------------------------
 def rank_signals(signals, etf_hist_cache, api_key):
     if not signals:
         return signals
     signal_details = []
     for sig in signals:
-        code = sig["code"]
+        code = sig['code']
         hist = etf_hist_cache.get(code)
         if hist is not None and len(hist) >= 5:
             last = hist.iloc[-1]
-            vol_ratio = last["volume"] / last["vol_ma"] if last["vol_ma"] > 0 else 1
-            rsi = last["rsi"]
-            williams = last["williams_r"]
-            ret_5d = (
-                (last["close"] / hist.iloc[-5]["close"] - 1) if len(hist) >= 5 else 0
-            )
-            today_change = (
-                (last["close"] / hist.iloc[-2]["close"] - 1) if len(hist) >= 2 else 0
-            )
-            macd_dif = last["macd_dif"]
-            kdj_k = last["kdj_k"]
-            boll_position = (
-                (last["close"] - last["boll_mid"]) / last["boll_std"]
-                if last["boll_std"] > 0
-                else 0
-            )
-            atr_pct = last["atr"] / last["close"] if last["close"] > 0 else 0
+            vol_ratio = last['volume'] / last['vol_ma'] if last['vol_ma']>0 else 1
+            rsi = last['rsi']
+            williams = last['williams_r']
+            ret_5d = (last['close'] / hist.iloc[-5]['close'] - 1) if len(hist)>=5 else 0
         else:
-            (
-                vol_ratio,
-                rsi,
-                williams,
-                ret_5d,
-                today_change,
-                macd_dif,
-                kdj_k,
-                boll_position,
-                atr_pct,
-            ) = (1, 50, -50, 0, 0, 0, 50, 0, 0)
-        signal_details.append(
-            {
-                "code": code,
-                "name": sig["name"],
-                "action": sig["action"],
-                "score": sig["score"],
-                "vol_ratio": vol_ratio,
-                "rsi": rsi,
-                "williams": williams,
-                "ret_5d": ret_5d,
-                "today_change": today_change,
-                "macd_dif": macd_dif,
-                "kdj_k": kdj_k,
-                "boll_position": boll_position,
-                "atr_pct": atr_pct,
-            }
-        )
+            vol_ratio, rsi, williams, ret_5d = 1, 50, -50, 0
+        signal_details.append({
+            "code": code, "name": sig['name'], "action": sig['action'], "score": sig['score'],
+            "vol_ratio": vol_ratio, "rsi": rsi, "williams": williams, "ret_5d": ret_5d
+        })
     prompt = f"""
 你是一个交易策略顾问。以下是一些ETF的交易信号，请根据信号强度、技术指标和近期表现，分别对BUY信号和SELL信号进行优先级排序（从高到低）。
 每个信号包含以下信息：
@@ -623,11 +409,6 @@ def rank_signals(signals, etf_hist_cache, api_key):
 - RSI值
 - 威廉指标(williams)
 - 近5日涨幅(ret_5d)
-- 当天涨跌幅(today_change)
-- MACD差值(macd_dif，正值看涨)
-- KDJ K值(kdj_k，>80超买，<20超卖)
-- 布林带位置(boll_position，>2上轨，<-2下轨)
-- ATR波动率(atr_pct，>0.02高波动)
 
 数据：
 {json.dumps(signal_details, indent=2, ensure_ascii=False)}
@@ -639,249 +420,107 @@ def rank_signals(signals, etf_hist_cache, api_key):
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "输出严格JSON数组。"},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=500,
-            temperature=0.0,
-            timeout=10,
+            messages=[{"role":"system","content":"输出严格JSON数组。"},{"role":"user","content":prompt}],
+            max_tokens=500, temperature=0.0, timeout=10
         )
         content = resp.choices[0].message.content
         import re
-
         json_match = re.search(r"\[.*\]", content, re.DOTALL)
         if json_match:
             ranked = json.loads(json_match.group())
-            order_map = {item["code"]: item["priority"] for item in ranked}
-            signals.sort(key=lambda x: order_map.get(x["code"], 999))
+            order_map = {item['code']: item['priority'] for item in ranked}
+            signals.sort(key=lambda x: order_map.get(x['code'], 999))
     except Exception as e:
         logger.error(f"信号排序失败: {e}")
     return signals
 
-
 # ---------------------------- 评分与信号（已修复威廉超卖） ----------------------------
-def strength(
-    price,
-    ma20,
-    volume,
-    vol_ma,
-    macd_golden,
-    kdj_golden,
-    rsi,
-    boll_up,
-    boll_low,
-    williams_r,
-    ret_etf_5d,
-    ret_market_5d,
-    weekly_above,
-    weekly_below,
-    recent_high,
-    recent_low,
-    atr_pct,
-    market_above_ma20,
-    market_above_ma60,
-    market_amount_above_ma20,
-    is_buy,
-    buy_weights,
-    sell_weights,
-):
-    def cap(x):
-        return max(0.0, min(1.0, x))
-
+def strength(price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
+            ret_etf_5d, ret_market_5d, weekly_above, weekly_below, recent_high, recent_low, atr_pct,
+            market_above_ma20, market_above_ma60, market_amount_above_ma20, is_buy, buy_weights, sell_weights):
+    def cap(x): return max(0.0, min(1.0, x))
     if is_buy:
-        # 修复：威廉超卖条件 williams_r <= -80
-        williams_oversold = cap((-80 - williams_r) / 20) if williams_r <= -80 else 0
+        # 修复：威廉超卖条件 williams_r < -80
+        williams_oversold = cap((-80 - williams_r) / 20) if williams_r < -80 else 0
         factors = {
-            "price_above_ma20": (
-                cap((price - ma20) / (ma20 * 0.1)) if price > ma20 else 0
-            ),
-            "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
+            "price_above_ma20": cap((price-ma20)/(ma20*0.1)) if price>ma20 else 0,
+            "volume_above_ma5": cap(volume/vol_ma) if volume>vol_ma else 0,
             "macd_golden_cross": macd_golden,
             "kdj_golden_cross": kdj_golden,
-            "bollinger_break_up": (
-                cap((price - boll_up) / boll_up) if price > boll_up else 0
-            ),
+            "bollinger_break_up": cap((price-boll_up)/boll_up) if price>boll_up else 0,
             "williams_oversold": williams_oversold,
             "market_above_ma20": 1 if market_above_ma20 else 0,
             "market_above_ma60": 1 if market_above_ma60 else 0,
             "market_amount_above_ma20": 1 if market_amount_above_ma20 else 0,
-            "outperform_market": (
-                cap((ret_etf_5d - ret_market_5d) / 0.05)
-                if ret_etf_5d > ret_market_5d
-                else 0
-            ),
+            "outperform_market": cap((ret_etf_5d-ret_market_5d)/0.05) if ret_etf_5d>ret_market_5d else 0,
             "weekly_above_ma20": 1 if weekly_above else 0,
         }
         weights = buy_weights
     else:
         factors = {
-            "price_below_ma20": (
-                cap((ma20 - price) / (ma20 * 0.1)) if price < ma20 else 0
-            ),
-            "bollinger_break_down": (
-                cap((boll_low - price) / boll_low) if price < boll_low else 0
-            ),
-            # 威廉超买：r<=-20为超买，向上逆转时买点已过
-            "williams_overbought": (
-                cap((williams_r - 20) / 20) if williams_r >= 20 else 0
-            ),
-            "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
-            "underperform_market": (
-                cap((ret_market_5d - ret_etf_5d) / 0.05)
-                if ret_etf_5d < ret_market_5d
-                else 0
-            ),
-            "stop_loss_ma_break": (
-                cap((ma20 - price) / (ma20 * 0.05)) if price < ma20 else 0
-            ),
-            "trailing_stop_clear": (
-                cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
-                if recent_high > 0
-                and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
-                else 0
-            ),
-            "trailing_stop_half": (
-                cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
-                if recent_high > 0
-                and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
-                else 0
-            ),
-            "profit_target_hit": (
-                cap((price - recent_low) / recent_low / PROFIT_TARGET)
-                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET
-                else 0
-            ),
+            "price_below_ma20": cap((ma20-price)/(ma20*0.1)) if price<ma20 else 0,
+            "bollinger_break_down": cap((boll_low-price)/boll_low) if price<boll_low else 0,
+            "williams_overbought": cap((20-williams_r)/20) if williams_r<20 else 0,
+            "rsi_overbought": cap((rsi-70)/30) if rsi>70 else 0,
+            "underperform_market": cap((ret_market_5d-ret_etf_5d)/0.05) if ret_etf_5d<ret_market_5d else 0,
+            "stop_loss_ma_break": cap((ma20-price)/(ma20*0.05)) if price<ma20 else 0,
+            "trailing_stop_clear": cap((recent_high-price)/recent_high/(ATR_STOP_MULT*atr_pct)) if recent_high>0 and (recent_high-price)/recent_high >= ATR_STOP_MULT*atr_pct else 0,
+            "trailing_stop_half": cap((recent_high-price)/recent_high/(ATR_TRAILING_MULT*atr_pct)) if recent_high>0 and (recent_high-price)/recent_high >= ATR_TRAILING_MULT*atr_pct else 0,
+            "profit_target_hit": cap((price-recent_low)/recent_low/PROFIT_TARGET) if recent_low>0 and (price-recent_low)/recent_low >= PROFIT_TARGET else 0,
             "weekly_below_ma20": 1 if weekly_below else 0,
         }
         weights = sell_weights
-    return sum(weights.get(k, 0) * factors.get(k, 0) for k in weights)
-
+    return sum(weights.get(k,0)*factors.get(k,0) for k in weights)
 
 def get_action(score, score_history):
-    # 先看确认阶段（保守）
     if len(score_history) >= CONFIRM_DAYS:
         recent = [s["score"] for s in score_history[-CONFIRM_DAYS:]]
-        avg_recent = sum(recent) / len(recent)
-        if all(s > BUY_THRESHOLD for s in recent) and avg_recent > BUY_THRESHOLD + 0.05:
+        if all(s > BUY_THRESHOLD for s in recent):
             return "BUY"
-        if all(s < SELL_THRESHOLD for s in recent) and avg_recent < SELL_THRESHOLD - 0.05:
+        if all(s < SELL_THRESHOLD for s in recent):
             return "SELL"
-    # 快速信号: 价格突发时加速判定
     if len(score_history) >= 2:
-        prev = score_history[-2]["score"]
-        last = score_history[-1]["score"]
-        if last > QUICK_BUY_THRESHOLD and last > prev:
+        if score_history[-1]["score"] > QUICK_BUY_THRESHOLD and score_history[-1]["score"] > score_history[-2]["score"]:
             return "BUY"
-        if last < QUICK_SELL_THRESHOLD and last < prev:
-            return "SELL"
-    # 基础阈值判定
     if score > BUY_THRESHOLD:
         return "BUY"
-    if score < SELL_THRESHOLD:
+    elif score < SELL_THRESHOLD:
         return "SELL"
-    return "HOLD"
+    else:
+        return "HOLD"
 
-
-def analyze_etf(
-    code, name, real_price, hist_df, weekly_df, market, today, state, buy_w, sell_w
-):
+def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state, buy_w, sell_w):
     if hist_df is None or len(hist_df) < 20:
         return f"{name}({code}) 数据不足", None, state
     d = hist_df.iloc[-1]
-    if real_price is None or real_price <= 0:
-        real_price = float(d["close"])
-    if real_price <= 0 or np.isnan(real_price):
-        return f"{name}({code}) 实时价格异常", None, state
     ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
-    rsi, boll_up, boll_low, williams_r = (
-        d["rsi"],
-        d["boll_up"],
-        d["boll_low"],
-        d["williams_r"],
-    )
-    atr_pct = d["atr"] / real_price if real_price > 0 else 0
+    rsi, boll_up, boll_low, williams_r = d["rsi"], d["boll_up"], d["boll_low"], d["williams_r"]
+    atr_pct = d["atr"]/real_price if real_price>0 else 0
     recent_high = d.get("recent_high_10", hist_df["high"].rolling(10).max().iloc[-1])
     recent_low = d.get("recent_low_20", hist_df["low"].rolling(20).min().iloc[-1])
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
-        macd_golden = (
-            1
-            if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"])
-            else 0
-        )
-        kdj_golden = (
-            1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
-        )
+        macd_golden = 1 if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"]) else 0
+        kdj_golden = 1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
     else:
         macd_golden = kdj_golden = 0
-    ret_etf_5d = (
-        (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
-    )
+    ret_etf_5d = (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df)>=5 else 0
     weekly_above = weekly_below = False
     if weekly_df is not None and not weekly_df.empty:
         w = weekly_df.iloc[-1]
         if not np.isnan(w["ma_short"]):
             weekly_above = w["close"] > w["ma_short"]
             weekly_below = w["close"] < w["ma_short"]
-    buy_score = strength(
-        real_price,
-        ma20,
-        volume,
-        vol_ma,
-        macd_golden,
-        kdj_golden,
-        rsi,
-        boll_up,
-        boll_low,
-        williams_r,
-        ret_etf_5d,
-        market["ret_market_5d"],
-        weekly_above,
-        weekly_below,
-        recent_high,
-        recent_low,
-        atr_pct,
-        market["market_above_ma20"],
-        market["market_above_ma60"],
-        market["market_amount_above_ma20"],
-        True,
-        buy_w,
-        sell_w,
-    )
-    sell_score = strength(
-        real_price,
-        ma20,
-        volume,
-        vol_ma,
-        macd_golden,
-        kdj_golden,
-        rsi,
-        boll_up,
-        boll_low,
-        williams_r,
-        ret_etf_5d,
-        market["ret_market_5d"],
-        weekly_above,
-        weekly_below,
-        recent_high,
-        recent_low,
-        atr_pct,
-        market["market_above_ma20"],
-        market["market_above_ma60"],
-        market["market_amount_above_ma20"],
-        False,
-        buy_w,
-        sell_w,
-    )
+    buy_score = strength(real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
+                        ret_etf_5d, market["ret_market_5d"], weekly_above, weekly_below, recent_high, recent_low, atr_pct,
+                        market["market_above_ma20"], market["market_above_ma60"], market["market_amount_above_ma20"],
+                        True, buy_w, sell_w)
+    sell_score = strength(real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
+                         ret_etf_5d, market["ret_market_5d"], weekly_above, weekly_below, recent_high, recent_low, atr_pct,
+                         market["market_above_ma20"], market["market_above_ma60"], market["market_amount_above_ma20"],
+                         False, buy_w, sell_w)
     raw = buy_score - sell_score
-    # 波动率加权：高波动时收敛信号，低波动时适度放大信号
-    volatility_boost = 1.0
-    if atr_pct > 0.04:
-        volatility_boost = 0.9
-    elif atr_pct < 0.015:
-        volatility_boost = 1.05
-    final = raw * volatility_boost * market["market_factor"] * market["sentiment_factor"]
+    final = raw * market["market_factor"] * market["sentiment_factor"]
     today_str = today.strftime("%Y-%m-%d")
     if "score_history" not in state:
         state["score_history"] = []
@@ -893,32 +532,22 @@ def analyze_etf(
             break
     if not found:
         state["score_history"].append({"date": today_str, "score": final})
-    state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[
-        -CONFIRM_DAYS:
-    ]
+    state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[-CONFIRM_DAYS:]
     action = get_action(final, state["score_history"])
     risk_warning = False
     if len(state["score_history"]) >= RISK_WARNING_DAYS:
-        recent_scores = [
-            s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]
-        ]
+        recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
         if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
             risk_warning = True
     output = f"【{name}({code})】 {real_price:.3f} 评分:{final:.2f} 操作:{action}"
     if risk_warning:
         output += f" 风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
-    signal = (
-        {"action": action, "name": name, "code": code, "score": final}
-        if action in ("BUY", "SELL")
-        else None
-    )
+    signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY","SELL") else None
     return output, signal, state
-
 
 # ---------------------------- 主程序 ----------------------------
 def main():
-    if not silent_login():
-        return
+    if not silent_login(): return
     try:
         etf_list = load_positions()
     except Exception as e:
@@ -938,28 +567,20 @@ def main():
     market_df = calculate_indicators(market_df, need_amount_ma=True)
     market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
-
+    
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if api_key:
         market_state, market_factor = refine_market_state(market_df, api_key)
         logger.info(f"AI市场状态: {market_state}, 因子: {market_factor}")
     else:
-        if market_df.iloc[-1]["close"] > market_df.iloc[-1][
-            "ma_short"
-        ] and market_df.iloc[-1]["close"] > market_df.iloc[-1].get(
-            "ma_long", market_df.iloc[-1]["ma_short"]
-        ):
+        if market_df.iloc[-1]["close"] > market_df.iloc[-1]["ma_short"] and market_df.iloc[-1]["close"] > market_df.iloc[-1].get("ma_long", market_df.iloc[-1]["ma_short"]):
             market_state, market_factor = "正常牛市", 1.2
-        elif market_df.iloc[-1]["close"] < market_df.iloc[-1][
-            "ma_short"
-        ] and market_df.iloc[-1]["close"] < market_df.iloc[-1].get(
-            "ma_long", market_df.iloc[-1]["ma_short"]
-        ):
+        elif market_df.iloc[-1]["close"] < market_df.iloc[-1]["ma_short"] and market_df.iloc[-1]["close"] < market_df.iloc[-1].get("ma_long", market_df.iloc[-1]["ma_short"]):
             market_state, market_factor = "熊市下跌", 0.8
         else:
             market_state, market_factor = "震荡偏弱", 1.0
         logger.info(f"简单规则市场状态: {market_state}, 因子: {market_factor}")
-
+    
     sentiment = get_sentiment_factor(macro_df)
     mkt = market_df.iloc[-1]
     market_info = {
@@ -969,38 +590,22 @@ def main():
         "market_above_ma20": mkt["close"] > mkt["ma_short"],
         "market_above_ma60": mkt["close"] > mkt.get("ma_long", mkt["ma_short"]),
         "market_amount_above_ma20": mkt["amount"] > mkt["amount_ma"],
-        "ret_market_5d": (
-            (mkt["close"] / market_df.iloc[-5]["close"] - 1)
-            if len(market_df) >= 5
-            else 0
-        ),
+        "ret_market_5d": (mkt["close"]/market_df.iloc[-5]["close"]-1) if len(market_df)>=5 else 0,
     }
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
     if api_key:
-        bw, sw, thresholds = deepseek_generate_weights(
-            market_state,
-            sentiment,
-            market_info["market_above_ma20"],
-            market_info["market_above_ma60"],
-            market_info["market_amount_above_ma20"],
-            volatility,
-            api_key,
-        )
-        if bw and sw and thresholds:
+        bw, sw = deepseek_generate_weights(market_state, sentiment, market_info["market_above_ma20"],
+                                           market_info["market_above_ma60"], market_info["market_amount_above_ma20"],
+                                           volatility, api_key)
+        if bw and sw:
             buy_w, sell_w = bw, sw
-            BUY_THRESHOLD = thresholds["BUY_THRESHOLD"]
-            SELL_THRESHOLD = thresholds["SELL_THRESHOLD"]
-            QUICK_BUY_THRESHOLD = thresholds["QUICK_BUY_THRESHOLD"]
-            QUICK_SELL_THRESHOLD = thresholds["QUICK_SELL_THRESHOLD"]
-            RECENT_HIGH_WINDOW = thresholds["RECENT_HIGH_WINDOW"]
-            RECENT_LOW_WINDOW = thresholds["RECENT_LOW_WINDOW"]
-            logger.info("使用AI动态权重和阈值")
+            logger.info("使用AI动态权重")
         else:
-            logger.warning("AI权重或阈值生成失败，使用默认权重")
+            logger.warning("AI权重生成失败，使用默认权重")
     else:
         logger.info("未设置DEEPSEEK_API_KEY，使用默认权重")
-
+    
     signals = []
     etf_hist_cache = {}
     with ThreadPoolExecutor(max_workers=5) as ex:
@@ -1008,55 +613,33 @@ def main():
         for _, row in etf_list.iterrows():
             code, name = row["代码"], row["名称"]
             hist = get_daily_data(code, start, today_str)
-            hist = (
-                calculate_indicators(hist, need_amount_ma=False)
-                if hist is not None
-                else None
-            )
+            hist = calculate_indicators(hist, need_amount_ma=False) if hist is not None else None
             etf_hist_cache[code] = hist
             weekly = get_weekly_data(code, start, today_str)
             s = state.get(code, {})
-            futures.append(
-                ex.submit(
-                    analyze_etf,
-                    code,
-                    name,
-                    get_realtime_price_sina(code),
-                    hist,
-                    weekly,
-                    market_info,
-                    today,
-                    s,
-                    buy_w,
-                    sell_w,
-                )
-            )
+            futures.append(ex.submit(analyze_etf, code, name, get_realtime_price_sina(code), hist, weekly, market_info, today, s, buy_w, sell_w))
         for f in futures:
             out, sig, new_state = f.result()
             print(out)
             import re
-            m = re.search(r"【.*?\((.*?)\)】", out)
+            m = re.search(r'【.*?\((.*?)\)】', out)
             if m:
                 code = m.group(1)
                 state[code] = new_state
             if sig:
                 signals.append(sig)
     save_state(state)
-
+    
     if signals and api_key:
         signals = rank_signals(signals, etf_hist_cache, api_key)
         print("\n【信号优先级排序】")
         for sig in signals:
-            print(
-                f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}"
-            )
+            print(f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}")
     elif signals:
         print("\n【信号汇总】")
         for sig in signals:
-            print(
-                f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}"
-            )
-
+            print(f"{sig['action']}: {sig['name']}({sig['code']}) 评分:{sig['score']:.2f}")
+    
     silent_logout()
 
 if __name__ == "__main__":
