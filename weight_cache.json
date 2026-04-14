@@ -111,5 +111,9 @@
       "profit_target_hit": 0.4,
       "weekly_below_ma20": 0.0
     }
+  },
+  "market_state_be06843e5227238f8b37f04b98f43d73": {
+    "market_state": "震荡偏强",
+    "market_factor": 1.1
   }
 }
