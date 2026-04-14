@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ETF 智能分析系统（优化版）- 市场状态精细化 + TMSV复合指标
+ETF 智能分析系统（最终版）
 功能：实时分析 ETF，输出评分和操作等级（强烈买入/买入/偏多持有/中性观望/卖出/强烈卖出）。
-TMSV已融入评分体系，仅作为内部因子，不在输出中显示。
-依赖：baostock, pandas, numpy, requests, openai
+TMSV 复合指标已融入评分体系，仅作为内部因子。
+支持 AI 动态权重、动态参数、市场状态精细化。
+输出为对齐表格，无额外信号汇总。
 """
 
 import os
@@ -24,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor
 # ---------------------------- 日志配置（屏蔽 HTTP 请求日志） ----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-
 for lib in ["openai", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
@@ -53,7 +53,6 @@ POSITION_FILE = "positions.csv"
 STATE_FILE = "etf_state.json"
 CACHE_FILE = "weight_cache.json"
 
-# 默认权重（会被AI覆盖，新增 tmsv_score）
 DEFAULT_BUY_WEIGHTS = {
     "price_above_ma20": 0.25, "volume_above_ma5": 0.15, "macd_golden_cross": 0.10,
     "kdj_golden_cross": 0.10, "bollinger_break_up": 0.08, "williams_oversold": 0.08,
@@ -61,13 +60,17 @@ DEFAULT_BUY_WEIGHTS = {
     "outperform_market": 0.10, "weekly_above_ma20": 0.10, "tmsv_score": 0.10,
 }
 DEFAULT_SELL_WEIGHTS = {
-    "price_below_ma20": 0.40, "bollinger_break_down": 0.20, "williams_overbought": 0.10,
-    "rsi_overbought": 0.15, "underperform_market": 0.20, "stop_loss_ma_break": 1.00,
-    "trailing_stop_clear": 1.00, "trailing_stop_half": 0.50, "profit_target_hit": 0.30,
+    "price_below_ma20": 0.40,
+    "bollinger_break_down": 0.20,
+    "williams_overbought": 0.10,
+    "rsi_overbought": 0.15,
+    "underperform_market": 0.20,
+    "stop_loss_ma_break": 1.00,
+    "trailing_stop_clear": 1.00,
+    "trailing_stop_half": 0.50,
+    "profit_target_hit": 0.30,
     "weekly_below_ma20": 0.20,
 }
-
-# 默认参数（会被AI覆盖）
 DEFAULT_PARAMS = {
     "CONFIRM_DAYS": 3,
     "BUY_THRESHOLD": 0.5,
@@ -109,7 +112,8 @@ def get_daily_data(code, start_date, end_date):
 
 def get_weekly_data(code, start_date, end_date):
     df = get_daily_data(code, start_date, end_date)
-    if df is None: return None
+    if df is None:
+        return None
     weekly = df.resample("W-FRI").last()
     weekly["ma_short"] = weekly["close"].rolling(window=WEEKLY_MA).mean()
     return weekly
@@ -194,9 +198,12 @@ def get_sentiment_factor(macro_df):
     loss = (-delta.where(delta<0,0)).rolling(RSI_PERIOD).mean()
     rsi = 100 - 100/(1+gain/loss)
     latest_rsi = rsi.iloc[-1]
-    if latest_rsi < 30: return 0.6
-    if latest_rsi < 50: return 0.8
-    if latest_rsi < 70: return 1.0
+    if latest_rsi < 30:
+        return 0.6
+    if latest_rsi < 50:
+        return 0.8
+    if latest_rsi < 70:
+        return 1.0
     return 0.9
 
 # ---------------------------- TMSV 复合指标（仅内部使用） ----------------------------
@@ -227,17 +234,20 @@ def compute_tmsv(df):
     except Exception as e:
         logger.warning(f"TMSV 列计算失败: {e}")
         return pd.Series([50.0] * len(df))
+
     # 趋势得分
     price_above_ma20 = ((df['close'] - df['ma20']) / (df['ma20'].replace(0, np.nan) * 0.1)).clip(0,1).fillna(0)
     price_above_ma60 = ((df['close'] - df['ma60']) / (df['ma60'].replace(0, np.nan) * 0.1)).clip(0,1).fillna(0)
     ma20_slope = df['ma20'].diff(5) / df['ma20'].shift(5).replace(0, np.nan)
     slope_score = (ma20_slope * 10).clip(0,1).fillna(0)
     trend_score = (price_above_ma20 * 0.5 + price_above_ma60 * 0.3 + slope_score * 0.2) * 100
+
     # 动量得分
     rsi_score = ((df['rsi'] - 50) * 3.33).clip(0,100).fillna(50)
     macd_change = df['macd_hist'].diff() / (df['macd_hist'].shift(1).abs() + 0.001)
     macd_score = (macd_change * 100).clip(0,100).fillna(50)
     mom_score = rsi_score * 0.6 + macd_score * 0.4
+
     # 量价得分
     vol_ratio = df['volume'] / df['vol_ma'].replace(0, np.nan)
     vol_ratio_score = ((vol_ratio - 0.8) / 1.2 * 100).clip(0,100).fillna(50)
@@ -245,6 +255,7 @@ def compute_tmsv(df):
     vol_up = df['volume'] > df['vol_ma']
     consistency = np.where(price_up == vol_up, 100, 0)
     vol_score = vol_ratio_score * 0.7 + consistency * 0.3
+
     # 波动率因子
     atr_pct = df['atr'] / df['close'].replace(0, np.nan)
     vol_factor = np.select(
@@ -253,6 +264,7 @@ def compute_tmsv(df):
         default=1.2 - (atr_pct - 0.01) / 0.02 * 0.6
     )
     vol_factor = np.nan_to_num(vol_factor, nan=1.0)
+
     tmsv = (trend_score * 0.3 + mom_score * 0.3 + vol_score * 0.2) * vol_factor
     tmsv = tmsv.clip(0,100).fillna(50)
     return tmsv
@@ -388,6 +400,7 @@ def deepseek_generate_weights(macro_status, sentiment_factor, market_above_ma20,
         logger.error(f"AI权重生成失败: {e}，使用默认权重")
         return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
 
+# ---------------------------- AI 参数生成 ----------------------------
 def build_optimized_prompt_for_params(macro_status, sentiment_factor, market_above_ma20, market_above_ma60,
                                       market_amount_above_ma20, volatility):
     prompt = f"""
@@ -538,7 +551,10 @@ def strength(price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up,
             ret_etf_5d, ret_market_5d, weekly_above, weekly_below, recent_high, recent_low, atr_pct,
             market_above_ma20, market_above_ma60, market_amount_above_ma20, is_buy, buy_weights, sell_weights,
             tmsv_strength=0.0):
-    def cap(x): return max(0.0, min(1.0, x))
+
+    def cap(x):
+        return max(0.0, min(1.0, x))
+
     if is_buy:
         williams_oversold = cap((-80 - williams_r) / 20) if williams_r < -80 else 0
         factors = {
@@ -631,7 +647,7 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
             weekly_above = w["close"] > w["ma_short"]
             weekly_below = w["close"] < w["ma_short"]
 
-    # 计算 TMSV 指标（仅内部使用）
+    # 计算 TMSV
     try:
         tmsv_series = compute_tmsv(hist_df)
         tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
@@ -640,7 +656,7 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
     except Exception as e:
         logger.warning(f"TMSV 计算异常: {e}")
         tmsv = 50.0
-    tmsv_strength = tmsv / 100.0  # 0-1
+    tmsv_strength = tmsv / 100.0
 
     buy_score = strength(real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi, boll_up, boll_low, williams_r,
                         ret_etf_5d, market["ret_market_5d"], weekly_above, weekly_below, recent_high, recent_low, atr_pct,
@@ -652,6 +668,8 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
                          False, buy_w, sell_w, tmsv_strength)
     raw = buy_score - sell_score
     final = raw * market["market_factor"] * market["sentiment_factor"]
+
+    # 更新状态
     today_str = today.strftime("%Y-%m-%d")
     if "score_history" not in state:
         state["score_history"] = []
@@ -664,16 +682,17 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
     if not found:
         state["score_history"].append({"date": today_str, "score": final})
     state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[-params["CONFIRM_DAYS"]:]
+
     action = get_action(final, state["score_history"], params["CONFIRM_DAYS"], params["BUY_THRESHOLD"],
                         params["SELL_THRESHOLD"], params["QUICK_BUY_THRESHOLD"])
     action_level = get_action_level(final)
+
     risk_warning = False
     if len(state["score_history"]) >= RISK_WARNING_DAYS:
         recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
         if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
             risk_warning = True
 
-    # 对齐表格输出
     output = f"{name:<16} {code:<12} {real_price:>8.3f} {final:>6.2f}  {action_level:<8}"
     if risk_warning:
         output += f"\n  ⚠️ 风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
@@ -682,21 +701,25 @@ def analyze_etf(code, name, real_price, hist_df, weekly_df, market, today, state
 
 # ---------------------------- 主程序 ----------------------------
 def main():
-    if not silent_login(): return
+    if not silent_login():
+        return
     try:
         etf_list = load_positions()
     except Exception as e:
         print(f"请准备 positions.csv (代码,名称)，错误: {e}")
         return
+
     today = datetime.date.today()
     start = (today - datetime.timedelta(days=300)).strftime("%Y-%m-%d")
     today_str = today.strftime("%Y-%m-%d")
-    # 宏观数据
+
+    # 获取宏观数据
     market_df = get_daily_data(MARKET_INDEX, start, today_str)
     macro_df = get_daily_data(MACRO_INDEX, start, today_str)
     if market_df is None or macro_df is None:
         print("获取宏观数据失败")
         return
+
     macro_df = calculate_indicators(macro_df, need_amount_ma=False, recent_high_window=10, recent_low_window=20)
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
     market_df = calculate_indicators(market_df, need_amount_ma=True, recent_high_window=10, recent_low_window=20)
@@ -727,9 +750,11 @@ def main():
         "market_amount_above_ma20": mkt["amount"] > mkt["amount_ma"],
         "ret_market_5d": (mkt["close"]/market_df.iloc[-5]["close"]-1) if len(market_df)>=5 else 0,
     }
+
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
     params = DEFAULT_PARAMS.copy()
+
     if api_key:
         bw, sw = deepseek_generate_weights(market_state, sentiment, market_info["market_above_ma20"],
                                            market_info["market_above_ma60"], market_info["market_amount_above_ma20"],
@@ -754,7 +779,7 @@ def main():
     print("\n{:<16} {:<12} {:>8} {:>6} {}".format("名称", "代码", "价格", "评分", "操作"))
     print("-" * 60)
 
-    # 并行分析并直接输出
+    # 并行分析并输出
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -765,59 +790,35 @@ def main():
                                         recent_low_window=params["RECENT_LOW_WINDOW"]) if hist is not None else None
             weekly = get_weekly_data(code, start, today_str)
             s = state.get(code, {})
-            futures.append(ex.submit(analyze_etf, code, name, get_realtime_price_sina(code), hist, weekly, market_info, today, s, buy_w, sell_w, params))
+            futures.append(
+                ex.submit(
+                    analyze_etf,
+                    code,
+                    name,
+                    get_realtime_price_sina(code),
+                    hist,
+                    weekly,
+                    market_info,
+                    today,
+                    s,
+                    buy_w,
+                    sell_w,
+                    params,
+                )
+            )
         for f in futures:
             out, _, new_state = f.result()
             print(out)
-            # 更新状态（需要提取代码，但为了简化，可略过，因为 analyze_etf 返回的 new_state 已包含）
-            # 这里简单处理：用正则提取代码
+            # 更新状态（从输出中提取代码）
             m = re.search(r'【.*?\((.*?)\)】', out)
             if m:
                 code = m.group(1)
-                # 实际上 new_state 已经更新，但我们需要把它保存到全局 state
-                # 由于无法从 out 获取 new_state，我们可以依赖返回值
-                # 但上面 f.result() 已经返回了 new_state，我们忽略并重新赋值
-                pass
-            # 正确做法：从返回值更新 state
-        # 由于上面循环中我们没有保存 new_state，重新遍历一次 futures 获取 new_state
-        # 简单改进：重新收集
-    # 由于上述代码块未正确保存状态，我们重新修正：在循环中直接更新 state
-    # 下面给出修正版（实际运行时应替换上面的循环）
-    # 但为保持完整，这里不重复代码，用户可自行调整。
+                # new_state 已经是更新后的状态，但我们需要把它合并回 state
+                # 由于 analyze_etf 返回的 new_state 包含整个 state 字典（包含所有代码的状态？实际上只是单个代码的状态）
+                # 这里为了简化，我们直接更新 state[code] = new_state
+                state[code] = new_state
 
-    # 正确的做法：在循环中保存 new_state
-    # 由于篇幅，这里仅示意，实际运行时请使用下面的正确版本。
-    # 我们重新编写主程序最后部分：
-
-    # 注意：上面代码中 futures 已经提交，但我们需要正确更新状态。为了清晰，重新写一个正确的版本。
-    # 但为了代码简洁，我已在上面的 analyze_etf 中通过返回值返回了 new_state，但在循环中没有保存。
-    # 下面给出修正方案（用户可自行替换最后几行）：
-    
-    # 正确版本（替换上面的 with 块）：
-    # with ThreadPoolExecutor(max_workers=5) as ex:
-    #     futures = []
-    #     for _, row in etf_list.iterrows():
-    #         code, name = row["代码"], row["名称"]
-    #         hist = get_daily_data(code, start, today_str)
-    #         hist = calculate_indicators(...)
-    #         weekly = get_weekly_data(...)
-    #         s = state.get(code, {})
-    #         futures.append(ex.submit(analyze_etf, ...))
-    #     for f in futures:
-    #         out, sig, new_state = f.result()
-    #         print(out)
-    #         # 提取代码并更新 state
-    #         m = re.search(r'【.*?\((.*?)\)】', out)
-    #         if m:
-    #             code = m.group(1)
-    #             state[code] = new_state
-    #         # 忽略信号，不再汇总
-
-    # 由于上面代码中未保存状态，这里直接跳过（不影响主要输出），但会导致状态文件无法更新。
-    # 为简化，我们假设用户接受状态不更新或自行修改。
-    
-    # 最终保存状态（如果需要）
-    # save_state(state)
+    save_state(state)
     silent_logout()
 
 if __name__ == "__main__":
