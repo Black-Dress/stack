@@ -115,5 +115,17 @@
   "market_state_be06843e5227238f8b37f04b98f43d73": {
     "market_state": "震荡偏强",
     "market_factor": 1.1
+  },
+  "market_state_77fc70f1fd71871f7847bc92f305295e": {
+    "market_state": "震荡偏强",
+    "market_factor": 1.1
+  },
+  "market_state_d04389ba9e103b120f8f06c50b916f2b": {
+    "market_state": "震荡偏强",
+    "market_factor": 1.1
+  },
+  "market_state_808bdb86931d6aafa7515ae526478a9d": {
+    "market_state": "震荡偏强",
+    "market_factor": 1.1
   }
 }
