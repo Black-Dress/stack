@@ -860,15 +860,25 @@ def get_action(
 
 def get_action_level(score):
     """根据评分返回操作等级（用于显示）"""
+    if score >= 0.8:
+        return "极度看好"
     if score >= 0.7:
         return "强烈买入"
-    if score >= 0.5:
+    if score >= 0.6:
         return "买入"
-    if score >= 0.3:
+    if score >= 0.4:
+        return "谨慎买入"
+    if score >= 0.2:
         return "偏多持有"
-    if score >= -0.3:
-        return "中性观望"
-    if score >= -0.5:
+    if score >= 0.0:
+        return "中性偏多"
+    if score >= -0.2:
+        return "中性偏空"
+    if score >= -0.4:
+        return "偏空持有"
+    if score >= -0.6:
+        return "谨慎卖出"
+    if score >= -0.8:
         return "卖出"
     return "强烈卖出"
 
