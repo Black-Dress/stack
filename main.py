@@ -57,18 +57,18 @@ STATE_FILE = "etf_state.json"
 CACHE_FILE = "weight_cache.json"
 
 DEFAULT_BUY_WEIGHTS = {
-    "price_above_ma20": 0.25,
-    "volume_above_ma5": 0.15,
-    "macd_golden_cross": 0.10,
-    "kdj_golden_cross": 0.10,
+    "price_above_ma20": 0.22,
+    "volume_above_ma5": 0.14,
+    "macd_golden_cross": 0.08,
+    "kdj_golden_cross": 0.08,
     "bollinger_break_up": 0.08,
     "williams_oversold": 0.08,
     "market_above_ma20": 0.05,
-    "market_above_ma60": 0.05,
+    "market_above_ma60": 0.08,
     "market_amount_above_ma20": 0.05,
     "outperform_market": 0.10,
     "weekly_above_ma20": 0.10,
-    "tmsv_score": 0.10,
+    "tmsv_score": 0.18,
 }
 DEFAULT_SELL_WEIGHTS = {
     "price_below_ma20": 0.40,
@@ -330,24 +330,49 @@ def _get_cache_key(
     market_above_ma60,
     market_amount_above_ma20,
     volatility,
+    cache_type="weights",
 ):
+    """生成更精细的缓存键，包含日期和类型"""
+    today = datetime.date.today().strftime("%Y-%m-%d")
     return hashlib.md5(
-        f"{macro_status}_{sentiment_factor}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{volatility:.3f}".encode()
+        f"{cache_type}_{today}_{macro_status}_{sentiment_factor:.2f}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{volatility:.3f}".encode()
     ).hexdigest()
 
 
 def _load_cache():
     if os.path.exists(CACHE_FILE):
         try:
-            return json.load(open(CACHE_FILE, "r", encoding="utf-8"))
-        except:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            # 清理过期缓存（超过7天）
+            current_time = datetime.datetime.now().timestamp()
+            expired_keys = []
+            for key, value in cache.items():
+                if isinstance(value, dict) and "timestamp" in value:
+                    if current_time - value["timestamp"] > 7 * 24 * 3600:  # 7天
+                        expired_keys.append(key)
+            for key in expired_keys:
+                del cache[key]
+                logger.info(f"清理过期缓存: {key}")
+            if expired_keys:
+                _save_cache(cache)
+            return cache
+        except Exception as e:
+            logger.warning(f"缓存文件损坏: {e}，使用空缓存")
             return {}
     return {}
 
 
 def _save_cache(cache):
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    try:
+        # 添加时间戳
+        for key, value in cache.items():
+            if isinstance(value, dict) and "timestamp" not in value:
+                value["timestamp"] = datetime.datetime.now().timestamp()
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"保存缓存失败: {e}")
 
 
 def _validate_and_filter_weights(weights, expected_keys, name):
@@ -464,6 +489,7 @@ def deepseek_generate_weights(
         market_above_ma60,
         market_amount_above_ma20,
         volatility,
+        "weights",
     )
     if use_cache:
         cache = _load_cache()
@@ -489,44 +515,52 @@ def deepseek_generate_weights(
         market_amount_above_ma20,
         volatility,
     )
-    try:
-        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-        resp = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=800,
-            temperature=0.0,
-            timeout=10,
-        )
-        content = resp.choices[0].message.content
-        json_match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not json_match:
-            raise ValueError("未找到JSON")
-        data = json.loads(json_match.group())
-        if "buy" not in data or "sell" not in data:
-            raise ValueError("JSON缺少buy或sell字段")
-        buy_weights = _validate_and_filter_weights(
-            data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
-        )
-        sell_weights = _validate_and_filter_weights(
-            data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
-        )
-        if buy_weights is None or sell_weights is None:
-            raise ValueError("权重校验失败")
-        if use_cache:
-            cache = _load_cache()
-            cache[cache_key] = {"buy": buy_weights, "sell": sell_weights}
-            _save_cache(cache)
-        return buy_weights, sell_weights
-    except Exception as e:
-        logger.error(f"AI权重生成失败: {e}，使用默认权重")
-        return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=800,
+                temperature=0.0,
+                timeout=15,  # 增加超时时间
+            )
+            content = resp.choices[0].message.content
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not json_match:
+                raise ValueError("未找到JSON")
+            data = json.loads(json_match.group())
+            if "buy" not in data or "sell" not in data:
+                raise ValueError("JSON缺少buy或sell字段")
+            buy_weights = _validate_and_filter_weights(
+                data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
+            )
+            sell_weights = _validate_and_filter_weights(
+                data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
+            )
+            if buy_weights is None or sell_weights is None:
+                raise ValueError("权重校验失败")
+            if use_cache:
+                cache = _load_cache()
+                cache[cache_key] = {"buy": buy_weights, "sell": sell_weights}
+                _save_cache(cache)
+            return buy_weights, sell_weights
+        except Exception as e:
+            logger.warning(f"AI权重生成失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                import time
+
+                time.sleep(2**attempt)  # 指数退避
+            else:
+                logger.error(f"AI权重生成最终失败，使用默认权重")
+                return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
 
 
 # ---------------------------- AI 参数生成 ----------------------------
@@ -550,12 +584,38 @@ def build_optimized_prompt_for_params(
 请根据市场环境调整以下交易参数，所有参数为整数或浮点数。
 
 【参数调整规则】
-1. CONFIRM_DAYS（确认天数，1-5）：高波动时增加到4-5以避免假信号，低波动时减少到2-3以快速响应。
-2. BUY_THRESHOLD（买入阈值，0.3-0.7）：牛市降低到0.4-0.5，熊市提高到0.6-0.7，震荡市0.5左右。
-3. SELL_THRESHOLD（卖出阈值，-0.5到-0.1）：熊市降低到-0.3到-0.2，牛市提高到-0.1左右。
-4. QUICK_BUY_THRESHOLD（快速买入阈值，0.5-0.8）：高波动时提高到0.7-0.8，低波动时降低到0.5-0.6。
-5. RECENT_HIGH_WINDOW（近期高点窗口，5-20）：高波动时缩短到5-10，低波动时延长到15-20。
-6. RECENT_LOW_WINDOW（近期低点窗口，10-30）：高波动时缩短到10-15，低波动时延长到20-30。
+1. CONFIRM_DAYS（确认天数，1-5）：
+   - 高波动时(>0.02)增加到4-5以避免假信号
+   - 低波动时(<0.01)减少到2-3以快速响应
+   - 牛市适当减少到2-3，熊市增加到4-5
+
+2. BUY_THRESHOLD（买入阈值，0.3-0.7）：
+   - 牛市降低到0.4-0.5以提高敏感度
+   - 熊市提高到0.6-0.7以提高谨慎度
+   - 震荡市保持0.5左右
+
+3. SELL_THRESHOLD（卖出阈值，-0.5到-0.1）：
+   - 熊市降低到-0.3到-0.2以快速止损
+   - 牛市提高到-0.1左右以减少噪音
+   - 高波动时适当放宽阈值
+
+4. QUICK_BUY_THRESHOLD（快速买入阈值，0.5-0.8）：
+   - 高波动时提高到0.7-0.8以过滤噪音
+   - 低波动时降低到0.5-0.6以捕捉机会
+   - 牛市可适当降低
+
+5. RECENT_HIGH_WINDOW（近期高点窗口，5-20）：
+   - 高波动时缩短到5-10以适应快速变化
+   - 低波动时延长到15-20以获得更稳定信号
+
+6. RECENT_LOW_WINDOW（近期低点窗口，10-30）：
+   - 高波动时缩短到10-15以快速响应
+   - 低波动时延长到20-30以获得更可靠支撑
+
+【历史表现反馈】
+- 在高波动熊市环境中，增加确认天数和提高买入阈值可有效减少假信号
+- 在低波动牛市环境中，减少确认天数和降低买入阈值可提高胜率
+- 震荡市应保持中等参数设置，避免过度交易
 
 【输出格式示例】
 {{"CONFIRM_DAYS":3,"BUY_THRESHOLD":0.5,"SELL_THRESHOLD":-0.2,"QUICK_BUY_THRESHOLD":0.6,"RECENT_HIGH_WINDOW":10,"RECENT_LOW_WINDOW":20}}
@@ -597,16 +657,14 @@ def deepseek_generate_params(
     api_key,
     use_cache=True,
 ):
-    cache_key = (
-        _get_cache_key(
-            macro_status,
-            sentiment_factor,
-            market_above_ma20,
-            market_above_ma60,
-            market_amount_above_ma20,
-            volatility,
-        )
-        + "_params"
+    cache_key = _get_cache_key(
+        macro_status,
+        sentiment_factor,
+        market_above_ma20,
+        market_above_ma60,
+        market_amount_above_ma20,
+        volatility,
+        "params",
     )
     if use_cache:
         cache = _load_cache()
@@ -627,37 +685,45 @@ def deepseek_generate_params(
         market_amount_above_ma20,
         volatility,
     )
-    try:
-        client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-        resp = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=400,
-            temperature=0.0,
-            timeout=10,
-        )
-        content = resp.choices[0].message.content
-        json_match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not json_match:
-            raise ValueError("未找到JSON")
-        data = json.loads(json_match.group())
-        params = _validate_and_filter_params(data, DEFAULT_PARAMS.keys(), "AI参数")
-        if params is None:
-            raise ValueError("参数校验失败")
-        if use_cache:
-            cache = _load_cache()
-            cache[cache_key] = {"params": params}
-            _save_cache(cache)
-        return params
-    except Exception as e:
-        logger.error(f"AI参数生成失败: {e}，使用默认参数")
-        return DEFAULT_PARAMS.copy()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一个量化交易专家，输出严格符合要求的JSON。",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=400,
+                temperature=0.0,
+                timeout=15,  # 增加超时时间
+            )
+            content = resp.choices[0].message.content
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not json_match:
+                raise ValueError("未找到JSON")
+            data = json.loads(json_match.group())
+            params = _validate_and_filter_params(data, DEFAULT_PARAMS.keys(), "AI参数")
+            if params is None:
+                raise ValueError("参数校验失败")
+            if use_cache:
+                cache = _load_cache()
+                cache[cache_key] = {"params": params}
+                _save_cache(cache)
+            return params
+        except Exception as e:
+            logger.warning(f"AI参数生成失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                import time
+
+                time.sleep(2**attempt)  # 指数退避
+            else:
+                logger.error(f"AI参数生成最终失败，使用默认参数")
+                return DEFAULT_PARAMS.copy()
 
 
 # ---------------------------- 市场状态精细化 ----------------------------
@@ -691,10 +757,21 @@ def refine_market_state(market_df, api_key, use_cache=True):
 - 日波动率（标准差%）：{volatility:.2f}%
 - 当前价格是否站上20日均线：{"是" if above_ma20 else "否"}
 - 当前价格是否站上60日均线：{"是" if above_ma60 else "否"}
+- RSI指标：{recent['rsi'].iloc[-1]:.1f}（<30超卖，>70超买）
+- MACD指标：{recent['macd_dif'].iloc[-1]:.3f} vs {recent['macd_dea'].iloc[-1]:.3f}
+- 布林带位置：收盘价相对中轨 {(recent['close'].iloc[-1] - recent['boll_mid'].iloc[-1]) / recent['boll_std'].iloc[-1]:.2f} 标准差
+- 威廉指标：{recent['williams_r'].iloc[-1]:.1f}（<-80超卖，>-20超买）
+
+请综合以上技术指标判断市场状态：
+- 强势牛市：多头排列，RSI>50，MACD金叉，布林上轨
+- 正常牛市：站上中长期均线，技术指标向好
+- 震荡偏强：站上短期均线，但技术指标中性
+- 震荡偏弱：跌破短期均线，但未破长期均线
+- 弱势反弹：技术指标转好，但整体偏空
+- 熊市下跌中继：空头排列，技术指标恶化
+- 熊市加速下跌：连续跌破重要支撑，恐慌性抛售
 
 请输出JSON格式：{{"state": "市场状态标签", "factor": 市场因子系数}}
-可选市场状态标签：强势牛市、正常牛市、震荡偏强、震荡偏弱、弱势反弹、熊市下跌中继、熊市加速下跌。
-不要包含其他解释。
 """
     try:
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
@@ -838,23 +915,40 @@ def get_action(
     buy_threshold,
     sell_threshold,
     quick_buy_threshold,
+    atr_pct=None,
 ):
-    """返回 BUY/SELL/HOLD 用于内部信号判断"""
+    """返回 BUY/SELL/HOLD 用于内部信号判断，包含智能确认机制"""
+    # 智能信号确认：结合趋势强度和连续性
     if len(score_history) >= confirm_days:
         recent_scores = [s["score"] for s in score_history[-confirm_days:]]
-        if all(s > buy_threshold for s in recent_scores):
+        avg_score = sum(recent_scores) / len(recent_scores)
+
+        # 买入信号：连续确认且平均分足够高
+        if (
+            all(s > buy_threshold for s in recent_scores)
+            and avg_score > buy_threshold + 0.1
+        ):
             return "BUY"
-        if all(s < sell_threshold for s in recent_scores):
+        # 卖出信号：连续确认且平均分足够低
+        if (
+            all(s < sell_threshold for s in recent_scores)
+            and avg_score < sell_threshold - 0.1
+        ):
             return "SELL"
+
+    # 快速买入：当前分数显著高于阈值且有改善趋势
     if len(score_history) >= 2:
         last = score_history[-1]["score"]
         prev = score_history[-2]["score"]
-        if last > quick_buy_threshold and last > prev:
+        if last > quick_buy_threshold and last > prev and last > buy_threshold + 0.2:
             return "BUY"
+
+    # 单次信号：当前分数超过阈值
     if score > buy_threshold:
         return "BUY"
     if score < sell_threshold:
         return "SELL"
+
     return "HOLD"
 
 
@@ -1063,12 +1157,23 @@ def analyze_etf(
     action_level = get_action_level(final)
 
     risk_warning = False
+    risk_level = "normal"
     if len(state["score_history"]) >= RISK_WARNING_DAYS:
         recent_scores = [
             s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]
         ]
+        # 连续低分警告
         if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
             risk_warning = True
+            risk_level = "连续低分"
+        # 单日极端评分警告
+        elif final < -0.5 or final > 0.8:
+            risk_warning = True
+            risk_level = "极端评分"
+        # 高波动环境警告
+        elif atr_pct and atr_pct > 0.03:
+            risk_warning = True
+            risk_level = "高波动"
 
     output = (
         pad_display(name, 16)
@@ -1079,12 +1184,16 @@ def analyze_etf(
         + " "
         + pad_display(f"{final:.2f}", 6, "right")
         + "  "
-        + pad_display(action_level, 8)
+        + pad_display(action_level, 10)
     )
     if risk_warning:
-        output += (
-            f"\n  ⚠️ 风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
-        )
+        output += "  ⚠️  "
+        if risk_level == "连续低分":
+            output += f"风险提示({risk_level}): 连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
+        elif risk_level == "极端评分":
+            output += f"风险提示({risk_level}): 当前评分{final:.2f}处于极端水平"
+        elif risk_level == "高波动":
+            output += f"风险提示({risk_level}): 市场波动率{atr_pct:.3f}过高"
     signal = (
         {"action": action, "name": name, "code": code, "score": final}
         if action in ("BUY", "SELL")
@@ -1104,7 +1213,8 @@ def main():
         return
 
     today = datetime.date.today()
-    start = (today - datetime.timedelta(days=300)).strftime("%Y-%m-%d")
+    # 优化：减少数据量到200天，提高效率
+    start = (today - datetime.timedelta(days=200)).strftime("%Y-%m-%d")
     today_str = today.strftime("%Y-%m-%d")
 
     # 获取宏观数据
@@ -1161,9 +1271,29 @@ def main():
         ),
     }
 
+    # 策略适应性优化：根据波动率和市场状态动态调整参数
+    params = DEFAULT_PARAMS.copy()
+    if volatility > 0.02:  # 高波动环境
+        params["BUY_THRESHOLD"] = 0.6
+        params["SELL_THRESHOLD"] = -0.3
+        params["CONFIRM_DAYS"] = 4
+        params["QUICK_BUY_THRESHOLD"] = 0.7
+    elif volatility < 0.01:  # 低波动环境
+        params["BUY_THRESHOLD"] = 0.4
+        params["SELL_THRESHOLD"] = -0.1
+        params["CONFIRM_DAYS"] = 2
+        params["QUICK_BUY_THRESHOLD"] = 0.5
+    else:  # 中等波动
+        # 根据市场状态调整确认天数
+        if "牛市" in market_state:
+            params["CONFIRM_DAYS"] = 2  # 牛市快速响应
+        elif "熊市" in market_state:
+            params["CONFIRM_DAYS"] = 4  # 熊市谨慎确认
+        else:
+            params["CONFIRM_DAYS"] = 3  # 震荡市标准确认
+
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
-    params = DEFAULT_PARAMS.copy()
 
     if api_key:
         bw, sw = deepseek_generate_weights(
@@ -1181,21 +1311,6 @@ def main():
             logger.info("使用AI动态权重")
         else:
             logger.warning("AI权重生成失败，使用默认权重")
-        p = deepseek_generate_params(
-            market_state,
-            sentiment,
-            market_info["market_above_ma20"],
-            market_info["market_above_ma60"],
-            market_info["market_amount_above_ma20"],
-            volatility,
-            api_key,
-            use_cache=False,
-        )
-        if p:
-            params = p
-            logger.info(f"使用AI动态参数: {params}")
-        else:
-            logger.warning("AI参数生成失败，使用默认参数")
     else:
         logger.info("未设置DEEPSEEK_API_KEY，使用默认权重和参数")
 
@@ -1209,9 +1324,9 @@ def main():
         + " "
         + pad_display("评分", 6, "right")
         + "  "
-        + pad_display("操作", 8)
+        + pad_display("操作", 10)
     )
-    print("-" * 55)
+    print("-" * 68)
 
     # 并行分析并输出
     results = []
