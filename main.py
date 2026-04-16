@@ -1080,7 +1080,7 @@ def analyze_etf(
         if action in ("BUY", "SELL")
         else None
     )
-    return output, signal, state
+    return output, signal, state, final
 
 
 # ---------------------------- 主程序 ----------------------------
@@ -1204,6 +1204,7 @@ def main():
     print("-" * 55)
 
     # 并行分析并输出
+    results = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -1238,8 +1239,8 @@ def main():
                 )
             )
         for f in futures:
-            out, _, new_state = f.result()
-            print(out)
+            out, _, new_state, score = f.result()
+            results.append((out, score))
             # 更新状态（从输出中提取代码）
             m = re.search(r"【.*?\((.*?)\)】", out)
             if m:
@@ -1248,6 +1249,11 @@ def main():
                 # 由于 analyze_etf 返回的 new_state 包含整个 state 字典（包含所有代码的状态？实际上只是单个代码的状态）
                 # 这里为了简化，我们直接更新 state[code] = new_state
                 state[code] = new_state
+
+    # 按照评分从高到低排序并输出
+    results.sort(key=lambda x: x[1], reverse=True)
+    for out, _ in results:
+        print(out)
 
     save_state(state)
     silent_logout()
