@@ -150,5 +150,10 @@
     "market_state": "震荡偏强",
     "market_factor": 1.1,
     "timestamp": 1776331016.567155
+  },
+  "market_state_8fdff7f8b0460283691a6ce9a859fa1e": {
+    "market_state": "震荡偏强",
+    "market_factor": 1.05,
+    "timestamp": 1776420423.962872
   }
 }

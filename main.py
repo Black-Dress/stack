@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ETF 智能分析系统（优化版）- 完整功能
-功能：实时分析 ETF，输出评分和操作等级，支持AI动态权重、智能信号确认、动态历史天数。
-所有输出字段左对齐，固定宽度。
-依赖：baostock, pandas, numpy, requests, openai
+ETF 智能分析系统（集成 AKShare 情绪指标版）
+功能：实时分析 ETF，输出评分和操作等级，支持AI动态权重、智能信号确认。
+新增：AKShare 市场情绪指标综合评分及阈值风险提示。
 """
 
 import os
@@ -28,6 +27,17 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Optional
 import unicodedata
 import argparse
+import math
+
+# 新增：AKShare 情绪指标库
+try:
+    import akshare as ak
+
+    AKSHARE_AVAILABLE = True
+except ImportError:
+    AKSHARE_AVAILABLE = False
+    print("警告：未安装 akshare，情绪指标功能将不可用。请执行 pip install akshare")
+
 
 # ---------------------------- 日志配置 ----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -249,7 +259,27 @@ def calculate_indicators(
     df[f"recent_low_{recent_low_window}"] = df["low"].rolling(recent_low_window).min()
     return df
 
-def get_sentiment_factor(macro_df: pd.DataFrame) -> float:
+# ========== 情绪调节参数 ==========
+SENT_ALPHA = 0.8  # 最大调节幅度
+SENT_BETA = 2.5  # 左侧陡峭度
+SENT_GAMMA = 1.2  # 右侧额外衰减
+
+
+def sentiment_adjustment(sentiment: float) -> float:
+    """
+    数学映射版情绪调节系数
+    基于双曲正切 + 指数衰减，过热时压制更明显
+    """
+    x = sentiment - 1.0
+    if x >= 0:
+        adj = 1.0 + SENT_ALPHA * math.tanh(SENT_BETA * x) * math.exp(-SENT_GAMMA * x)
+    else:
+        adj = 1.0 + SENT_ALPHA * math.tanh(SENT_BETA * x)
+    return max(0.60, min(1.30, adj))
+
+
+# ---------------------------- 原简单情绪函数（后备） ----------------------------
+def get_sentiment_factor_simple(macro_df: pd.DataFrame) -> float:
     if len(macro_df) < RSI_PERIOD + 1:
         return 1.0
     delta = macro_df["close"].diff()
@@ -265,6 +295,7 @@ def get_sentiment_factor(macro_df: pd.DataFrame) -> float:
         return 1.0
     return 0.9
 
+
 # ---------------------------- TMSV 复合指标（高效版） ----------------------------
 def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     """计算 TMSV，优先使用 df 中已有的列"""
@@ -272,7 +303,6 @@ def compute_tmsv(df: pd.DataFrame) -> pd.Series:
         return pd.Series([50.0] * max(1, len(df))) if len(df) > 0 else pd.Series([50.0])
 
     df = df.copy()
-    # 确保必要列存在，若已存在则直接使用
     if "ma20" not in df.columns:
         df["ma20"] = df["close"].rolling(20).mean()
     if "ma60" not in df.columns:
@@ -293,20 +323,17 @@ def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     if "vol_ma" not in df.columns:
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-    # 趋势得分
     price_above_ma20 = ((df["close"] - df["ma20"]) / (df["ma20"].replace(0, np.nan) * 0.1)).clip(0, 1).fillna(0)
     price_above_ma60 = ((df["close"] - df["ma60"]) / (df["ma60"].replace(0, np.nan) * 0.1)).clip(0, 1).fillna(0)
     ma20_slope = df["ma20"].diff(5) / df["ma20"].shift(5).replace(0, np.nan)
     slope_score = (ma20_slope * 10).clip(0, 1).fillna(0)
     trend_score = (price_above_ma20 * 0.5 + price_above_ma60 * 0.3 + slope_score * 0.2) * 100
 
-    # 动量得分
     rsi_score = ((df["rsi"] - 50) * 3.33).clip(0, 100).fillna(50)
     macd_change = df["macd_hist"].diff() / (df["macd_hist"].shift(1).abs() + 0.001)
     macd_score = (macd_change * 100).clip(0, 100).fillna(50)
     mom_score = rsi_score * 0.6 + macd_score * 0.4
 
-    # 量价得分
     vol_ratio = df["volume"] / df["vol_ma"].replace(0, np.nan)
     vol_ratio_score = ((vol_ratio - 0.8) / 1.2 * 100).clip(0, 100).fillna(50)
     price_up = df["close"] > df["close"].shift(1)
@@ -314,7 +341,6 @@ def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     consistency = np.where(price_up == vol_up, 100, 0)
     vol_score = vol_ratio_score * 0.7 + consistency * 0.3
 
-    # 波动率因子
     atr_pct = df["atr"] / df["close"].replace(0, np.nan)
     vol_factor = np.select(
         [atr_pct < 0.01, atr_pct > 0.03],
@@ -436,9 +462,6 @@ def deepseek_generate_weights(
 ) -> Tuple[Dict, Dict]:
     """
     生成买入/卖出权重（混合策略：AI为主，默认权重为辅）
-
-    Args:
-        trust_ai: AI 权重的信任度，取值范围 0~1，剩余部分由默认权重补充
     """
     cache_key = _get_cache_key(macro_status, sentiment_factor, market_above_ma20,
                                market_above_ma60, market_amount_above_ma20, volatility, "weights")
@@ -450,13 +473,11 @@ def deepseek_generate_weights(
             if buy and sell:
                 return buy, sell
 
-    # ---------- 增强版提示词（包含权重约束） ----------
     prompt = build_weights_prompt(macro_status, sentiment_factor, market_above_ma20,
                                   market_above_ma60, market_amount_above_ma20, volatility)
     ai_buy = None
     ai_sell = None
 
-    # 尝试获取 AI 权重
     for attempt in range(3):
         try:
             client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
@@ -488,7 +509,6 @@ def deepseek_generate_weights(
                 data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
             )
             if ai_buy and ai_sell:
-                # 校验 AI 权重合理性，异常则降低信任度
                 trust = trust_ai
                 zero_count_buy = sum(1 for v in ai_buy.values() if v < 0.01)
                 zero_count_sell = sum(1 for v in ai_sell.values() if v < 0.01)
@@ -511,14 +531,12 @@ def deepseek_generate_weights(
                     )
                     trust = min(trust, 0.6)
 
-                # ---------- 混合权重策略 ----------
                 def blend_weights(ai_w: Dict, default_w: Dict, trust: float) -> Dict:
                     blended = {}
                     for k in default_w:
                         a = ai_w.get(k, 0.0)
                         d = default_w[k]
                         blended[k] = a * trust + d * (1 - trust)
-                    # 归一化
                     total = sum(blended.values())
                     if total > 0:
                         blended = {k: v / total for k, v in blended.items()}
@@ -716,28 +734,21 @@ def adjust_params_based_on_history(params, score_history, volatility, market_fac
     if len(score_history) < 10:
         return params
 
-    # 动态窗口
     window = get_dynamic_history_days(volatility)
     window = min(window, len(score_history))
     recent = [s["score"] for s in score_history[-window:]]
     avg = sum(recent) / len(recent)
     slope = np.polyfit(range(len(recent)), recent, 1)[0] if len(recent) >= 3 else 0
 
-    # 短期窗口（3天）
     short_window = min(3, len(score_history))
     short_recent = [s["score"] for s in score_history[-short_window:]]
     short_slope = (
         np.polyfit(range(short_window), short_recent, 1)[0] if short_window >= 2 else 0
     )
 
-    # 市场敏感度
-    adjust_mult = (
-        1.2 / market_factor
-    )  # 牛市减弱调整，熊市增强调整（因为熊市需要更谨慎）
-
+    adjust_mult = 1.2 / market_factor
     adjusted = params.copy()
 
-    # 买入阈值调整
     if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
         delta = min(0.05, abs(avg - params["BUY_THRESHOLD"]) * 0.2) * adjust_mult
         new_val = max(0.3, params["BUY_THRESHOLD"] - delta)
@@ -747,15 +758,13 @@ def adjust_params_based_on_history(params, score_history, volatility, market_fac
         new_val = min(0.7, params["BUY_THRESHOLD"] + delta)
         adjusted["BUY_THRESHOLD"] = new_val
     else:
-        # 向默认值回归
         adjusted["BUY_THRESHOLD"] = (
             params["BUY_THRESHOLD"] * 0.95 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.05
         )
 
-    # 卖出阈值调整（相反方向）
     if slope < -0.02 and avg < -0.15 and short_slope < -0.03:
         delta = min(0.05, abs(avg - params["SELL_THRESHOLD"]) * 0.2) * adjust_mult
-        new_val = max(-0.5, params["SELL_THRESHOLD"] - delta)  # 更低阈值意味着更早卖出
+        new_val = max(-0.5, params["SELL_THRESHOLD"] - delta)
         adjusted["SELL_THRESHOLD"] = new_val
     elif slope > 0.02 and avg > 0.15 and short_slope > 0.03:
         delta = min(0.05, abs(avg - params["SELL_THRESHOLD"]) * 0.2) * adjust_mult
@@ -766,7 +775,6 @@ def adjust_params_based_on_history(params, score_history, volatility, market_fac
             params["SELL_THRESHOLD"] * 0.95 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.05
         )
 
-    # 确认天数调整（基于波动率和趋势强度）
     if volatility > 0.04:
         adjusted["CONFIRM_DAYS"] = min(5, params["CONFIRM_DAYS"] + 1)
     elif volatility < 0.01 and abs(short_slope) > 0.05:
@@ -776,9 +784,7 @@ def adjust_params_based_on_history(params, score_history, volatility, market_fac
             params["CONFIRM_DAYS"] * 0.9 + DEFAULT_PARAMS["CONFIRM_DAYS"] * 0.1 + 0.5
         )
 
-    # 确保整数
     adjusted["CONFIRM_DAYS"] = int(round(adjusted["CONFIRM_DAYS"]))
-
     return adjusted
 
 
@@ -847,7 +853,10 @@ def analyze_etf(
                           market["market_above_ma60"], market["market_amount_above_ma20"],
                           False, buy_w, sell_w, tmsv_strength)
     raw = buy_score - sell_score
-    final = raw * market["market_factor"] * market["sentiment_factor"]
+
+    env_factor = market["market_factor"] * market["sentiment_factor"]
+    env_factor = max(0.60, min(1.30, env_factor))
+    final = raw * env_factor
     final = max(-1.0, min(1.0, final))
 
     today_str = today.strftime("%Y-%m-%d")
@@ -881,7 +890,6 @@ def analyze_etf(
         elif atr_pct > 0.03:
             risk_warning = f"风险提示:高波动{atr_pct:.3f}"
 
-    # 所有字段左对齐，固定宽度：名称16，代码12，价格8，评分6，操作10
     output = (
         f"{pad_display(name, 16)} "
         f"{pad_display(code, 12)} "
@@ -928,6 +936,166 @@ def send_email(subject: str, body: str) -> bool:
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")
         return False
+
+
+# ================== 新增：AKShare 情绪指标相关函数 ==================
+def fetch_sentiment_indicators() -> dict:
+    """从 AKShare 获取多项市场情绪指标的最新值"""
+    indicators = {}
+    if not AKSHARE_AVAILABLE:
+        return indicators
+
+    # 1. 北向资金净流入
+    try:
+        df_north = ak.stock_hsgt_hist_em(symbol="北向资金")
+        if not df_north.empty:
+            latest = df_north.iloc[-1]
+            indicators["north_net_inflow"] = float(latest["净流入"])
+            indicators["north_net_inflow_20d_avg"] = float(
+                df_north["净流入"].tail(20).mean()
+            )
+    except Exception as e:
+        logger.debug(f"北向资金获取失败: {e}")
+
+    # 2. 大盘主力资金净流入占比
+    try:
+        df_fund = ak.stock_market_fund_flow()
+        if not df_fund.empty:
+            latest = df_fund.iloc[-1]
+            indicators["main_net_inflow_pct"] = float(latest["主力净流入-净占比"])
+    except Exception as e:
+        logger.debug(f"大盘资金流向获取失败: {e}")
+
+    # 3. 涨停/跌停家数比
+    try:
+        today_str = datetime.datetime.now().strftime("%Y%m%d")
+        df_zt = ak.stock_zt_pool_em(date=today_str)
+        df_dt = ak.stock_zt_pool_dtgc_em(date=today_str)
+        zt_count = len(df_zt)
+        dt_count = len(df_dt)
+        indicators["zt_count"] = zt_count
+        indicators["dt_count"] = dt_count
+        indicators["zt_dt_ratio"] = zt_count / max(dt_count, 1)
+    except Exception as e:
+        logger.debug(f"涨跌停数据获取失败: {e}")
+
+    # 4. 市场总貌（上涨/下跌家数）
+    try:
+        df_summary = ak.stock_sse_summary()
+        if "项目" in df_summary.columns:
+            up_row = df_summary[df_summary["项目"] == "上涨家数"]
+            down_row = df_summary[df_summary["项目"] == "下跌家数"]
+            if not up_row.empty and not down_row.empty:
+                up_count = int(up_row.iloc[0, 1])
+                down_count = int(down_row.iloc[0, 1])
+                indicators["up_count"] = up_count
+                indicators["down_count"] = down_count
+                indicators["up_down_ratio"] = up_count / max(down_count, 1)
+    except Exception as e:
+        logger.debug(f"市场总貌获取失败: {e}")
+
+    # 5. 百度热搜股票热度
+    try:
+        df_hot = ak.stock_hot_search_baidu(
+            symbol="A股", date=datetime.datetime.now().strftime("%Y%m%d")
+        )
+        if "rank" in df_hot.columns:
+            avg_rank = df_hot["rank"].head(10).mean()
+            indicators["baidu_hot_avg_rank"] = avg_rank
+    except Exception as e:
+        logger.debug(f"百度热搜获取失败: {e}")
+
+    # 6. 期权波动率指数 (VIX)
+    try:
+        df_vix = ak.index_option_50etf_qvix()
+        if not df_vix.empty:
+            latest_vix = df_vix.iloc[-1]["close"]
+            vix_ma20 = df_vix["close"].tail(20).mean()
+            indicators["vix"] = float(latest_vix)
+            indicators["vix_ma20"] = float(vix_ma20)
+    except Exception as e:
+        logger.debug(f"VIX获取失败: {e}")
+
+    return indicators
+
+
+def compute_sentiment_factor(indicators: dict) -> float:
+    """根据多项情绪指标计算综合情绪因子 (0.6~1.4)"""
+    if not indicators:
+        return 1.0
+
+    score = 0.0
+    weight_total = 0.0
+
+    # 1. 北向资金情绪 (权重 0.25)
+    north_net = indicators.get("north_net_inflow")
+    north_avg = indicators.get("north_net_inflow_20d_avg")
+    if north_net is not None and north_avg is not None and north_avg != 0:
+        north_ratio = north_net / abs(north_avg)
+        north_score = 1.0 + north_ratio * 0.5
+    else:
+        north_score = 1.0
+    score += north_score * 0.25
+    weight_total += 0.25
+
+    # 2. 主力资金情绪 (权重 0.20)
+    main_pct = indicators.get("main_net_inflow_pct", 0.0)
+    main_score = 1.0 + main_pct / 100 * 5
+    score += main_score * 0.20
+    weight_total += 0.20
+
+    # 3. 涨跌停家数比 (权重 0.15)
+    zt_dt_ratio = indicators.get("zt_dt_ratio", 1.0)
+    zt_score = 1.0 + (zt_dt_ratio - 1.0) * 0.3
+    score += zt_score * 0.15
+    weight_total += 0.15
+
+    # 4. 上涨下跌家数比 (权重 0.15)
+    up_down_ratio = indicators.get("up_down_ratio", 1.0)
+    ud_score = 1.0 + (up_down_ratio - 1.0) * 0.3
+    score += ud_score * 0.15
+    weight_total += 0.15
+
+    # 5. 百度热搜情绪 (权重 0.10)
+    avg_rank = indicators.get("baidu_hot_avg_rank", 50.0)
+    if avg_rank < 30:
+        rank_score = 1.15
+    elif avg_rank > 70:
+        rank_score = 0.85
+    else:
+        rank_score = 1.0
+    score += rank_score * 0.10
+    weight_total += 0.10
+
+    # 6. VIX 恐慌情绪 (权重 0.15)
+    vix = indicators.get("vix")
+    vix_ma = indicators.get("vix_ma20")
+    if vix is not None and vix_ma is not None and vix_ma > 0:
+        vix_ratio = vix / vix_ma
+        vix_score = 1.0 - (vix_ratio - 1.0) * 0.8
+    else:
+        vix_score = 1.0
+    score += vix_score * 0.15
+    weight_total += 0.15
+
+    if weight_total > 0:
+        score /= weight_total
+
+    return sentiment_adjustment(max(0.6, min(1.4, score)))
+
+
+def get_sentiment_risk_tip(sentiment_factor: float) -> str:
+    """根据情绪因子返回风险提示文本"""
+    if sentiment_factor >= 1.25:
+        return "⚠️  市场情绪过热，短期回调风险较高，追高需谨慎"
+    elif sentiment_factor >= 1.10:
+        return "市场情绪偏乐观，警惕过热迹象"
+    elif sentiment_factor >= 0.85:
+        return "市场情绪平稳"
+    elif sentiment_factor >= 0.70:
+        return "💡  市场情绪偏悲观，可关注错杀机会"
+    else:
+        return "💡💡  市场情绪极度恐慌，往往是左侧布局良机"
 
 
 # ---------------------------- 主程序 ----------------------------
@@ -978,16 +1146,37 @@ def main():
             market_state, market_factor = "震荡偏弱", 1.0
         logger.info(f"简单规则市场状态: {market_state}, 因子: {market_factor}")
 
-    sentiment = get_sentiment_factor(macro_df)
+    # ===== 新增：获取 AKShare 情绪指标 =====
+    sentiment = 1.0
+    sentiment_risk_tip = ""
+    if AKSHARE_AVAILABLE:
+        try:
+            sentiment_indicators = fetch_sentiment_indicators()
+            sentiment = compute_sentiment_factor(sentiment_indicators)
+            sentiment_risk_tip = get_sentiment_risk_tip(sentiment)
+            logger.info(f"综合情绪因子: {sentiment:.3f}")
+        except Exception as e:
+            logger.warning(f"获取情绪指标失败，使用后备RSI情绪: {e}")
+            sentiment = get_sentiment_factor_simple(macro_df)
+    else:
+        # 后备方案：使用原有的 RSI 简单情绪
+        sentiment = get_sentiment_factor_simple(macro_df)
+        logger.info(f"使用后备RSI情绪因子: {sentiment:.3f}")
+
     mkt = market_df.iloc[-1]
     market_info = {
         "macro_status": market_state,
         "market_factor": market_factor,
         "sentiment_factor": sentiment,
+        "sentiment_risk_tip": sentiment_risk_tip,
         "market_above_ma20": mkt["close"] > mkt["ma_short"],
         "market_above_ma60": mkt["close"] > mkt.get("ma_long", mkt["ma_short"]),
         "market_amount_above_ma20": mkt["amount"] > mkt["amount_ma"],
-        "ret_market_5d": (mkt["close"] / market_df.iloc[-5]["close"] - 1) if len(market_df) >= 5 else 0,
+        "ret_market_5d": (
+            (mkt["close"] / market_df.iloc[-5]["close"] - 1)
+            if len(market_df) >= 5
+            else 0
+        ),
     }
 
     params = DEFAULT_PARAMS.copy()
@@ -1009,7 +1198,7 @@ def main():
             logger.info("使用AI动态权重")
         else:
             logger.warning("AI权重生成失败，使用默认权重")
-    # 如果指定了代码，只详细分析该ETF
+
     if args.code:
         target = etf_list[etf_list["代码"] == args.code]
         if target.empty:
@@ -1048,8 +1237,13 @@ def main():
         silent_logout()
         return
     else:
-        # 输出表头（所有字段左对齐）
+        # 批量分析
         print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ETF 分析报告")
+        print(f"市场状态: {market_state}, 市场因子: {market_factor:.2f}")
+        if sentiment_risk_tip:
+            print(f"情绪因子: {sentiment:.3f} - {sentiment_risk_tip}")
+        else:
+            print(f"情绪因子: {sentiment:.3f}")
         print(
             pad_display("名称", 16),
             pad_display("代码", 12),
@@ -1113,7 +1307,6 @@ def main():
         subject = f"ETF分析报告 - {today_str}"
         send_email(subject, "\n".join(output_lines))
 
-
 def ai_comment_on_etf(
     code: str,
     name: str,
@@ -1169,7 +1362,6 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
         logger.error(f"AI评论生成失败: {e}")
         return "（AI 评论生成失败）"
 
-
 def detailed_analysis_etf(
     code: str,
     name: str,
@@ -1184,7 +1376,7 @@ def detailed_analysis_etf(
     params: Dict,
     api_key: str,
 ) -> str:
-    """返回详细分析报告文本（使用 pad_display 对齐）"""
+    """返回详细分析报告文本"""
     if real_price is None:
         return f"【{name} ({code})】实时价格获取失败，无法分析。"
     if hist_df is None or len(hist_df) < 20:
@@ -1208,7 +1400,6 @@ def detailed_analysis_etf(
         hist_df["low"].rolling(params["RECENT_LOW_WINDOW"]).min().iloc[-1],
     )
 
-    # 金叉信号
     macd_golden = kdj_golden = 0
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
@@ -1221,7 +1412,6 @@ def detailed_analysis_etf(
             1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
         )
 
-    # 5日收益率
     ret_etf_5d = (
         (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
     )
@@ -1232,7 +1422,6 @@ def detailed_analysis_etf(
             weekly_above = w["close"] > w["ma_short"]
             weekly_below = w["close"] < w["ma_short"]
 
-    # TMSV
     try:
         tmsv_series = compute_tmsv(hist_df)
         tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
@@ -1241,7 +1430,6 @@ def detailed_analysis_etf(
         tmsv = 50.0
     tmsv_strength = tmsv / 100.0
 
-    # ---------- 详细计算买入因子 ----------
     def cap(x):
         return max(0.0, min(1.0, x))
 
@@ -1317,7 +1505,6 @@ def detailed_analysis_etf(
     final = max(-1.0, min(1.0, final))
     action_level = get_action_level(final)
 
-    # ---------- 使用 pad_display 构造表格 ----------
     lines = []
     lines.append("=" * 70)
     lines.append(f"ETF详细分析报告 - {name} ({code})")
@@ -1327,11 +1514,12 @@ def detailed_analysis_etf(
     lines.append(
         f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"
     )
+    if market.get("sentiment_risk_tip"):
+        lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
     lines.append(f"波动率(ATR%)：{atr_pct*100:.2f}%")
     lines.append(f"TMSV复合强度：{tmsv:.1f} (强度系数 {tmsv_strength:.3f})")
     lines.append("")
 
-    # 固定列宽
     col_name = 25
     col_strength = 8
     col_weight = 8
@@ -1379,7 +1567,6 @@ def detailed_analysis_etf(
     )
     lines.append(f"操作等级：{action_level}")
 
-    # AI 评论
     if api_key:
         lines.append("")
         lines.append("【AI 专业点评】")
@@ -1406,7 +1593,6 @@ def detailed_analysis_etf(
 
     lines.append("=" * 70)
     return "\n".join(lines)
-
 
 if __name__ == "__main__":
     main()
