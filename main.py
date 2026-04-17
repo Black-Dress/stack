@@ -6,6 +6,13 @@ ETF 智能分析系统（最终版）
 TMSV 复合指标已融入评分体系，仅作为内部因子。
 支持 AI 动态权重、动态参数、市场状态精细化。
 输出为对齐表格，无额外信号汇总。
+
+优化内容（基于7天历史数据）：
+1. 保存7天评分历史用于趋势分析
+2. 智能信号确认：结合分数趋势斜率、连续涨跌天数
+3. 动态参数调整：基于7天历史表现调整买入/卖出阈值
+4. 高波动环境下的保守策略
+5. 反弹买入和冲高卖出机制
 """
 
 import os
@@ -917,37 +924,80 @@ def get_action(
     quick_buy_threshold,
     atr_pct=None,
 ):
-    """返回 BUY/SELL/HOLD 用于内部信号判断，包含智能确认机制"""
-    # 智能信号确认：结合趋势强度和连续性
-    if len(score_history) >= confirm_days:
-        recent_scores = [s["score"] for s in score_history[-confirm_days:]]
-        avg_score = sum(recent_scores) / len(recent_scores)
+    """返回 BUY/SELL/HOLD 用于内部信号判断，包含智能确认机制和7天趋势分析"""
+    if len(score_history) < 2:
+        # 少于2天数据，使用简单阈值
+        if score > buy_threshold:
+            return "BUY"
+        if score < sell_threshold:
+            return "SELL"
+        return "HOLD"
 
-        # 买入信号：连续确认且平均分足够高
+    recent_scores = [s["score"] for s in score_history[-7:]]  # 使用最多7天数据
+    avg_score = sum(recent_scores) / len(recent_scores)
+
+    # 计算7天趋势斜率（线性回归斜率）
+    if len(recent_scores) >= 3:
+        x = list(range(len(recent_scores)))
+        slope = np.polyfit(x, recent_scores, 1)[0]
+    else:
+        slope = 0
+
+    # 趋势强度：连续上涨/下跌天数
+    up_days = sum(
+        1
+        for i in range(1, len(recent_scores))
+        if recent_scores[i] > recent_scores[i - 1]
+    )
+    down_days = sum(
+        1
+        for i in range(1, len(recent_scores))
+        if recent_scores[i] < recent_scores[i - 1]
+    )
+
+    # 买入信号优化
+    if score > buy_threshold:
+        # 强势买入：当前分数高 + 趋势向上 + 平均分高
         if (
-            all(s > buy_threshold for s in recent_scores)
+            score > quick_buy_threshold
+            and slope > 0.05
             and avg_score > buy_threshold + 0.1
         ):
             return "BUY"
-        # 卖出信号：连续确认且平均分足够低
+        # 连续确认买入
+        if len(score_history) >= confirm_days:
+            recent_confirm = [s["score"] for s in score_history[-confirm_days:]]
+            if all(s > buy_threshold for s in recent_confirm) and slope >= 0:
+                return "BUY"
+        # 反弹买入：近期有下跌但当前反弹
+        if down_days >= 2 and slope > 0.02 and score > avg_score + 0.1:
+            return "BUY"
+
+    # 卖出信号优化
+    if score < sell_threshold:
+        # 强势卖出：当前分数低 + 趋势向下 + 平均分低
         if (
-            all(s < sell_threshold for s in recent_scores)
+            score < sell_threshold - 0.1
+            and slope < -0.05
             and avg_score < sell_threshold - 0.1
         ):
             return "SELL"
+        # 连续确认卖出
+        if len(score_history) >= confirm_days:
+            recent_confirm = [s["score"] for s in score_history[-confirm_days:]]
+            if all(s < sell_threshold for s in recent_confirm) and slope <= 0:
+                return "SELL"
+        # 冲高卖出：近期有上涨但当前回落
+        if up_days >= 2 and slope < -0.02 and score < avg_score - 0.1:
+            return "SELL"
 
-    # 快速买入：当前分数显著高于阈值且有改善趋势
-    if len(score_history) >= 2:
-        last = score_history[-1]["score"]
-        prev = score_history[-2]["score"]
-        if last > quick_buy_threshold and last > prev and last > buy_threshold + 0.2:
+    # 高波动环境下的保守策略
+    if atr_pct and atr_pct > 0.03:
+        # 高波动时，要求更强的确认
+        if score > buy_threshold + 0.1 and slope > 0.08 and up_days >= 3:
             return "BUY"
-
-    # 单次信号：当前分数超过阈值
-    if score > buy_threshold:
-        return "BUY"
-    if score < sell_threshold:
-        return "SELL"
+        if score < sell_threshold - 0.1 and slope < -0.08 and down_days >= 3:
+            return "SELL"
 
     return "HOLD"
 
@@ -975,6 +1025,47 @@ def get_action_level(score):
     if score >= -0.8:
         return "卖出"
     return "强烈卖出"
+
+
+def adjust_params_based_on_history(params, score_history, volatility):
+    """基于7天历史数据动态调整参数"""
+    if len(score_history) < 7:
+        return params
+
+    recent_scores = [s["score"] for s in score_history[-7:]]
+    avg_score = sum(recent_scores) / len(recent_scores)
+
+    # 计算趋势
+    if len(recent_scores) >= 3:
+        slope = np.polyfit(list(range(len(recent_scores))), recent_scores, 1)[0]
+    else:
+        slope = 0
+
+    # 计算波动性
+    score_std = np.std(recent_scores)
+
+    adjusted = params.copy()
+
+    # 如果最近7天持续下跌，提高卖出阈值（更早卖出）
+    if slope < -0.02 and avg_score < -0.1:
+        adjusted["SELL_THRESHOLD"] = min(params["SELL_THRESHOLD"] + 0.1, -0.1)
+        adjusted["CONFIRM_DAYS"] = max(params["CONFIRM_DAYS"] - 1, 2)
+
+    # 如果最近7天持续上涨，提高买入阈值（更谨慎买入）
+    elif slope > 0.02 and avg_score > 0.1:
+        adjusted["BUY_THRESHOLD"] = max(params["BUY_THRESHOLD"] - 0.1, 0.3)
+        adjusted["QUICK_BUY_THRESHOLD"] = max(params["QUICK_BUY_THRESHOLD"] - 0.1, 0.5)
+
+    # 如果分数波动大，提高确认天数
+    if score_std > 0.3:
+        adjusted["CONFIRM_DAYS"] = min(params["CONFIRM_DAYS"] + 1, 5)
+
+    # 高波动市场环境下，更保守
+    if volatility > 0.02:
+        adjusted["BUY_THRESHOLD"] = max(params["BUY_THRESHOLD"], 0.5)
+        adjusted["SELL_THRESHOLD"] = min(params["SELL_THRESHOLD"], -0.2)
+
+    return adjusted
 
 
 def get_display_width(text):
@@ -1143,8 +1234,12 @@ def analyze_etf(
     if not found:
         state["score_history"].append({"date": today_str, "score": final})
     state["score_history"] = sorted(state["score_history"], key=lambda x: x["date"])[
-        -params["CONFIRM_DAYS"] :
+        -7:
     ]
+
+    # 基于历史数据动态调整参数
+    if len(state["score_history"]) >= 7:
+        params = adjust_params_based_on_history(params, state["score_history"], atr_pct)
 
     action = get_action(
         final,
@@ -1153,6 +1248,7 @@ def analyze_etf(
         params["BUY_THRESHOLD"],
         params["SELL_THRESHOLD"],
         params["QUICK_BUY_THRESHOLD"],
+        atr_pct,
     )
     action_level = get_action_level(final)
 
