@@ -10,7 +10,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 数据目录
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-
 POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")
 STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")
 CACHE_FILE = os.path.join(DATA_DIR, "weight_cache.json")

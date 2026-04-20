@@ -578,16 +578,18 @@ class DataAnalyzer:
         return "HOLD"
 
     def get_action_level(self, score: float) -> str:
-        if score >= 0.8: return "极度看好"
-        if score >= 0.7: return "强烈买入"
-        if score >= 0.6: return "买入"
-        if score >= 0.4: return "谨慎买入"
-        if score >= 0.2: return "偏多持有"
-        if score >= 0.0: return "中性偏多"
-        if score >= -0.2: return "中性偏空"
-        if score >= -0.4: return "偏空持有"
-        if score >= -0.6: return "谨慎卖出"
-        if score >= -0.8: return "卖出"
+        """
+        根据综合评分返回操作等级。
+        评分范围：-1.0 到 1.0，等级从“强烈卖出”到“极度看好”。
+        """
+        thresholds = [0.8, 0.7, 0.6, 0.4, 0.2, 0.0, -0.2, -0.4, -0.6, -0.8]
+        levels = [
+            "极度看好", "强烈买入", "买入", "谨慎买入", "偏多持有",
+            "中性偏多", "中性偏空", "偏空持有", "谨慎卖出", "卖出"
+        ]
+        for th, level in zip(thresholds, levels):
+            if score >= th:
+                return level
         return "强烈卖出"
 
     def adjust_params_based_on_history(self, params: Dict, score_history: List[Dict],
