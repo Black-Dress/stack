@@ -155,5 +155,15 @@
     "market_state": "震荡偏强",
     "market_factor": 1.05,
     "timestamp": 1776420423.962872
+  },
+  "market_state_6fcb09c1db5208728828c75cbf5e04f3": {
+    "market_state": "正常牛市",
+    "market_factor": 1.15,
+    "timestamp": 1776648362.8749645
+  },
+  "market_state_efc6b38e44660f6296191c256c9ada7b": {
+    "market_state": "正常牛市",
+    "market_factor": 1.15,
+    "timestamp": 1776656902.2844236
   }
 }
