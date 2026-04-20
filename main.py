@@ -1711,7 +1711,7 @@ def main():
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
     if api_key:
-        bw, sw = deepseek_generate_weights(
+        buy_w, sell_w = deepseek_generate_weights(
             market_state,
             sentiment,
             market_info["market_above_ma20"],
@@ -1721,11 +1721,6 @@ def main():
             api_key,
             use_cache=False,
         )
-        if bw and sw:
-            buy_w, sell_w = bw, sw
-            logger.info("使用AI动态权重")
-        else:
-            logger.warning("AI权重生成失败，使用默认权重")
 
     if args.code:
         target = etf_list[etf_list["代码"] == args.code]
