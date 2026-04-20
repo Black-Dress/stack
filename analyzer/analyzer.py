@@ -19,31 +19,48 @@ from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Optional, Union
 import re
-from .config import POSITION_FILE, STATE_FILE, CACHE_FILE, get_email_config
-from .utils import send_email, pad_display, discretize, validate_and_filter_weights
 
 # 导入配置和工具
-from config import (
-    ETF_MA, ETF_VOL_MA, MACRO_INDEX, MARKET_INDEX, MACRO_MA_SHORT, MACRO_MA_LONG,
-    RSI_PERIOD, ATR_PERIOD, ATR_STOP_MULT, ATR_TRAILING_MULT, PROFIT_TARGET,
-    WEEKLY_MA, RISK_WARNING_DAYS, RISK_WARNING_THRESHOLD,
-    POSITION_FILE, STATE_FILE, CACHE_FILE,
-    DEFAULT_BUY_WEIGHTS, DEFAULT_SELL_WEIGHTS, DEFAULT_PARAMS,
-    SENT_ALPHA, SENT_BETA, SENT_GAMMA,
-    get_email_config
+from .config import (
+    ETF_MA,
+    ETF_VOL_MA,
+    MACRO_INDEX,
+    MARKET_INDEX,
+    MACRO_MA_SHORT,
+    MACRO_MA_LONG,
+    RSI_PERIOD,
+    ATR_PERIOD,
+    ATR_STOP_MULT,
+    ATR_TRAILING_MULT,
+    PROFIT_TARGET,
+    WEEKLY_MA,
+    RISK_WARNING_DAYS,
+    RISK_WARNING_THRESHOLD,
+    POSITION_FILE,
+    STATE_FILE,
+    CACHE_FILE,
+    DEFAULT_BUY_WEIGHTS,
+    DEFAULT_SELL_WEIGHTS,
+    DEFAULT_PARAMS,
+    SENT_ALPHA,
+    SENT_BETA,
+    SENT_GAMMA,
+    get_email_config,
 )
-from utils import pad_display, discretize, validate_and_filter_weights
-from ai import AIClient
+from .utils import pad_display, discretize, validate_and_filter_weights, send_email
+from .ai import AIClient
 
 # 尝试导入 akshare
 try:
     import akshare as ak
+
     AKSHARE_AVAILABLE = True
 except ImportError:
     AKSHARE_AVAILABLE = False
     print("警告：未安装 akshare，情绪指标功能将不可用。请执行 pip install akshare")
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------- 数据获取（baostock, sina） ----------------------------
 def silent_login() -> bool:
@@ -54,9 +71,11 @@ def silent_login() -> bool:
         return False
     return True
 
+
 def silent_logout():
     with open(os.devnull, "w") as f, redirect_stdout(f):
         bs.logout()
+
 
 def get_daily_data(code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
     rs = bs.query_history_k_data_plus(
@@ -80,7 +99,10 @@ def get_daily_data(code: str, start_date: str, end_date: str) -> Optional[pd.Dat
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-def get_weekly_data(code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+
+def get_weekly_data(
+    code: str, start_date: str, end_date: str
+) -> Optional[pd.DataFrame]:
     df = get_daily_data(code, start_date, end_date)
     if df is None:
         return None
@@ -88,11 +110,14 @@ def get_weekly_data(code: str, start_date: str, end_date: str) -> Optional[pd.Da
     weekly["ma_short"] = weekly["close"].rolling(window=WEEKLY_MA).mean()
     return weekly
 
+
 def get_realtime_price_sina(code: str) -> Optional[float]:
     try:
         for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
             url = f"http://{domain}/list={code.replace('.','')}"
-            r = requests.get(url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3)
+            r = requests.get(
+                url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3
+            )
             if r.status_code == 200:
                 parts = r.text.split('"')[1].split(",")
                 if len(parts) > 3 and parts[3]:
@@ -101,12 +126,14 @@ def get_realtime_price_sina(code: str) -> Optional[float]:
     except:
         return None
 
+
 def load_positions() -> pd.DataFrame:
     try:
         df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
     except UnicodeDecodeError:
         df = pd.read_csv(POSITION_FILE, encoding="gbk")
     return df[["代码", "名称"]]
+
 
 # ---------------------------- 技术指标计算 ----------------------------
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -120,6 +147,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     ).max(1)
     return tr.rolling(period).mean()
 
+
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     high, low, close = df["high"], df["low"], df["close"]
     up_move = high.diff()
@@ -132,10 +160,17 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = dx.rolling(period).mean()
-    return pd.DataFrame({"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index)
+    return pd.DataFrame(
+        {"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index
+    )
 
-def calculate_indicators(df: pd.DataFrame, need_amount_ma: bool = True,
-                         recent_high_window: int = 10, recent_low_window: int = 20) -> pd.DataFrame:
+
+def calculate_indicators(
+    df: pd.DataFrame,
+    need_amount_ma: bool = True,
+    recent_high_window: int = 10,
+    recent_low_window: int = 20,
+) -> pd.DataFrame:
     df = df.copy()
     df["ma_short"] = df["close"].rolling(window=ETF_MA).mean()
     df["vol_ma"] = df["volume"].rolling(window=ETF_VOL_MA).mean()
@@ -150,8 +185,8 @@ def calculate_indicators(df: pd.DataFrame, need_amount_ma: bool = True,
     low_n = df["low"].rolling(9).min()
     high_n = df["high"].rolling(9).max()
     rsv = (df["close"] - low_n) / (high_n - low_n) * 100
-    df["kdj_k"] = rsv.ewm(alpha=1/3, adjust=False).mean()
-    df["kdj_d"] = df["kdj_k"].ewm(alpha=1/3, adjust=False).mean()
+    df["kdj_k"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    df["kdj_d"] = df["kdj_k"].ewm(alpha=1 / 3, adjust=False).mean()
     # 布林
     df["boll_mid"] = df["close"].rolling(20).mean()
     df["boll_std"] = df["close"].rolling(20).std()
@@ -176,13 +211,18 @@ def calculate_indicators(df: pd.DataFrame, need_amount_ma: bool = True,
     # 下跌动量因子
     df["downside_momentum_raw"] = np.where(
         (df["close"] < df["ma_short"]) & (df["minus_di"] > df["plus_di"]),
-        (df["ma_short"] - df["close"]) / df["ma_short"] * (df["volume"] / df["vol_ma"]).clip(0, 3),
+        (df["ma_short"] - df["close"])
+        / df["ma_short"]
+        * (df["volume"] / df["vol_ma"]).clip(0, 3),
         0,
     )
     # 近期高低点
-    df[f"recent_high_{recent_high_window}"] = df["high"].rolling(recent_high_window).max()
+    df[f"recent_high_{recent_high_window}"] = (
+        df["high"].rolling(recent_high_window).max()
+    )
     df[f"recent_low_{recent_low_window}"] = df["low"].rolling(recent_low_window).min()
     return df
+
 
 def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     if df is None or len(df) < 20:
@@ -208,11 +248,21 @@ def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     if "vol_ma" not in df.columns:
         df["vol_ma"] = df["volume"].rolling(20).mean()
 
-    price_above_ma20 = ((df["close"] - df["ma20"]) / (df["ma20"].replace(0, np.nan) * 0.1)).clip(0, 1).fillna(0)
-    price_above_ma60 = ((df["close"] - df["ma60"]) / (df["ma60"].replace(0, np.nan) * 0.1)).clip(0, 1).fillna(0)
+    price_above_ma20 = (
+        ((df["close"] - df["ma20"]) / (df["ma20"].replace(0, np.nan) * 0.1))
+        .clip(0, 1)
+        .fillna(0)
+    )
+    price_above_ma60 = (
+        ((df["close"] - df["ma60"]) / (df["ma60"].replace(0, np.nan) * 0.1))
+        .clip(0, 1)
+        .fillna(0)
+    )
     ma20_slope = df["ma20"].diff(5) / df["ma20"].shift(5).replace(0, np.nan)
     slope_score = (ma20_slope * 10).clip(0, 1).fillna(0)
-    trend_score = (price_above_ma20 * 0.5 + price_above_ma60 * 0.3 + slope_score * 0.2) * 100
+    trend_score = (
+        price_above_ma20 * 0.5 + price_above_ma60 * 0.3 + slope_score * 0.2
+    ) * 100
 
     rsi_score = ((df["rsi"] - 50) * 3.33).clip(0, 100).fillna(50)
     macd_change = df["macd_hist"].diff() / (df["macd_hist"].shift(1).abs() + 0.001)
@@ -238,6 +288,7 @@ def compute_tmsv(df: pd.DataFrame) -> pd.Series:
     tmsv = tmsv.clip(0, 100).fillna(50)
     return tmsv
 
+
 # ---------------------------- 情绪因子（基于 akshare） ----------------------------
 def sentiment_adjustment(sentiment: float) -> float:
     x = sentiment - 1.0
@@ -246,6 +297,7 @@ def sentiment_adjustment(sentiment: float) -> float:
     else:
         adj = 1.0 + SENT_ALPHA * math.tanh(SENT_BETA * x)
     return max(0.60, min(1.30, adj))
+
 
 def fetch_sentiment_indicators() -> dict:
     indicators = {}
@@ -256,7 +308,9 @@ def fetch_sentiment_indicators() -> dict:
         if not df_north.empty:
             latest = df_north.iloc[-1]
             indicators["north_net_inflow"] = float(latest["净流入"])
-            indicators["north_net_inflow_20d_avg"] = float(df_north["净流入"].tail(20).mean())
+            indicators["north_net_inflow_20d_avg"] = float(
+                df_north["净流入"].tail(20).mean()
+            )
     except Exception as e:
         logger.debug(f"北向资金获取失败: {e}")
     try:
@@ -291,7 +345,9 @@ def fetch_sentiment_indicators() -> dict:
     except Exception as e:
         logger.debug(f"市场总貌获取失败: {e}")
     try:
-        df_hot = ak.stock_hot_search_baidu(symbol="A股", date=datetime.datetime.now().strftime("%Y%m%d"))
+        df_hot = ak.stock_hot_search_baidu(
+            symbol="A股", date=datetime.datetime.now().strftime("%Y%m%d")
+        )
         if "rank" in df_hot.columns:
             avg_rank = df_hot["rank"].head(10).mean()
             indicators["baidu_hot_avg_rank"] = avg_rank
@@ -307,6 +363,7 @@ def fetch_sentiment_indicators() -> dict:
     except Exception as e:
         logger.debug(f"VIX获取失败: {e}")
     return indicators
+
 
 def compute_sentiment_factor(indicators: dict) -> float:
     if not indicators:
@@ -362,6 +419,7 @@ def compute_sentiment_factor(indicators: dict) -> float:
         score /= weight_total
     return sentiment_adjustment(max(0.6, min(1.4, score)))
 
+
 def get_sentiment_risk_tip(sentiment_factor: float) -> str:
     if sentiment_factor >= 1.25:
         return "⚠️  市场情绪过热，短期回调风险较高，追高需谨慎"
@@ -373,6 +431,7 @@ def get_sentiment_risk_tip(sentiment_factor: float) -> str:
         return "💡  市场情绪偏悲观，可关注错杀机会"
     else:
         return "💡💡  市场情绪极度恐慌，往往是左侧布局良机"
+
 
 def get_sentiment_factor_simple(macro_df: pd.DataFrame) -> float:
     if len(macro_df) < RSI_PERIOD + 1:
@@ -390,11 +449,17 @@ def get_sentiment_factor_simple(macro_df: pd.DataFrame) -> float:
         return 1.0
     return 0.9
 
+
 # ---------------------------- 缓存管理（权重缓存） ----------------------------
-def _get_cache_key_fuzzy(macro_status: str, sentiment_factor: float,
-                         market_above_ma20: bool, market_above_ma60: bool,
-                         market_amount_above_ma20: bool, volatility: float,
-                         cache_type: str = "weights") -> str:
+def _get_cache_key_fuzzy(
+    macro_status: str,
+    sentiment_factor: float,
+    market_above_ma20: bool,
+    market_above_ma60: bool,
+    market_amount_above_ma20: bool,
+    volatility: float,
+    cache_type: str = "weights",
+) -> str:
     vol_bins = [0.01, 0.02, 0.03, 0.04]
     vol_level = discretize(volatility, vol_bins)
     sent_bins = [0.7, 0.85, 1.0, 1.15, 1.25]
@@ -403,6 +468,7 @@ def _get_cache_key_fuzzy(macro_status: str, sentiment_factor: float,
     key_str = f"{cache_type}_{today}_{macro_status}_{sent_level}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{vol_level}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
+
 def _load_cache() -> Dict:
     if not os.path.exists(CACHE_FILE):
         return {}
@@ -410,7 +476,11 @@ def _load_cache() -> Dict:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             cache = json.load(f)
         now = time.time()
-        expired = [k for k, v in cache.items() if isinstance(v, dict) and v.get("timestamp", 0) < now - 7 * 86400]
+        expired = [
+            k
+            for k, v in cache.items()
+            if isinstance(v, dict) and v.get("timestamp", 0) < now - 7 * 86400
+        ]
         for k in expired:
             del cache[k]
         if expired:
@@ -418,6 +488,7 @@ def _load_cache() -> Dict:
         return cache
     except:
         return {}
+
 
 def _save_cache(cache: Dict):
     for val in cache.values():
@@ -429,13 +500,23 @@ def _save_cache(cache: Dict):
     except Exception as e:
         logger.error(f"保存缓存失败: {e}")
 
-# ---------------------------- 相关性惩罚与信任度 ----------------------------
-def compute_factor_correlation(df: pd.DataFrame, factor_names: List[str]) -> pd.DataFrame:
-    # 简化版，实际可基于历史数据计算
-    return pd.DataFrame(np.eye(len(factor_names)), index=factor_names, columns=factor_names)
 
-def apply_correlation_penalty(weights: Dict, factor_names: List[str],
-                              corr_matrix: pd.DataFrame, penalty_threshold: float = 0.7) -> Dict:
+# ---------------------------- 相关性惩罚与信任度 ----------------------------
+def compute_factor_correlation(
+    df: pd.DataFrame, factor_names: List[str]
+) -> pd.DataFrame:
+    # 简化版，实际可基于历史数据计算
+    return pd.DataFrame(
+        np.eye(len(factor_names)), index=factor_names, columns=factor_names
+    )
+
+
+def apply_correlation_penalty(
+    weights: Dict,
+    factor_names: List[str],
+    corr_matrix: pd.DataFrame,
+    penalty_threshold: float = 0.7,
+) -> Dict:
     w = weights.copy()
     high_corr_pairs = []
     for i, f1 in enumerate(factor_names):
@@ -456,6 +537,7 @@ def apply_correlation_penalty(weights: Dict, factor_names: List[str],
         w = {k: v / total for k, v in w.items()}
     return w
 
+
 def compute_dynamic_trust(ai_weights: Dict, default_weights: Dict) -> float:
     base_trust = 0.75
     zero_count = sum(1 for v in ai_weights.values() if v < 0.01)
@@ -473,6 +555,7 @@ def compute_dynamic_trust(ai_weights: Dict, default_weights: Dict) -> float:
             base_trust = min(base_trust, 0.55)
     return base_trust
 
+
 def blend_weights(ai_w: Dict, def_w: Dict, trust: float) -> Dict:
     blended = {k: ai_w.get(k, 0) * trust + def_w[k] * (1 - trust) for k in def_w}
     total = sum(blended.values())
@@ -480,50 +563,113 @@ def blend_weights(ai_w: Dict, def_w: Dict, trust: float) -> Dict:
         blended = {k: v / total for k, v in blended.items()}
     return blended
 
+
 # ---------------------------- 评分核心函数 ----------------------------
-def strength(price: float, ma20: float, volume: float, vol_ma: float,
-             macd_golden: int, kdj_golden: int, rsi: float,
-             boll_up: float, boll_low: float, williams_r: float,
-             ret_etf_5d: float, ret_market_5d: float,
-             weekly_above: bool, weekly_below: bool,
-             recent_high: float, recent_low: float, atr_pct: float,
-             market_above_ma20: bool, market_above_ma60: bool, market_amount_above_ma20: bool,
-             is_buy: bool, buy_weights: Dict, sell_weights: Dict,
-             tmsv_strength: float = 0.0, downside_momentum: float = 0.0, max_drawdown_pct: float = 0.0) -> float:
-    def cap(x): return max(0.0, min(1.0, x))
+def strength(
+    price: float,
+    ma20: float,
+    volume: float,
+    vol_ma: float,
+    macd_golden: int,
+    kdj_golden: int,
+    rsi: float,
+    boll_up: float,
+    boll_low: float,
+    williams_r: float,
+    ret_etf_5d: float,
+    ret_market_5d: float,
+    weekly_above: bool,
+    weekly_below: bool,
+    recent_high: float,
+    recent_low: float,
+    atr_pct: float,
+    market_above_ma20: bool,
+    market_above_ma60: bool,
+    market_amount_above_ma20: bool,
+    is_buy: bool,
+    buy_weights: Dict,
+    sell_weights: Dict,
+    tmsv_strength: float = 0.0,
+    downside_momentum: float = 0.0,
+    max_drawdown_pct: float = 0.0,
+) -> float:
+    def cap(x):
+        return max(0.0, min(1.0, x))
+
     if is_buy:
         factors = {
-            "price_above_ma20": cap((price - ma20) / (ma20 * 0.1)) if price > ma20 else 0,
+            "price_above_ma20": (
+                cap((price - ma20) / (ma20 * 0.1)) if price > ma20 else 0
+            ),
             "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
             "macd_golden_cross": macd_golden,
             "kdj_golden_cross": kdj_golden,
-            "bollinger_break_up": cap((price - boll_up) / boll_up) if price > boll_up else 0,
-            "williams_oversold": cap((-80 - williams_r) / 20) if williams_r < -80 else 0,
+            "bollinger_break_up": (
+                cap((price - boll_up) / boll_up) if price > boll_up else 0
+            ),
+            "williams_oversold": (
+                cap((-80 - williams_r) / 20) if williams_r < -80 else 0
+            ),
             "market_above_ma20": 1 if market_above_ma20 else 0,
             "market_above_ma60": 1 if market_above_ma60 else 0,
             "market_amount_above_ma20": 1 if market_amount_above_ma20 else 0,
-            "outperform_market": cap((ret_etf_5d - ret_market_5d) / 0.05) if ret_etf_5d > ret_market_5d else 0,
+            "outperform_market": (
+                cap((ret_etf_5d - ret_market_5d) / 0.05)
+                if ret_etf_5d > ret_market_5d
+                else 0
+            ),
             "weekly_above_ma20": 1 if weekly_above else 0,
             "tmsv_score": tmsv_strength,
         }
         weights = buy_weights
     else:
         factors = {
-            "price_below_ma20": cap((ma20 - price) / (ma20 * 0.1)) if price < ma20 else 0,
-            "bollinger_break_down": cap((boll_low - price) / boll_low) if price < boll_low else 0,
-            "williams_overbought": cap((20 - williams_r) / 20) if williams_r < 20 else 0,
+            "price_below_ma20": (
+                cap((ma20 - price) / (ma20 * 0.1)) if price < ma20 else 0
+            ),
+            "bollinger_break_down": (
+                cap((boll_low - price) / boll_low) if price < boll_low else 0
+            ),
+            "williams_overbought": (
+                cap((20 - williams_r) / 20) if williams_r < 20 else 0
+            ),
             "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
-            "underperform_market": cap((ret_market_5d - ret_etf_5d) / 0.05) if ret_etf_5d < ret_market_5d else 0,
-            "stop_loss_ma_break": cap((ma20 - price) / (ma20 * 0.05)) if price < ma20 else 0,
-            "trailing_stop_clear": cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct)) if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct else 0,
-            "trailing_stop_half": cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct)) if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct else 0,
-            "profit_target_hit": cap((price - recent_low) / recent_low / PROFIT_TARGET) if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET else 0,
+            "underperform_market": (
+                cap((ret_market_5d - ret_etf_5d) / 0.05)
+                if ret_etf_5d < ret_market_5d
+                else 0
+            ),
+            "stop_loss_ma_break": (
+                cap((ma20 - price) / (ma20 * 0.05)) if price < ma20 else 0
+            ),
+            "trailing_stop_clear": (
+                cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
+                else 0
+            ),
+            "trailing_stop_half": (
+                cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
+                else 0
+            ),
+            "profit_target_hit": (
+                cap((price - recent_low) / recent_low / PROFIT_TARGET)
+                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET
+                else 0
+            ),
             "weekly_below_ma20": 1 if weekly_below else 0,
             "downside_momentum": cap(downside_momentum),
-            "max_drawdown_stop": cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0,
+            "max_drawdown_stop": (
+                cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0
+            ),
         }
         weights = sell_weights
     return sum(weights.get(k, 0) * factors.get(k, 0) for k in factors)
+
 
 # ---------------------------- 信号确认与参数调整 ----------------------------
 def get_dynamic_history_days(volatility: float) -> int:
@@ -535,32 +681,47 @@ def get_dynamic_history_days(volatility: float) -> int:
         return 12
     return 20
 
-def get_action(score: float, score_history: List[Dict], params: Dict, atr_pct: float = None) -> str:
+
+def get_action(
+    score: float, score_history: List[Dict], params: Dict, atr_pct: float = None
+) -> str:
     hist_scores = [s["score"] for s in score_history]
     if len(hist_scores) < 2:
-        return "BUY" if score > params["BUY_THRESHOLD"] else ("SELL" if score < params["SELL_THRESHOLD"] else "HOLD")
+        return (
+            "BUY"
+            if score > params["BUY_THRESHOLD"]
+            else ("SELL" if score < params["SELL_THRESHOLD"] else "HOLD")
+        )
     window = get_dynamic_history_days(atr_pct) if atr_pct else 12
     window = min(window, len(hist_scores))
     recent = hist_scores[-window:]
     avg = sum(recent) / len(recent)
     slope = np.polyfit(range(len(recent)), recent, 1)[0] if len(recent) >= 3 else 0
-    up_days = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
-    down_days = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
+    up_days = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
+    down_days = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i - 1])
 
     if score > params["BUY_THRESHOLD"]:
-        if score > params["QUICK_BUY_THRESHOLD"] and slope > 0.05 and avg > params["BUY_THRESHOLD"] + 0.1:
+        if (
+            score > params["QUICK_BUY_THRESHOLD"]
+            and slope > 0.05
+            and avg > params["BUY_THRESHOLD"] + 0.1
+        ):
             return "BUY"
         if len(hist_scores) >= params["CONFIRM_DAYS"]:
-            confirm = hist_scores[-params["CONFIRM_DAYS"]:]
+            confirm = hist_scores[-params["CONFIRM_DAYS"] :]
             if all(s > params["BUY_THRESHOLD"] for s in confirm) and slope >= 0:
                 return "BUY"
         if down_days >= 2 and slope > 0.02 and score > avg + 0.1:
             return "BUY"
     if score < params["SELL_THRESHOLD"]:
-        if score < params["SELL_THRESHOLD"] - 0.1 and slope < -0.05 and avg < params["SELL_THRESHOLD"] - 0.1:
+        if (
+            score < params["SELL_THRESHOLD"] - 0.1
+            and slope < -0.05
+            and avg < params["SELL_THRESHOLD"] - 0.1
+        ):
             return "SELL"
         if len(hist_scores) >= params["CONFIRM_DAYS"]:
-            confirm = hist_scores[-params["CONFIRM_DAYS"]:]
+            confirm = hist_scores[-params["CONFIRM_DAYS"] :]
             if all(s < params["SELL_THRESHOLD"] for s in confirm) and slope <= 0:
                 return "SELL"
         if up_days >= 2 and slope < -0.02 and score < avg - 0.1:
@@ -578,20 +739,34 @@ def get_action(score: float, score_history: List[Dict], params: Dict, atr_pct: f
             return "SELL"
     return "HOLD"
 
+
 def get_action_level(score: float) -> str:
-    if score >= 0.8: return "极度看好"
-    if score >= 0.7: return "强烈买入"
-    if score >= 0.6: return "买入"
-    if score >= 0.4: return "谨慎买入"
-    if score >= 0.2: return "偏多持有"
-    if score >= 0.0: return "中性偏多"
-    if score >= -0.2: return "中性偏空"
-    if score >= -0.4: return "偏空持有"
-    if score >= -0.6: return "谨慎卖出"
-    if score >= -0.8: return "卖出"
+    if score >= 0.8:
+        return "极度看好"
+    if score >= 0.7:
+        return "强烈买入"
+    if score >= 0.6:
+        return "买入"
+    if score >= 0.4:
+        return "谨慎买入"
+    if score >= 0.2:
+        return "偏多持有"
+    if score >= 0.0:
+        return "中性偏多"
+    if score >= -0.2:
+        return "中性偏空"
+    if score >= -0.4:
+        return "偏空持有"
+    if score >= -0.6:
+        return "谨慎卖出"
+    if score >= -0.8:
+        return "卖出"
     return "强烈卖出"
 
-def adjust_params_based_on_history(params: Dict, score_history: List[Dict], volatility: float, market_factor: float) -> Dict:
+
+def adjust_params_based_on_history(
+    params: Dict, score_history: List[Dict], volatility: float, market_factor: float
+) -> Dict:
     if len(score_history) < 10:
         return params
     window = get_dynamic_history_days(volatility)
@@ -601,7 +776,9 @@ def adjust_params_based_on_history(params: Dict, score_history: List[Dict], vola
     slope = np.polyfit(range(len(recent)), recent, 1)[0] if len(recent) >= 3 else 0
     short_window = min(3, len(score_history))
     short_recent = [s["score"] for s in score_history[-short_window:]]
-    short_slope = np.polyfit(range(short_window), short_recent, 1)[0] if short_window >= 2 else 0
+    short_slope = (
+        np.polyfit(range(short_window), short_recent, 1)[0] if short_window >= 2 else 0
+    )
     adjust_mult = 1.2 / market_factor
     adjusted = params.copy()
     if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
@@ -620,15 +797,20 @@ def adjust_params_based_on_history(params: Dict, score_history: List[Dict], vola
         delta = min(0.03, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
         new_val = min(-0.15, params["SELL_THRESHOLD"] + delta)
     else:
-        new_val = params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
+        new_val = (
+            params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
+        )
     adjusted["SELL_THRESHOLD"] = new_val
     if volatility > 0.04:
         adjusted["CONFIRM_DAYS"] = min(5, int(round(params["CONFIRM_DAYS"] * 1.1)))
     elif volatility < 0.01:
         adjusted["CONFIRM_DAYS"] = max(2, int(round(params["CONFIRM_DAYS"] * 0.9)))
     else:
-        adjusted["CONFIRM_DAYS"] = int(round(params["CONFIRM_DAYS"] * 0.95 + DEFAULT_PARAMS["CONFIRM_DAYS"] * 0.05))
+        adjusted["CONFIRM_DAYS"] = int(
+            round(params["CONFIRM_DAYS"] * 0.95 + DEFAULT_PARAMS["CONFIRM_DAYS"] * 0.05)
+        )
     return adjusted
+
 
 # ---------------------------- 状态管理 ----------------------------
 def load_state() -> Dict:
@@ -641,15 +823,26 @@ def load_state() -> Dict:
         logger.warning("状态文件损坏，重新初始化")
         return {}
 
+
 def save_state(state: Dict):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+
 # ---------------------------- 单只 ETF 分析（简要） ----------------------------
-def analyze_etf(code: str, name: str, real_price: Optional[float],
-                hist_df: Optional[pd.DataFrame], weekly_df: Optional[pd.DataFrame],
-                market: Dict, today: datetime.date, state: Dict,
-                buy_w: Dict, sell_w: Dict, params: Dict) -> Tuple[str, Optional[Dict], Dict, float]:
+def analyze_etf(
+    code: str,
+    name: str,
+    real_price: Optional[float],
+    hist_df: Optional[pd.DataFrame],
+    weekly_df: Optional[pd.DataFrame],
+    market: Dict,
+    today: datetime.date,
+    state: Dict,
+    buy_w: Dict,
+    sell_w: Dict,
+    params: Dict,
+) -> Tuple[str, Optional[Dict], Dict, float]:
     if real_price is None:
         out = f"{pad_display(name, 16)} {pad_display(code, 12)} {'获取失败':<8} {'0.00':<6}  {'价格缺失':<10}"
         return out, None, state, 0.0
@@ -658,19 +851,38 @@ def analyze_etf(code: str, name: str, real_price: Optional[float],
         return out, None, state, 0.0
     d = hist_df.iloc[-1]
     ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
-    rsi, boll_up, boll_low, williams_r = d["rsi"], d["boll_up"], d["boll_low"], d["williams_r"]
+    rsi, boll_up, boll_low, williams_r = (
+        d["rsi"],
+        d["boll_up"],
+        d["boll_low"],
+        d["williams_r"],
+    )
     atr_pct = d["atr"] / real_price if real_price > 0 else 0
     recent_high_window = params["RECENT_HIGH_WINDOW"]
     recent_low_window = params["RECENT_LOW_WINDOW"]
-    recent_high = d.get(f"recent_high_{recent_high_window}", hist_df["high"].rolling(recent_high_window).max().iloc[-1])
-    recent_low = d.get(f"recent_low_{recent_low_window}", hist_df["low"].rolling(recent_low_window).min().iloc[-1])
+    recent_high = d.get(
+        f"recent_high_{recent_high_window}",
+        hist_df["high"].rolling(recent_high_window).max().iloc[-1],
+    )
+    recent_low = d.get(
+        f"recent_low_{recent_low_window}",
+        hist_df["low"].rolling(recent_low_window).min().iloc[-1],
+    )
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
-        macd_golden = 1 if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"]) else 0
-        kdj_golden = 1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
+        macd_golden = (
+            1
+            if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"])
+            else 0
+        )
+        kdj_golden = (
+            1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
+        )
     else:
         macd_golden = kdj_golden = 0
-    ret_etf_5d = (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
+    ret_etf_5d = (
+        (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
+    )
     weekly_above = weekly_below = False
     if weekly_df is not None and not weekly_df.empty:
         w = weekly_df.iloc[-1]
@@ -685,17 +897,65 @@ def analyze_etf(code: str, name: str, real_price: Optional[float],
         tmsv = 50.0
     tmsv_strength = tmsv / 100.0
     downside_momentum = d.get("downside_momentum_raw", 0.0)
-    max_drawdown_pct = (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
-    buy_score = strength(real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi,
-                         boll_up, boll_low, williams_r, ret_etf_5d, market["ret_market_5d"],
-                         weekly_above, weekly_below, recent_high, recent_low, atr_pct,
-                         market["market_above_ma20"], market["market_above_ma60"], market["market_amount_above_ma20"],
-                         True, buy_w, sell_w, tmsv_strength, downside_momentum, max_drawdown_pct)
-    sell_score = strength(real_price, ma20, volume, vol_ma, macd_golden, kdj_golden, rsi,
-                          boll_up, boll_low, williams_r, ret_etf_5d, market["ret_market_5d"],
-                          weekly_above, weekly_below, recent_high, recent_low, atr_pct,
-                          market["market_above_ma20"], market["market_above_ma60"], market["market_amount_above_ma20"],
-                          False, buy_w, sell_w, tmsv_strength, downside_momentum, max_drawdown_pct)
+    max_drawdown_pct = (
+        (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
+    )
+    buy_score = strength(
+        real_price,
+        ma20,
+        volume,
+        vol_ma,
+        macd_golden,
+        kdj_golden,
+        rsi,
+        boll_up,
+        boll_low,
+        williams_r,
+        ret_etf_5d,
+        market["ret_market_5d"],
+        weekly_above,
+        weekly_below,
+        recent_high,
+        recent_low,
+        atr_pct,
+        market["market_above_ma20"],
+        market["market_above_ma60"],
+        market["market_amount_above_ma20"],
+        True,
+        buy_w,
+        sell_w,
+        tmsv_strength,
+        downside_momentum,
+        max_drawdown_pct,
+    )
+    sell_score = strength(
+        real_price,
+        ma20,
+        volume,
+        vol_ma,
+        macd_golden,
+        kdj_golden,
+        rsi,
+        boll_up,
+        boll_low,
+        williams_r,
+        ret_etf_5d,
+        market["ret_market_5d"],
+        weekly_above,
+        weekly_below,
+        recent_high,
+        recent_low,
+        atr_pct,
+        market["market_above_ma20"],
+        market["market_above_ma60"],
+        market["market_amount_above_ma20"],
+        False,
+        buy_w,
+        sell_w,
+        tmsv_strength,
+        downside_momentum,
+        max_drawdown_pct,
+    )
     raw = buy_score - sell_score
     env_factor = market["market_factor"] * market["sentiment_factor"]
     env_factor = max(0.60, min(1.30, env_factor))
@@ -714,48 +974,90 @@ def analyze_etf(code: str, name: str, real_price: Optional[float],
         state["score_history"].append({"date": today_str, "score": final})
     state["score_history"].sort(key=lambda x: x["date"])
     if len(state["score_history"]) >= 7:
-        params = adjust_params_based_on_history(params, state["score_history"], atr_pct, market["market_factor"])
+        params = adjust_params_based_on_history(
+            params, state["score_history"], atr_pct, market["market_factor"]
+        )
     action = get_action(final, state["score_history"], params, atr_pct)
     action_level = get_action_level(final)
     risk_warning = ""
     if len(state["score_history"]) >= RISK_WARNING_DAYS:
-        recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
+        recent_scores = [
+            s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]
+        ]
         if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
-            risk_warning = f"风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
+            risk_warning = (
+                f"风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
+            )
         elif final < -0.5 or final > 0.8:
             risk_warning = f"风险提示:极端评分{final:.2f}"
         elif atr_pct > 0.03:
             risk_warning = f"风险提示:高波动{atr_pct:.3f}"
-    output = (f"{pad_display(name, 16)} {pad_display(code, 12)} {pad_display(f'{real_price:.3f}', 8, 'right')} "
-              f"{pad_display(f'{final:.2f}', 6, 'right')}  {pad_display(action_level, 10)}")
+    output = (
+        f"{pad_display(name, 16)} {pad_display(code, 12)} {pad_display(f'{real_price:.3f}', 8, 'right')} "
+        f"{pad_display(f'{final:.2f}', 6, 'right')}  {pad_display(action_level, 10)}"
+    )
     if risk_warning:
         output += f"  {risk_warning}"
-    signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY", "SELL") else None
+    signal = (
+        {"action": action, "name": name, "code": code, "score": final}
+        if action in ("BUY", "SELL")
+        else None
+    )
     return output, signal, state, final
 
+
 # ---------------------------- 详细分析报告 ----------------------------
-def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
-                          hist_df: Optional[pd.DataFrame], weekly_df: Optional[pd.DataFrame],
-                          market: Dict, today: datetime.date, state: Dict,
-                          buy_w: Dict, sell_w: Dict, params: Dict, ai_client: Optional[AIClient] = None) -> str:
+def detailed_analysis_etf(
+    code: str,
+    name: str,
+    real_price: Optional[float],
+    hist_df: Optional[pd.DataFrame],
+    weekly_df: Optional[pd.DataFrame],
+    market: Dict,
+    today: datetime.date,
+    state: Dict,
+    buy_w: Dict,
+    sell_w: Dict,
+    params: Dict,
+    ai_client: Optional[AIClient] = None,
+) -> str:
     if real_price is None:
         return f"【{name} ({code})】实时价格获取失败，无法分析。"
     if hist_df is None or len(hist_df) < 20:
         return f"【{name} ({code})】历史数据不足，无法分析。"
     d = hist_df.iloc[-1]
     ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
-    rsi, boll_up, boll_low, williams_r = d["rsi"], d["boll_up"], d["boll_low"], d["williams_r"]
+    rsi, boll_up, boll_low, williams_r = (
+        d["rsi"],
+        d["boll_up"],
+        d["boll_low"],
+        d["williams_r"],
+    )
     atr_pct = d["atr"] / real_price if real_price > 0 else 0
     recent_high_window = params["RECENT_HIGH_WINDOW"]
     recent_low_window = params["RECENT_LOW_WINDOW"]
-    recent_high = d.get(f"recent_high_{recent_high_window}", hist_df["high"].rolling(recent_high_window).max().iloc[-1])
-    recent_low = d.get(f"recent_low_{recent_low_window}", hist_df["low"].rolling(recent_low_window).min().iloc[-1])
+    recent_high = d.get(
+        f"recent_high_{recent_high_window}",
+        hist_df["high"].rolling(recent_high_window).max().iloc[-1],
+    )
+    recent_low = d.get(
+        f"recent_low_{recent_low_window}",
+        hist_df["low"].rolling(recent_low_window).min().iloc[-1],
+    )
     macd_golden = kdj_golden = 0
     if len(hist_df) >= 2:
         prev = hist_df.iloc[-2]
-        macd_golden = 1 if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"]) else 0
-        kdj_golden = 1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
-    ret_etf_5d = (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
+        macd_golden = (
+            1
+            if (d["macd_dif"] > d["macd_dea"] and prev["macd_dif"] <= prev["macd_dea"])
+            else 0
+        )
+        kdj_golden = (
+            1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
+        )
+    ret_etf_5d = (
+        (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
+    )
     weekly_above = weekly_below = False
     if weekly_df is not None and not weekly_df.empty:
         w = weekly_df.iloc[-1]
@@ -770,36 +1072,80 @@ def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
         tmsv = 50.0
     tmsv_strength = tmsv / 100.0
     downside_momentum = d.get("downside_momentum_raw", 0.0)
-    max_drawdown_pct = (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
-    def cap(x): return max(0.0, min(1.0, x))
+    max_drawdown_pct = (
+        (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
+    )
+
+    def cap(x):
+        return max(0.0, min(1.0, x))
+
     buy_factors = {
-        "price_above_ma20": cap((real_price - ma20) / (ma20 * 0.1)) if real_price > ma20 else 0,
+        "price_above_ma20": (
+            cap((real_price - ma20) / (ma20 * 0.1)) if real_price > ma20 else 0
+        ),
         "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
         "macd_golden_cross": macd_golden,
         "kdj_golden_cross": kdj_golden,
-        "bollinger_break_up": cap((real_price - boll_up) / boll_up) if real_price > boll_up else 0,
+        "bollinger_break_up": (
+            cap((real_price - boll_up) / boll_up) if real_price > boll_up else 0
+        ),
         "williams_oversold": cap((-80 - williams_r) / 20) if williams_r < -80 else 0,
         "market_above_ma20": 1 if market["market_above_ma20"] else 0,
         "market_above_ma60": 1 if market["market_above_ma60"] else 0,
         "market_amount_above_ma20": 1 if market["market_amount_above_ma20"] else 0,
-        "outperform_market": cap((ret_etf_5d - market["ret_market_5d"]) / 0.05) if ret_etf_5d > market["ret_market_5d"] else 0,
+        "outperform_market": (
+            cap((ret_etf_5d - market["ret_market_5d"]) / 0.05)
+            if ret_etf_5d > market["ret_market_5d"]
+            else 0
+        ),
         "weekly_above_ma20": 1 if weekly_above else 0,
         "tmsv_score": tmsv_strength,
     }
     buy_score = sum(buy_w.get(k, 0) * buy_factors[k] for k in buy_factors)
     sell_factors = {
-        "price_below_ma20": cap((ma20 - real_price) / (ma20 * 0.1)) if real_price < ma20 else 0,
-        "bollinger_break_down": cap((boll_low - real_price) / boll_low) if real_price < boll_low else 0,
+        "price_below_ma20": (
+            cap((ma20 - real_price) / (ma20 * 0.1)) if real_price < ma20 else 0
+        ),
+        "bollinger_break_down": (
+            cap((boll_low - real_price) / boll_low) if real_price < boll_low else 0
+        ),
         "williams_overbought": cap((20 - williams_r) / 20) if williams_r < 20 else 0,
         "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
-        "underperform_market": cap((market["ret_market_5d"] - ret_etf_5d) / 0.05) if ret_etf_5d < market["ret_market_5d"] else 0,
-        "stop_loss_ma_break": cap((ma20 - real_price) / (ma20 * 0.05)) if real_price < ma20 else 0,
-        "trailing_stop_clear": cap((recent_high - real_price) / recent_high / (ATR_STOP_MULT * atr_pct)) if recent_high > 0 and atr_pct > 0 and (recent_high - real_price) / recent_high >= ATR_STOP_MULT * atr_pct else 0,
-        "trailing_stop_half": cap((recent_high - real_price) / recent_high / (ATR_TRAILING_MULT * atr_pct)) if recent_high > 0 and atr_pct > 0 and (recent_high - real_price) / recent_high >= ATR_TRAILING_MULT * atr_pct else 0,
-        "profit_target_hit": cap((real_price - recent_low) / recent_low / PROFIT_TARGET) if recent_low > 0 and (real_price - recent_low) / recent_low >= PROFIT_TARGET else 0,
+        "underperform_market": (
+            cap((market["ret_market_5d"] - ret_etf_5d) / 0.05)
+            if ret_etf_5d < market["ret_market_5d"]
+            else 0
+        ),
+        "stop_loss_ma_break": (
+            cap((ma20 - real_price) / (ma20 * 0.05)) if real_price < ma20 else 0
+        ),
+        "trailing_stop_clear": (
+            cap((recent_high - real_price) / recent_high / (ATR_STOP_MULT * atr_pct))
+            if recent_high > 0
+            and atr_pct > 0
+            and (recent_high - real_price) / recent_high >= ATR_STOP_MULT * atr_pct
+            else 0
+        ),
+        "trailing_stop_half": (
+            cap(
+                (recent_high - real_price) / recent_high / (ATR_TRAILING_MULT * atr_pct)
+            )
+            if recent_high > 0
+            and atr_pct > 0
+            and (recent_high - real_price) / recent_high >= ATR_TRAILING_MULT * atr_pct
+            else 0
+        ),
+        "profit_target_hit": (
+            cap((real_price - recent_low) / recent_low / PROFIT_TARGET)
+            if recent_low > 0
+            and (real_price - recent_low) / recent_low >= PROFIT_TARGET
+            else 0
+        ),
         "weekly_below_ma20": 1 if weekly_below else 0,
         "downside_momentum": cap(downside_momentum),
-        "max_drawdown_stop": cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0,
+        "max_drawdown_stop": (
+            cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0
+        ),
     }
     sell_score = sum(sell_w.get(k, 0) * sell_factors[k] for k in sell_factors)
     raw = buy_score - sell_score
@@ -812,7 +1158,9 @@ def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
     lines.append(f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 70)
     lines.append(f"实时价格：{real_price:.3f}")
-    lines.append(f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}")
+    lines.append(
+        f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"
+    )
     if market.get("sentiment_risk_tip"):
         lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
     lines.append(f"波动率(ATR%)：{atr_pct*100:.2f}%")
@@ -820,13 +1168,24 @@ def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
     lines.append(f"最大回撤：{max_drawdown_pct*100:.2f}%")
     lines.append("")
     col_name, col_strength, col_weight, col_contrib = 25, 8, 8, 8
+
     def row_line(items):
-        return "".join([pad_display(items[0], col_name), pad_display(items[1], col_strength, "right"),
-                        pad_display(items[2], col_weight, "right"), pad_display(items[3], col_contrib, "right")])
+        return "".join(
+            [
+                pad_display(items[0], col_name),
+                pad_display(items[1], col_strength, "right"),
+                pad_display(items[2], col_weight, "right"),
+                pad_display(items[3], col_contrib, "right"),
+            ]
+        )
+
     lines.append("【买入因子详情】")
     lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
     lines.append("-" * 50)
-    buy_contributions = [(k, buy_factors[k], buy_w.get(k, 0), buy_w.get(k, 0) * buy_factors[k]) for k in buy_factors]
+    buy_contributions = [
+        (k, buy_factors[k], buy_w.get(k, 0), buy_w.get(k, 0) * buy_factors[k])
+        for k in buy_factors
+    ]
     buy_contributions.sort(key=lambda x: x[3], reverse=True)
     for name_f, s, w, contrib in buy_contributions:
         lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
@@ -835,23 +1194,41 @@ def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
     lines.append("【卖出因子详情】")
     lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
     lines.append("-" * 50)
-    sell_contributions = [(k, sell_factors[k], sell_w.get(k, 0), sell_w.get(k, 0) * sell_factors[k]) for k in sell_factors]
+    sell_contributions = [
+        (k, sell_factors[k], sell_w.get(k, 0), sell_w.get(k, 0) * sell_factors[k])
+        for k in sell_factors
+    ]
     sell_contributions.sort(key=lambda x: x[3], reverse=True)
     for name_f, s, w, contrib in sell_contributions:
         lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
     lines.append(row_line(["卖出总分", "", "", f"{sell_score:.3f}"]))
     lines.append("")
     lines.append("【评分合成】")
-    lines.append(f"原始净分 = 买入总分 - 卖出总分 = {buy_score:.3f} - {sell_score:.3f} = {raw:.3f}")
+    lines.append(
+        f"原始净分 = 买入总分 - 卖出总分 = {buy_score:.3f} - {sell_score:.3f} = {raw:.3f}"
+    )
     lines.append(f"最终评分 = 原始净分 × 市场因子 × 情绪因子")
-    lines.append(f"        = {raw:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} = {final:.3f}")
+    lines.append(
+        f"        = {raw:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} = {final:.3f}"
+    )
     lines.append(f"操作等级：{action_level}")
     if ai_client:
         lines.append("")
         lines.append("【AI 专业点评】")
         ai_comment = ai_client.comment_on_etf(
-            code, name, final, action_level, market["macro_status"], market["market_factor"],
-            market["sentiment_factor"], buy_w, sell_w, buy_factors, sell_factors, tmsv, atr_pct
+            code,
+            name,
+            final,
+            action_level,
+            market["macro_status"],
+            market["market_factor"],
+            market["sentiment_factor"],
+            buy_w,
+            sell_w,
+            buy_factors,
+            sell_factors,
+            tmsv,
+            atr_pct,
         )
         lines.append(ai_comment)
     else:
@@ -860,8 +1237,11 @@ def detailed_analysis_etf(code: str, name: str, real_price: Optional[float],
     lines.append("=" * 70)
     return "\n".join(lines)
 
+
 # ---------------------------- 批量分析主函数（供 main 调用） ----------------------------
-def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str] = None):
+def run_batch_analysis(
+    api_key: Optional[str] = None, target_code: Optional[str] = None
+):
     """批量分析 ETF，若指定 target_code 则只分析单只并输出详细报告"""
     if not silent_login():
         return
@@ -881,9 +1261,13 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
         print("获取宏观数据失败")
         return
 
-    macro_df = calculate_indicators(macro_df, need_amount_ma=False, recent_high_window=10, recent_low_window=20)
+    macro_df = calculate_indicators(
+        macro_df, need_amount_ma=False, recent_high_window=10, recent_low_window=20
+    )
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
-    market_df = calculate_indicators(market_df, need_amount_ma=True, recent_high_window=10, recent_low_window=20)
+    market_df = calculate_indicators(
+        market_df, need_amount_ma=True, recent_high_window=10, recent_low_window=20
+    )
     market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
 
@@ -894,9 +1278,13 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
         logger.info(f"AI市场状态: {market_state}, 因子: {market_factor}")
     else:
         last = market_df.iloc[-1]
-        if last["close"] > last["ma_short"] and last["close"] > last.get("ma_long", last["ma_short"]):
+        if last["close"] > last["ma_short"] and last["close"] > last.get(
+            "ma_long", last["ma_short"]
+        ):
             market_state, market_factor = "正常牛市", 1.2
-        elif last["close"] < last["ma_short"] and last["close"] < last.get("ma_long", last["ma_short"]):
+        elif last["close"] < last["ma_short"] and last["close"] < last.get(
+            "ma_long", last["ma_short"]
+        ):
             market_state, market_factor = "熊市下跌", 0.8
         else:
             market_state, market_factor = "震荡偏弱", 1.0
@@ -926,45 +1314,98 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
         "market_above_ma20": mkt["close"] > mkt["ma_short"],
         "market_above_ma60": mkt["close"] > mkt.get("ma_long", mkt["ma_short"]),
         "market_amount_above_ma20": mkt["amount"] > mkt["amount_ma"],
-        "ret_market_5d": (mkt["close"] / market_df.iloc[-5]["close"] - 1) if len(market_df) >= 5 else 0,
+        "ret_market_5d": (
+            (mkt["close"] / market_df.iloc[-5]["close"] - 1)
+            if len(market_df) >= 5
+            else 0
+        ),
     }
 
     params = DEFAULT_PARAMS.copy()
     if volatility > 0.04:
-        params.update({"BUY_THRESHOLD": 0.65, "SELL_THRESHOLD": -0.35, "CONFIRM_DAYS": 5, "QUICK_BUY_THRESHOLD": 0.75})
+        params.update(
+            {
+                "BUY_THRESHOLD": 0.65,
+                "SELL_THRESHOLD": -0.35,
+                "CONFIRM_DAYS": 5,
+                "QUICK_BUY_THRESHOLD": 0.75,
+            }
+        )
     elif volatility > 0.02:
-        params.update({"BUY_THRESHOLD": 0.6, "SELL_THRESHOLD": -0.3, "CONFIRM_DAYS": 4, "QUICK_BUY_THRESHOLD": 0.7})
+        params.update(
+            {
+                "BUY_THRESHOLD": 0.6,
+                "SELL_THRESHOLD": -0.3,
+                "CONFIRM_DAYS": 4,
+                "QUICK_BUY_THRESHOLD": 0.7,
+            }
+        )
     elif volatility < 0.01:
-        params.update({"BUY_THRESHOLD": 0.4, "SELL_THRESHOLD": -0.1, "CONFIRM_DAYS": 2, "QUICK_BUY_THRESHOLD": 0.5})
+        params.update(
+            {
+                "BUY_THRESHOLD": 0.4,
+                "SELL_THRESHOLD": -0.1,
+                "CONFIRM_DAYS": 2,
+                "QUICK_BUY_THRESHOLD": 0.5,
+            }
+        )
 
     state = load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
     if ai_client:
         # 尝试从缓存加载
-        cache_key = _get_cache_key_fuzzy(market_state, sentiment,
-                                         market_info["market_above_ma20"], market_info["market_above_ma60"],
-                                         market_info["market_amount_above_ma20"], volatility)
+        cache_key = _get_cache_key_fuzzy(
+            market_state,
+            sentiment,
+            market_info["market_above_ma20"],
+            market_info["market_above_ma60"],
+            market_info["market_amount_above_ma20"],
+            volatility,
+        )
         cache = _load_cache()
-        if cache_key in cache and "buy" in cache[cache_key] and "sell" in cache[cache_key]:
-            cached_buy = validate_and_filter_weights(cache[cache_key]["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入")
-            cached_sell = validate_and_filter_weights(cache[cache_key]["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出")
+        if (
+            cache_key in cache
+            and "buy" in cache[cache_key]
+            and "sell" in cache[cache_key]
+        ):
+            cached_buy = validate_and_filter_weights(
+                cache[cache_key]["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入"
+            )
+            cached_sell = validate_and_filter_weights(
+                cache[cache_key]["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出"
+            )
             if cached_buy and cached_sell:
                 buy_w, sell_w = cached_buy, cached_sell
             else:
-                ai_buy, ai_sell = ai_client.generate_weights(market_state, sentiment,
-                                                              market_info["market_above_ma20"], market_info["market_above_ma60"],
-                                                              market_info["market_amount_above_ma20"], volatility)
+                ai_buy, ai_sell = ai_client.generate_weights(
+                    market_state,
+                    sentiment,
+                    market_info["market_above_ma20"],
+                    market_info["market_above_ma60"],
+                    market_info["market_amount_above_ma20"],
+                    volatility,
+                )
                 trust = compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS)
                 trust = min(trust, compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS))
-                corr_buy = compute_factor_correlation(None, list(DEFAULT_BUY_WEIGHTS.keys()))
-                corr_sell = compute_factor_correlation(None, list(DEFAULT_SELL_WEIGHTS.keys()))
-                ai_buy = apply_correlation_penalty(ai_buy, list(DEFAULT_BUY_WEIGHTS.keys()), corr_buy)
-                ai_sell = apply_correlation_penalty(ai_sell, list(DEFAULT_SELL_WEIGHTS.keys()), corr_sell)
+                corr_buy = compute_factor_correlation(
+                    None, list(DEFAULT_BUY_WEIGHTS.keys())
+                )
+                corr_sell = compute_factor_correlation(
+                    None, list(DEFAULT_SELL_WEIGHTS.keys())
+                )
+                ai_buy = apply_correlation_penalty(
+                    ai_buy, list(DEFAULT_BUY_WEIGHTS.keys()), corr_buy
+                )
+                ai_sell = apply_correlation_penalty(
+                    ai_sell, list(DEFAULT_SELL_WEIGHTS.keys()), corr_sell
+                )
                 buy_w = blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
                 sell_w = blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
                 if sentiment >= 1.25:
                     boost = 0.1
-                    sell_w["profit_target_hit"] = min(0.5, sell_w.get("profit_target_hit", 0) + boost)
+                    sell_w["profit_target_hit"] = min(
+                        0.5, sell_w.get("profit_target_hit", 0) + boost
+                    )
                     other_keys = [k for k in sell_w if k != "profit_target_hit"]
                     if other_keys:
                         reduce_each = boost / len(other_keys)
@@ -975,20 +1416,35 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
                 cache[cache_key] = {"buy": buy_w, "sell": sell_w}
                 _save_cache(cache)
         else:
-            ai_buy, ai_sell = ai_client.generate_weights(market_state, sentiment,
-                                                          market_info["market_above_ma20"], market_info["market_above_ma60"],
-                                                          market_info["market_amount_above_ma20"], volatility)
+            ai_buy, ai_sell = ai_client.generate_weights(
+                market_state,
+                sentiment,
+                market_info["market_above_ma20"],
+                market_info["market_above_ma60"],
+                market_info["market_amount_above_ma20"],
+                volatility,
+            )
             trust = compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS)
             trust = min(trust, compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS))
-            corr_buy = compute_factor_correlation(None, list(DEFAULT_BUY_WEIGHTS.keys()))
-            corr_sell = compute_factor_correlation(None, list(DEFAULT_SELL_WEIGHTS.keys()))
-            ai_buy = apply_correlation_penalty(ai_buy, list(DEFAULT_BUY_WEIGHTS.keys()), corr_buy)
-            ai_sell = apply_correlation_penalty(ai_sell, list(DEFAULT_SELL_WEIGHTS.keys()), corr_sell)
+            corr_buy = compute_factor_correlation(
+                None, list(DEFAULT_BUY_WEIGHTS.keys())
+            )
+            corr_sell = compute_factor_correlation(
+                None, list(DEFAULT_SELL_WEIGHTS.keys())
+            )
+            ai_buy = apply_correlation_penalty(
+                ai_buy, list(DEFAULT_BUY_WEIGHTS.keys()), corr_buy
+            )
+            ai_sell = apply_correlation_penalty(
+                ai_sell, list(DEFAULT_SELL_WEIGHTS.keys()), corr_sell
+            )
             buy_w = blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
             sell_w = blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
             if sentiment >= 1.25:
                 boost = 0.1
-                sell_w["profit_target_hit"] = min(0.5, sell_w.get("profit_target_hit", 0) + boost)
+                sell_w["profit_target_hit"] = min(
+                    0.5, sell_w.get("profit_target_hit", 0) + boost
+                )
                 other_keys = [k for k in sell_w if k != "profit_target_hit"]
                 if other_keys:
                     reduce_each = boost / len(other_keys)
@@ -1009,14 +1465,29 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
         code, name = row["代码"], row["名称"]
         hist = get_daily_data(code, start, today_str)
         if hist is not None:
-            hist = calculate_indicators(hist, need_amount_ma=False,
-                                        recent_high_window=params["RECENT_HIGH_WINDOW"],
-                                        recent_low_window=params["RECENT_LOW_WINDOW"])
+            hist = calculate_indicators(
+                hist,
+                need_amount_ma=False,
+                recent_high_window=params["RECENT_HIGH_WINDOW"],
+                recent_low_window=params["RECENT_LOW_WINDOW"],
+            )
         weekly = get_weekly_data(code, start, today_str)
         etf_state = state.get(code, {})
         real_price = get_realtime_price_sina(code)
-        report = detailed_analysis_etf(code, name, real_price, hist, weekly, market_info,
-                                        today, etf_state, buy_w, sell_w, params, ai_client)
+        report = detailed_analysis_etf(
+            code,
+            name,
+            real_price,
+            hist,
+            weekly,
+            market_info,
+            today,
+            etf_state,
+            buy_w,
+            sell_w,
+            params,
+            ai_client,
+        )
         print(report)
         silent_logout()
         return
@@ -1027,8 +1498,13 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
             print(f"情绪因子: {sentiment:.3f} - {sentiment_risk_tip}")
         else:
             print(f"情绪因子: {sentiment:.3f}")
-        print(pad_display("名称", 16), pad_display("代码", 12), pad_display("价格", 8, "right"),
-              pad_display("评分", 6, "right"), "  " + pad_display("操作", 10))
+        print(
+            pad_display("名称", 16),
+            pad_display("代码", 12),
+            pad_display("价格", 8, "right"),
+            pad_display("评分", 6, "right"),
+            "  " + pad_display("操作", 10),
+        )
         print("-" * 68)
         output_lines = []
         results = []
@@ -1037,13 +1513,34 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
             for _, row in etf_list.iterrows():
                 code, name = row["代码"], row["名称"]
                 hist = get_daily_data(code, start, today_str)
-                hist = calculate_indicators(hist, need_amount_ma=False,
-                                            recent_high_window=params["RECENT_HIGH_WINDOW"],
-                                            recent_low_window=params["RECENT_LOW_WINDOW"]) if hist is not None else None
+                hist = (
+                    calculate_indicators(
+                        hist,
+                        need_amount_ma=False,
+                        recent_high_window=params["RECENT_HIGH_WINDOW"],
+                        recent_low_window=params["RECENT_LOW_WINDOW"],
+                    )
+                    if hist is not None
+                    else None
+                )
                 weekly = get_weekly_data(code, start, today_str)
                 s = state.get(code, {})
-                futures.append(ex.submit(analyze_etf, code, name, get_realtime_price_sina(code),
-                                         hist, weekly, market_info, today, s, buy_w, sell_w, params))
+                futures.append(
+                    ex.submit(
+                        analyze_etf,
+                        code,
+                        name,
+                        get_realtime_price_sina(code),
+                        hist,
+                        weekly,
+                        market_info,
+                        today,
+                        s,
+                        buy_w,
+                        sell_w,
+                        params,
+                    )
+                )
             for f in futures:
                 out, _, new_state, score = f.result()
                 results.append((out, score))
@@ -1059,7 +1556,6 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
     silent_logout()
 
     # 发送邮件（如果需要）
-    from config import get_email_config
     email_cfg = get_email_config()
     if email_cfg["send_email"]:
         subject = f"ETF分析报告 - {today_str}"

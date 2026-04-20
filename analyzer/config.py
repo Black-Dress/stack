@@ -31,11 +31,6 @@ WEEKLY_MA = 20
 RISK_WARNING_DAYS = 3
 RISK_WARNING_THRESHOLD = -0.1
 
-# ---------------------------- 文件路径 ----------------------------
-POSITION_FILE = "positions.csv"
-STATE_FILE = "etf_state.json"
-CACHE_FILE = "weight_cache.json"
-
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
     "price_above_ma20": 0.22,
