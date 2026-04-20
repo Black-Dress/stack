@@ -253,10 +253,11 @@ class DataFetcher:
         """情绪因子非线性调整"""
         x = sentiment - 1.0
         if x >= 0:
-            adj = 1.0 + SENT_ALPHA * math.tanh(SENT_BETA * x) * math.exp(-SENT_GAMMA * x)
+            # 提高增益，使 tanh 更快饱和，且指数衰减放缓
+            adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
         else:
-            adj = 1.0 + SENT_ALPHA * math.tanh(SENT_BETA * x)
-        return max(0.60, min(1.30, adj))
+            adj = 1.0 + 1.2 * math.tanh(3.0 * x)
+        return max(0.6, min(1.5, adj))
 
     def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
         """根据情绪因子生成风险提示文字"""
@@ -667,7 +668,11 @@ class DataAnalyzer:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 cache = json.load(f)
             now = time.time()
-            expired = [k for k, v in cache.items() if isinstance(v, dict) and v.get("timestamp", 0) < now - 7 * 86400]
+            expired = [
+                k
+                for k, v in cache.items()
+                if isinstance(v, dict) and v.get("timestamp", 0) < now - 3600
+            ]
             for k in expired:
                 del cache[k]
             if expired:
