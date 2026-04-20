@@ -5,6 +5,16 @@
 """
 import os
 
+# 项目根目录（etf_project）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 数据目录
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+
+POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")
+STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")
+CACHE_FILE = os.path.join(DATA_DIR, "weight_cache.json")
+
 # ---------------------------- ETF 技术参数 ----------------------------
 ETF_MA = 20
 ETF_VOL_MA = 5

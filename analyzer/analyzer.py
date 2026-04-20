@@ -19,11 +19,8 @@ from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Optional, Union
 import re
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.header import Header
-from utils import send_email, pad_display, discretize, validate_and_filter_weights
+from .config import POSITION_FILE, STATE_FILE, CACHE_FILE, get_email_config
+from .utils import send_email, pad_display, discretize, validate_and_filter_weights
 
 # 导入配置和工具
 from config import (

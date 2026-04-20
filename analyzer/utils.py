@@ -53,7 +53,9 @@ def send_email(subject: str, body: str) -> bool:
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     from email.header import Header
-    from config import get_email_config
+    from .config import get_email_config   # 注意相对导入
+    import logging
+    logger = logging.getLogger(__name__)
 
     email_cfg = get_email_config()
     if not email_cfg["send_email"]:

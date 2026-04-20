@@ -10,8 +10,8 @@ import openai
 import pandas as pd
 from typing import Dict, Tuple, Optional
 
-from config import DEFAULT_BUY_WEIGHTS, DEFAULT_SELL_WEIGHTS
-from utils import validate_and_filter_weights
+from .config import DEFAULT_BUY_WEIGHTS, DEFAULT_SELL_WEIGHTS
+from .utils import validate_and_filter_weights
 
 logger = logging.getLogger(__name__)
 
