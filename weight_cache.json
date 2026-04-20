@@ -165,5 +165,36 @@
     "market_state": "正常牛市",
     "market_factor": 1.15,
     "timestamp": 1776656902.2844236
+  },
+  "47e4e2ec73a16994959911f679461dbe": {
+    "buy": {
+      "price_above_ma20": 0.2498315363881401,
+      "volume_above_ma5": 0.18884770889487865,
+      "macd_golden_cross": 0.035714285714285705,
+      "kdj_golden_cross": 0.035714285714285705,
+      "bollinger_break_up": 0.035714285714285705,
+      "williams_oversold": 0.035714285714285705,
+      "market_above_ma20": 0.022321428571428565,
+      "market_above_ma60": 0.035714285714285705,
+      "market_amount_above_ma20": 0.022321428571428565,
+      "outperform_market": 0.04464285714285713,
+      "weekly_above_ma20": 0.04464285714285713,
+      "tmsv_score": 0.2488207547169811
+    },
+    "sell": {
+      "price_below_ma20": 0.06672641965617078,
+      "bollinger_break_down": 0.028891851809888378,
+      "williams_overbought": 0.019673975280066845,
+      "rsi_overbought": 0.019673975280066845,
+      "underperform_market": 0.028891851809888378,
+      "stop_loss_ma_break": 0.180230123195018,
+      "trailing_stop_clear": 0.180230123195018,
+      "trailing_stop_half": 0.08564370357931197,
+      "profit_target_hit": 0.1551217281697578,
+      "weekly_below_ma20": 0.028891851809888378,
+      "downside_momentum": 0.1863504209348578,
+      "max_drawdown_stop": 0.019673975280066845
+    },
+    "timestamp": 1776672971.2042594
   }
 }
