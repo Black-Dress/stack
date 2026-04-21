@@ -130,7 +130,7 @@ class DataFetcher:
             expired = [
                 k
                 for k, v in cache.items()
-                if isinstance(v, dict) and v.get("timestamp", 0) < now - 3600
+                if isinstance(v, dict) and v.get("timestamp", 0) < now - 600
             ]
             for k in expired:
                 del cache[k]
