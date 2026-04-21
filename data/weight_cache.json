@@ -1,38 +1,38 @@
 {
   "market_state_2026-04-21_5cd92470caba96f375b7bd5d5c2885f1": {
-    "state": "震荡偏强",
-    "factor": 1.05,
-    "timestamp": 1776743932.0394635
+    "state": "强势牛市",
+    "factor": 1.35,
+    "timestamp": 1776759839.4353547
   },
-  "3455e5efc4758e6922754416b40ba9a1": {
+  "a757d3774a82258792fbcc154e9cd586": {
     "buy": {
-      "price_above_ma20": 0.2205234833659491,
-      "volume_above_ma5": 0.12365459882583167,
-      "macd_golden_cross": 0.035714285714285705,
-      "kdj_golden_cross": 0.08463796477495106,
-      "bollinger_break_up": 0.035714285714285705,
-      "williams_oversold": 0.06629158512720155,
-      "market_above_ma20": 0.022321428571428565,
-      "market_above_ma60": 0.035714285714285705,
-      "market_amount_above_ma20": 0.022321428571428565,
-      "outperform_market": 0.04464285714285713,
-      "weekly_above_ma20": 0.04464285714285713,
-      "tmsv_score": 0.2638209393346379
+      "price_above_ma20": 0.2470238095238095,
+      "volume_above_ma5": 0.1369047619047619,
+      "macd_golden_cross": 0.03571428571428571,
+      "kdj_golden_cross": 0.03571428571428571,
+      "bollinger_break_up": 0.03571428571428571,
+      "williams_oversold": 0.03571428571428571,
+      "market_above_ma20": 0.022321428571428572,
+      "market_above_ma60": 0.03571428571428571,
+      "market_amount_above_ma20": 0.022321428571428572,
+      "outperform_market": 0.044642857142857144,
+      "weekly_above_ma20": 0.044642857142857144,
+      "tmsv_score": 0.3035714285714285
     },
     "sell": {
-      "price_below_ma20": 0.06641106394632343,
-      "bollinger_break_down": 0.02875530603861427,
-      "williams_overbought": 0.07770779131863616,
-      "rsi_overbought": 0.08712173079556346,
-      "underperform_market": 0.02875530603861427,
-      "stop_loss_ma_break": 0.1793783376694509,
-      "trailing_stop_clear": 0.1793783376694509,
-      "trailing_stop_half": 0.08523894290017801,
-      "profit_target_hit": 0.1543886074216075,
-      "weekly_below_ma20": 0.02875530603861427,
-      "downside_momentum": 0.06452827605093797,
-      "max_drawdown_stop": 0.01958099411200876
+      "price_below_ma20": 0.06672641965617078,
+      "bollinger_break_down": 0.028891851809888378,
+      "williams_overbought": 0.019673975280066845,
+      "rsi_overbought": 0.019673975280066845,
+      "underperform_market": 0.028891851809888378,
+      "stop_loss_ma_break": 0.180230123195018,
+      "trailing_stop_clear": 0.180230123195018,
+      "trailing_stop_half": 0.08564370357931197,
+      "profit_target_hit": 0.1551217281697578,
+      "weekly_below_ma20": 0.028891851809888378,
+      "downside_momentum": 0.1863504209348578,
+      "max_drawdown_stop": 0.019673975280066845
     },
-    "timestamp": 1776743942.7340677
+    "timestamp": 1776759853.8430703
   }
 }
