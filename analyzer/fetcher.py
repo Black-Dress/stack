@@ -16,6 +16,8 @@ import baostock as bs
 from contextlib import redirect_stdout
 from typing import Dict, Tuple, Optional
 
+from analyzer.ai import AIClient
+
 from .config import (
     STATE_FILE,
     CACHE_FILE,
