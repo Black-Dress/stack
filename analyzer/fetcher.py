@@ -62,7 +62,6 @@ class DataFetcher:
             self._logged_in = False
 
     # ---------- 状态管理 ----------
-    @staticmethod
     def load_state(self) -> Dict:
         if not os.path.exists(STATE_FILE):
             return {}
@@ -73,7 +72,6 @@ class DataFetcher:
             logger.warning("状态文件损坏，重新初始化")
             return {}
 
-    @staticmethod
     def save_state(self, state: Dict):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
