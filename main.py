@@ -9,7 +9,7 @@ ETF 智能分析系统主入口
 import argparse
 import logging
 import os
-from .analyzer import run_batch_analysis
+from analyzer.analyzer import run_batch_analysis
 
 # 配置日志
 logging.basicConfig(
