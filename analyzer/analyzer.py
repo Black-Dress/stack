@@ -1,468 +1,57 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-核心分析模块（对象化改造版）
-- DataFetcher: 负责所有数据获取（baostock, sina, akshare情绪）
-- DataAnalyzer: 负责所有数据计算与分析（指标、评分、信号、状态管理等）
+核心分析模块：负责技术指标计算、评分、信号确认及批量分析入口。
+依赖 fetcher.py 中的数据获取功能。
 """
-import os
-import json
 import datetime
 import logging
-import requests
+import re
 import numpy as np
 import pandas as pd
-import baostock as bs
-import hashlib
-import time
 import math
-from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Tuple, Optional, Union
-import re
+from typing import Dict, List, Tuple, Optional, Any
 
 from .config import (
     ETF_MA,
     ETF_VOL_MA,
-    MACRO_INDEX,
-    MARKET_INDEX,
-    MACRO_MA_SHORT,
-    MACRO_MA_LONG,
-    RSI_PERIOD,
     ATR_PERIOD,
     ATR_STOP_MULT,
     ATR_TRAILING_MULT,
     PROFIT_TARGET,
-    WEEKLY_MA,
     RISK_WARNING_DAYS,
     RISK_WARNING_THRESHOLD,
-    POSITION_FILE,
-    STATE_FILE,
-    CACHE_FILE,
     DEFAULT_BUY_WEIGHTS,
     DEFAULT_SELL_WEIGHTS,
     DEFAULT_PARAMS,
-    SENT_ALPHA,
-    SENT_BETA,
-    SENT_GAMMA,
+    MACRO_INDEX,
+    MARKET_INDEX,
+    MACRO_MA_LONG,
     get_email_config,
 )
-from .utils import pad_display, discretize, validate_and_filter_weights, send_email
+from .utils import pad_display, validate_and_filter_weights, send_email
 from .ai import AIClient
-
-# 尝试导入 akshare
-try:
-    import akshare as ak
-
-    AKSHARE_AVAILABLE = True
-except ImportError:
-    AKSHARE_AVAILABLE = False
-    print("警告：未安装 akshare，情绪指标功能将不可用。请执行 pip install akshare")
+from .fetcher import DataFetcher, AKSHARE_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
 
-# ========================== 数据获取类 ==========================
-class DataFetcher:
-    """负责所有数据获取（baostock, sina, akshare 情绪指标）"""
-
-    def __init__(self):
-        self._logged_in = False
-
-    def login(self) -> bool:
-        """登录 baostock"""
-        with open(os.devnull, "w") as f, redirect_stdout(f):
-            lg = bs.login()
-        if lg.error_code != "0":
-            logger.error(f"登录失败: {lg.error_msg}")
-            return False
-        self._logged_in = True
-        return True
-
-    def logout(self):
-        """登出 baostock"""
-        if self._logged_in:
-            with open(os.devnull, "w") as f, redirect_stdout(f):
-                bs.logout()
-            self._logged_in = False
-
-    # ---------- 状态管理 ----------
-    def load_state(self) -> Dict:
-        if not os.path.exists(STATE_FILE):
-            return {}
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            logger.warning("状态文件损坏，重新初始化")
-            return {}
-
-    def save_state(self, state: Dict):
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-
-    # ---------- 缓存管理（权重缓存）----------
-    def _get_cache_key_fuzzy(
-        self,
-        macro_status: str,
-        sentiment_factor: float,
-        market_above_ma20: bool,
-        market_above_ma60: bool,
-        market_amount_above_ma20: bool,
-        volatility: float,
-        cache_type: str = "weights",
-    ) -> str:
-        vol_bins = [0.01, 0.02, 0.03, 0.04]
-        vol_level = discretize(volatility, vol_bins)
-        sent_bins = [0.7, 0.85, 1.0, 1.15, 1.25]
-        sent_level = discretize(sentiment_factor, sent_bins)
-        today = datetime.date.today().strftime("%Y-%m-%d")
-        key_str = f"{cache_type}_{today}_{macro_status}_{sent_level}_{market_above_ma20}_{market_above_ma60}_{market_amount_above_ma20}_{vol_level}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-
-    def _load_cache(self) -> Dict:
-        if not os.path.exists(CACHE_FILE):
-            return {}
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-            now = time.time()
-            expired = [
-                k
-                for k, v in cache.items()
-                if isinstance(v, dict) and v.get("timestamp", 0) < now - 600
-            ]
-            for k in expired:
-                del cache[k]
-            if expired:
-                self._save_cache(cache)
-            return cache
-        except:
-            return {}
-
-    def _save_cache(self, cache: Dict):
-        for val in cache.values():
-            if isinstance(val, dict) and "timestamp" not in val:
-                val["timestamp"] = time.time()
-        try:
-            with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"保存缓存失败: {e}")
-
-    def _get_market_cache_key(self, market_df: pd.DataFrame) -> str:
-        """根据市场数据生成缓存键（使用最近20日收盘价、成交量、MACD、RSI的哈希）"""
-        recent = market_df.tail(20)
-        # 选取关键列，四舍五入到小数点后4位避免浮点精度差异
-        data_str = recent[["close", "volume", "macd_dif", "rsi"]].round(4).to_json()
-        key = hashlib.md5(data_str.encode()).hexdigest()
-        today = datetime.date.today().strftime("%Y-%m-%d")
-        return f"market_state_{today}_{key}"
-
-    def get_market_state(
-        self, market_df: pd.DataFrame, ai_client: Optional[AIClient] = None
-    ) -> Tuple[str, float]:
-        """获取市场状态，优先从缓存读取，否则调用AI并缓存"""
-        cache = self._load_cache()  # 复用 weight_cache.json
-        cache_key = self._get_market_cache_key(market_df)
-
-        # 检查缓存是否存在且未过期（缓存中已包含timestamp，过期由 _load_cache 过滤）
-        if cache_key in cache and isinstance(cache[cache_key], dict):
-            entry = cache[cache_key]
-            if "state" in entry and "factor" in entry:
-                logger.info(
-                    f"使用缓存市场状态: {entry['state']}, 因子: {entry['factor']}"
-                )
-                return entry["state"], entry["factor"]
-
-        # 无缓存或过期，调用AI或简单规则
-        if ai_client:
-            state, factor = ai_client.refine_market_state(market_df)
-        else:
-            # 后备简单规则
-            last = market_df.iloc[-1]
-            if last["close"] > last["ma_short"] and last["close"] > last.get(
-                "ma_long", last["ma_short"]
-            ):
-                state, factor = "正常牛市", 1.2
-            elif last["close"] < last["ma_short"] and last["close"] < last.get(
-                "ma_long", last["ma_short"]
-            ):
-                state, factor = "熊市下跌", 0.8
-            else:
-                state, factor = "震荡偏弱", 1.0
-
-        # 保存到缓存
-        cache[cache_key] = {"state": state, "factor": factor, "timestamp": time.time()}
-        self._save_cache(cache)
-        logger.info(f"市场状态已缓存: {state}, 因子: {factor}")
-        return state, factor
-
-    def get_daily_data(
-        self, code: str, start_date: str, end_date: str
-    ) -> Optional[pd.DataFrame]:
-        """获取日线数据（原始数据，未计算指标）"""
-        rs = bs.query_history_k_data_plus(
-            code,
-            "date,code,open,high,low,close,volume,amount",
-            start_date=start_date,
-            end_date=end_date,
-            frequency="d",
-        )
-        if rs.error_code != "0":
-            return None
-        data = []
-        while rs.next():
-            data.append(rs.get_row_data())
-        if not data:
-            return None
-        df = pd.DataFrame(data, columns=rs.fields)
-        df["date"] = pd.to_datetime(df["date"])
-        df.set_index("date", inplace=True)
-        for col in ["open", "high", "low", "close", "volume", "amount"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
-
-    def get_weekly_data(
-        self, code: str, start_date: str, end_date: str
-    ) -> Optional[pd.DataFrame]:
-        """获取周线数据（基于日线重采样，并计算周均线）"""
-        df = self.get_daily_data(code, start_date, end_date)
-        if df is None:
-            return None
-        weekly = df.resample("W-FRI").last()
-        weekly["ma_short"] = weekly["close"].rolling(window=WEEKLY_MA).mean()
-        return weekly
-
-    def get_realtime_price(self, code: str) -> Optional[float]:
-        """获取新浪实时价格"""
-        try:
-            for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
-                url = f"http://{domain}/list={code.replace('.','')}"
-                r = requests.get(
-                    url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3
-                )
-                if r.status_code == 200:
-                    parts = r.text.split('"')[1].split(",")
-                    if len(parts) > 3 and parts[3]:
-                        return float(parts[3])
-            return None
-        except Exception:
-            return None
-
-    def load_positions(self) -> pd.DataFrame:
-        """加载持仓列表（CSV）"""
-        try:
-            df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            df = pd.read_csv(POSITION_FILE, encoding="gbk")
-        return df[["代码", "名称"]]
-
-    # ---------- 情绪指标（akshare）----------
-    def fetch_sentiment_indicators(self) -> dict:
-        """获取多个情绪指标（北向资金、涨跌停、VIX等）"""
-        indicators = {}
-        if not AKSHARE_AVAILABLE:
-            return indicators
-
-        try:
-            df_north = ak.stock_hsgt_hist_em(symbol="北向资金")
-            if not df_north.empty:
-                latest = df_north.iloc[-1]
-                indicators["north_net_inflow"] = float(latest["净流入"])
-                indicators["north_net_inflow_20d_avg"] = float(
-                    df_north["净流入"].tail(20).mean()
-                )
-        except Exception as e:
-            logger.debug(f"北向资金获取失败: {e}")
-
-        try:
-            df_fund = ak.stock_market_fund_flow()
-            if not df_fund.empty:
-                latest = df_fund.iloc[-1]
-                indicators["main_net_inflow_pct"] = float(latest["主力净流入-净占比"])
-        except Exception as e:
-            logger.debug(f"大盘资金流向获取失败: {e}")
-
-        try:
-            today_str = datetime.datetime.now().strftime("%Y%m%d")
-            df_zt = ak.stock_zt_pool_em(date=today_str)
-            df_dt = ak.stock_zt_pool_dtgc_em(date=today_str)
-            zt_count = len(df_zt)
-            dt_count = len(df_dt)
-            indicators["zt_count"] = zt_count
-            indicators["dt_count"] = dt_count
-            indicators["zt_dt_ratio"] = zt_count / max(dt_count, 1)
-        except Exception as e:
-            logger.debug(f"涨跌停数据获取失败: {e}")
-
-        try:
-            df_summary = ak.stock_sse_summary()
-            if "项目" in df_summary.columns:
-                up_row = df_summary[df_summary["项目"] == "上涨家数"]
-                down_row = df_summary[df_summary["项目"] == "下跌家数"]
-                if not up_row.empty and not down_row.empty:
-                    up_count = int(up_row.iloc[0, 1])
-                    down_count = int(down_row.iloc[0, 1])
-                    indicators["up_count"] = up_count
-                    indicators["down_count"] = down_count
-                    indicators["up_down_ratio"] = up_count / max(down_count, 1)
-        except Exception as e:
-            logger.debug(f"市场总貌获取失败: {e}")
-
-        try:
-            df_hot = ak.stock_hot_search_baidu(
-                symbol="A股", date=datetime.datetime.now().strftime("%Y%m%d")
-            )
-            if "rank" in df_hot.columns:
-                avg_rank = df_hot["rank"].head(10).mean()
-                indicators["baidu_hot_avg_rank"] = avg_rank
-        except Exception as e:
-            logger.debug(f"百度热搜获取失败: {e}")
-
-        try:
-            df_vix = ak.index_option_50etf_qvix()
-            if not df_vix.empty:
-                latest_vix = df_vix.iloc[-1]["close"]
-                vix_ma20 = df_vix["close"].tail(20).mean()
-                indicators["vix"] = float(latest_vix)
-                indicators["vix_ma20"] = float(vix_ma20)
-        except Exception as e:
-            logger.debug(f"VIX获取失败: {e}")
-
-        return indicators
-
-    def compute_sentiment_factor(self, indicators: dict) -> float:
-        """根据情绪指标计算综合情绪因子"""
-        if not indicators:
-            return 1.0
-        score = 0.0
-        weight_total = 0.0
-
-        north_net = indicators.get("north_net_inflow")
-        north_avg = indicators.get("north_net_inflow_20d_avg")
-        if north_net is not None and north_avg is not None and north_avg != 0:
-            north_ratio = north_net / abs(north_avg)
-            north_score = 1.0 + north_ratio * 0.5
-        else:
-            north_score = 1.0
-        score += north_score * 0.25
-        weight_total += 0.25
-
-        main_pct = indicators.get("main_net_inflow_pct", 0.0)
-        main_score = 1.0 + main_pct / 100 * 5
-        score += main_score * 0.20
-        weight_total += 0.20
-
-        zt_dt_ratio = indicators.get("zt_dt_ratio", 1.0)
-        zt_score = 1.0 + (zt_dt_ratio - 1.0) * 0.3
-        score += zt_score * 0.15
-        weight_total += 0.15
-
-        up_down_ratio = indicators.get("up_down_ratio", 1.0)
-        ud_score = 1.0 + (up_down_ratio - 1.0) * 0.3
-        score += ud_score * 0.15
-        weight_total += 0.15
-
-        avg_rank = indicators.get("baidu_hot_avg_rank", 50.0)
-        if avg_rank < 30:
-            rank_score = 1.15
-        elif avg_rank > 70:
-            rank_score = 0.85
-        else:
-            rank_score = 1.0
-        score += rank_score * 0.10
-        weight_total += 0.10
-
-        vix = indicators.get("vix")
-        vix_ma = indicators.get("vix_ma20")
-        if vix is not None and vix_ma is not None and vix_ma > 0:
-            vix_ratio = vix / vix_ma
-            vix_score = 1.0 - (vix_ratio - 1.0) * 0.8
-        else:
-            vix_score = 1.0
-        score += vix_score * 0.15
-        weight_total += 0.15
-
-        if weight_total > 0:
-            score /= weight_total
-        return self._sentiment_adjustment(max(0.6, min(1.4, score)))
-
-    def _sentiment_adjustment(self, sentiment: float) -> float:
-        """情绪因子非线性调整"""
-        x = sentiment - 1.0
-        if x >= 0:
-            # 提高增益，使 tanh 更快饱和，且指数衰减放缓
-            adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
-        else:
-            adj = 1.0 + 1.2 * math.tanh(3.0 * x)
-        return max(0.6, min(1.5, adj))
-
-    def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
-        """根据情绪因子生成风险提示文字"""
-        if sentiment_factor >= 1.25:
-            return "⚠️  市场情绪过热，短期回调风险较高，追高需谨慎"
-        elif sentiment_factor >= 1.10:
-            return "市场情绪偏乐观，警惕过热迹象"
-        elif sentiment_factor >= 0.85:
-            return "市场情绪平稳"
-        elif sentiment_factor >= 0.70:
-            return "💡  市场情绪偏悲观，可关注错杀机会"
-        else:
-            return "💡💡  市场情绪极度恐慌，往往是左侧布局良机"
-
-    def get_sentiment_factor_simple(self, macro_df: pd.DataFrame) -> float:
-        """后备情绪因子（基于RSI）"""
-        if len(macro_df) < RSI_PERIOD + 1:
-            return 1.0
-        delta = macro_df["close"].diff()
-        gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
-        rsi = 100 - 100 / (1 + gain / loss)
-        latest_rsi = rsi.iloc[-1]
-        if latest_rsi < 30:
-            return 0.6
-        if latest_rsi < 50:
-            return 0.8
-        if latest_rsi < 70:
-            return 1.0
-        return 0.9
-
-
-# ========================== 数据计算与分析类 ==========================
 class DataAnalyzer:
     """负责所有技术指标计算、评分、信号确认、状态管理、缓存等"""
 
-    def __init__(self):
-        pass
-    
-    def calc_change_pct(self, real_price: float, hist_df: pd.DataFrame, today: datetime.date) -> float:
-        """
-        计算实时价格相对于上一个交易日收盘价的涨跌幅。
-        
-        逻辑：
-        - 若 hist_df 最新日期等于 today（即已包含今天收盘数据），则使用昨天收盘作为基准；
-        - 否则使用最新收盘（即昨天收盘）作为基准。
-        
-        参数:
-            real_price: 实时价格
-            hist_df: 历史日线数据（至少包含1行）
-            today: 当前日期
-        
-        返回:
-            涨跌幅（百分比），例如 1.52 表示上涨1.52%
-        """
+    # ---------- 涨跌幅计算 ----------
+    def calc_change_pct(
+        self, real_price: float, hist_df: pd.DataFrame, today: datetime.date
+    ) -> float:
+        """计算实时价格相对于上一个交易日收盘价的涨跌幅"""
         if real_price is None or hist_df is None or len(hist_df) < 1:
             return 0.0
-        
         last_date = hist_df.index[-1].date()
         if last_date == today and len(hist_df) >= 2:
-            # 今天已有收盘数据（收盘后运行），基准为昨天收盘
-            base_close = hist_df.iloc[-2]['close']
+            base_close = hist_df.iloc[-2]["close"]
         else:
-            # 盘中运行，最新数据为昨天收盘
-            base_close = hist_df.iloc[-1]['close']
-        
+            base_close = hist_df.iloc[-1]["close"]
         if base_close > 0:
             return (real_price - base_close) / base_close * 100
         return 0.0
@@ -502,7 +91,7 @@ class DataAnalyzer:
         recent_high_window: int = 10,
         recent_low_window: int = 20,
     ) -> pd.DataFrame:
-        """计算全部技术指标（MACD, KDJ, 布林, RSI, ATR, ADX, 下跌动量等）"""
+        """计算全部技术指标"""
         df = df.copy()
         df["ma_short"] = df["close"].rolling(window=ETF_MA).mean()
         df["vol_ma"] = df["volume"].rolling(window=ETF_VOL_MA).mean()
@@ -540,7 +129,7 @@ class DataAnalyzer:
         df["plus_di"] = adx_df["plus_di"]
         df["minus_di"] = adx_df["minus_di"]
         df["adx"] = adx_df["adx"]
-        # 下跌动量因子
+        # 下跌动量
         df["downside_momentum_raw"] = np.where(
             (df["close"] < df["ma_short"]) & (df["minus_di"] > df["plus_di"]),
             (df["ma_short"] - df["close"])
@@ -566,6 +155,7 @@ class DataAnalyzer:
                 else pd.Series([50.0])
             )
         df = df.copy()
+        # 确保所需列存在
         if "ma20" not in df.columns:
             df["ma20"] = df["close"].rolling(20).mean()
         if "ma60" not in df.columns:
@@ -623,17 +213,34 @@ class DataAnalyzer:
         vol_factor = np.nan_to_num(vol_factor, nan=1.0)
 
         tmsv = (trend_score * 0.3 + mom_score * 0.3 + vol_score * 0.2) * vol_factor
-        tmsv = tmsv.clip(0, 100).fillna(50)
-        return tmsv
+        return tmsv.clip(0, 100).fillna(50)
 
-    # ---------- 因子相关性惩罚与信任度 ----------
-    def compute_factor_correlation(
-        self, df: pd.DataFrame, factor_names: List[str]
-    ) -> pd.DataFrame:
-        """简化版相关性矩阵（实际可基于历史数据计算）"""
-        return pd.DataFrame(
-            np.eye(len(factor_names)), index=factor_names, columns=factor_names
+    # ---------- 权重处理 ----------
+    def compute_dynamic_trust(self, ai_weights: Dict, default_weights: Dict) -> float:
+        base_trust = 0.75
+        zero_count = sum(1 for v in ai_weights.values() if v < 0.01)
+        if zero_count > len(ai_weights) * 0.3:
+            base_trust = min(base_trust, 0.5)
+        max_w = max(ai_weights.values())
+        if max_w > 0.45:
+            base_trust = min(base_trust, 0.6)
+        dot = sum(
+            ai_weights.get(k, 0) * default_weights.get(k, 0) for k in default_weights
         )
+        norm_ai = math.sqrt(sum(v**2 for v in ai_weights.values()))
+        norm_def = math.sqrt(sum(v**2 for v in default_weights.values()))
+        if norm_ai > 0 and norm_def > 0:
+            similarity = dot / (norm_ai * norm_def)
+            if similarity < 0.6:
+                base_trust = min(base_trust, 0.55)
+        return base_trust
+
+    def blend_weights(self, ai_w: Dict, def_w: Dict, trust: float) -> Dict:
+        blended = {k: ai_w.get(k, 0) * trust + def_w[k] * (1 - trust) for k in def_w}
+        total = sum(blended.values())
+        if total > 0:
+            blended = {k: v / total for k, v in blended.items()}
+        return blended
 
     def apply_correlation_penalty(
         self,
@@ -662,34 +269,23 @@ class DataAnalyzer:
             w = {k: v / total for k, v in w.items()}
         return w
 
-    def compute_dynamic_trust(self, ai_weights: Dict, default_weights: Dict) -> float:
-        base_trust = 0.75
-        zero_count = sum(1 for v in ai_weights.values() if v < 0.01)
-        if zero_count > len(ai_weights) * 0.3:
-            base_trust = min(base_trust, 0.5)
-        max_w = max(ai_weights.values())
-        if max_w > 0.45:
-            base_trust = min(base_trust, 0.6)
-        dot = sum(
-            ai_weights.get(k, 0) * default_weights.get(k, 0) for k in default_weights
+    def compute_factor_correlation(
+        self, df: pd.DataFrame, factor_names: List[str]
+    ) -> pd.DataFrame:
+        """简化版相关性矩阵"""
+        return pd.DataFrame(
+            np.eye(len(factor_names)), index=factor_names, columns=factor_names
         )
-        norm_ai = math.sqrt(sum(v**2 for v in ai_weights.values()))
-        norm_def = math.sqrt(sum(v**2 for v in default_weights.values()))
-        if norm_ai > 0 and norm_def > 0:
-            similarity = dot / (norm_ai * norm_def)
-            if similarity < 0.6:
-                base_trust = min(base_trust, 0.55)
-        return base_trust
 
-    def blend_weights(self, ai_w: Dict, def_w: Dict, trust: float) -> Dict:
-        blended = {k: ai_w.get(k, 0) * trust + def_w[k] * (1 - trust) for k in def_w}
-        total = sum(blended.values())
-        if total > 0:
-            blended = {k: v / total for k, v in blended.items()}
-        return blended
+    # ---------- 环境因子裁剪 ----------
+    @staticmethod
+    def _clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
+        """环境因子裁剪，与 analyze_single_etf 保持一致"""
+        env_factor = market_factor * sentiment_factor
+        return max(0.60, min(1.30, env_factor))
 
-    # ---------- 评分核心 ----------
-    def strength(
+    # ---------- 因子计算（公共方法）----------
+    def _compute_factors(
         self,
         price: float,
         ma20: float,
@@ -711,94 +307,92 @@ class DataAnalyzer:
         market_above_ma20: bool,
         market_above_ma60: bool,
         market_amount_above_ma20: bool,
-        is_buy: bool,
-        buy_weights: Dict,
-        sell_weights: Dict,
-        tmsv_strength: float = 0.0,
-        downside_momentum: float = 0.0,
-        max_drawdown_pct: float = 0.0,
-    ) -> float:
+        tmsv_strength: float,
+        downside_momentum: float,
+        max_drawdown_pct: float,
+    ) -> Tuple[Dict, Dict]:
+        """返回买入因子字典和卖出因子字典"""
+
         def cap(x):
             return max(0.0, min(1.0, x))
 
-        if is_buy:
-            factors = {
-                "price_above_ma20": (
-                    cap((price - ma20) / (ma20 * 0.1)) if price > ma20 else 0
-                ),
-                "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
-                "macd_golden_cross": macd_golden,
-                "kdj_golden_cross": kdj_golden,
-                "bollinger_break_up": (
-                    cap((price - boll_up) / boll_up) if price > boll_up else 0
-                ),
-                "williams_oversold": (
-                    cap((-80 - williams_r) / 20) if williams_r < -80 else 0
-                ),
-                "market_above_ma20": 1 if market_above_ma20 else 0,
-                "market_above_ma60": 1 if market_above_ma60 else 0,
-                "market_amount_above_ma20": 1 if market_amount_above_ma20 else 0,
-                "outperform_market": (
-                    cap((ret_etf_5d - ret_market_5d) / 0.05)
-                    if ret_etf_5d > ret_market_5d
-                    else 0
-                ),
-                "weekly_above_ma20": 1 if weekly_above else 0,
-                "tmsv_score": tmsv_strength,
-            }
-            weights = buy_weights
-        else:
-            factors = {
-                "price_below_ma20": (
-                    cap((ma20 - price) / (ma20 * 0.1)) if price < ma20 else 0
-                ),
-                "bollinger_break_down": (
-                    cap((boll_low - price) / boll_low) if price < boll_low else 0
-                ),
-                "williams_overbought": (
-                    cap((20 - williams_r) / 20) if williams_r < 20 else 0
-                ),
-                "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
-                "underperform_market": (
-                    cap((ret_market_5d - ret_etf_5d) / 0.05)
-                    if ret_etf_5d < ret_market_5d
-                    else 0
-                ),
-                "stop_loss_ma_break": (
-                    cap((ma20 - price) / (ma20 * 0.05)) if price < ma20 else 0
-                ),
-                "trailing_stop_clear": (
-                    cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
-                    if recent_high > 0
-                    and atr_pct > 0
-                    and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
-                    else 0
-                ),
-                "trailing_stop_half": (
-                    cap(
-                        (recent_high - price)
-                        / recent_high
-                        / (ATR_TRAILING_MULT * atr_pct)
-                    )
-                    if recent_high > 0
-                    and atr_pct > 0
-                    and (recent_high - price) / recent_high
-                    >= ATR_TRAILING_MULT * atr_pct
-                    else 0
-                ),
-                "profit_target_hit": (
-                    cap((price - recent_low) / recent_low / PROFIT_TARGET)
-                    if recent_low > 0
-                    and (price - recent_low) / recent_low >= PROFIT_TARGET
-                    else 0
-                ),
-                "weekly_below_ma20": 1 if weekly_below else 0,
-                "downside_momentum": cap(downside_momentum),
-                "max_drawdown_stop": (
-                    cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0
-                ),
-            }
-            weights = sell_weights
+        buy_factors = {
+            "price_above_ma20": (
+                cap((price - ma20) / (ma20 * 0.1)) if price > ma20 else 0
+            ),
+            "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
+            "macd_golden_cross": macd_golden,
+            "kdj_golden_cross": kdj_golden,
+            "bollinger_break_up": (
+                cap((price - boll_up) / boll_up) if price > boll_up else 0
+            ),
+            "williams_oversold": (
+                cap((-80 - williams_r) / 20) if williams_r < -80 else 0
+            ),
+            "market_above_ma20": 1 if market_above_ma20 else 0,
+            "market_above_ma60": 1 if market_above_ma60 else 0,
+            "market_amount_above_ma20": 1 if market_amount_above_ma20 else 0,
+            "outperform_market": (
+                cap((ret_etf_5d - ret_market_5d) / 0.05)
+                if ret_etf_5d > ret_market_5d
+                else 0
+            ),
+            "weekly_above_ma20": 1 if weekly_above else 0,
+            "tmsv_score": tmsv_strength,
+        }
+
+        sell_factors = {
+            "price_below_ma20": (
+                cap((ma20 - price) / (ma20 * 0.1)) if price < ma20 else 0
+            ),
+            "bollinger_break_down": (
+                cap((boll_low - price) / boll_low) if price < boll_low else 0
+            ),
+            "williams_overbought": (
+                cap((20 - williams_r) / 20) if williams_r < 20 else 0
+            ),
+            "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
+            "underperform_market": (
+                cap((ret_market_5d - ret_etf_5d) / 0.05)
+                if ret_etf_5d < ret_market_5d
+                else 0
+            ),
+            "stop_loss_ma_break": (
+                cap((ma20 - price) / (ma20 * 0.05)) if price < ma20 else 0
+            ),
+            "trailing_stop_clear": (
+                cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
+                else 0
+            ),
+            "trailing_stop_half": (
+                cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
+                else 0
+            ),
+            "profit_target_hit": (
+                cap((price - recent_low) / recent_low / PROFIT_TARGET)
+                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET
+                else 0
+            ),
+            "weekly_below_ma20": 1 if weekly_below else 0,
+            "downside_momentum": cap(downside_momentum),
+            "max_drawdown_stop": (
+                cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0
+            ),
+        }
+        return buy_factors, sell_factors
+
+    def strength(
+        self, *args, is_buy: bool, buy_weights: Dict, sell_weights: Dict, **kwargs
+    ) -> float:
+        """计算买入或卖出评分"""
+        factors = self._compute_factors(*args, **kwargs)[0 if is_buy else 1]
+        weights = buy_weights if is_buy else sell_weights
         return sum(weights.get(k, 0) * factors.get(k, 0) for k in factors)
 
     # ---------- 信号确认与参数调整 ----------
@@ -881,10 +475,6 @@ class DataAnalyzer:
         return "HOLD"
 
     def get_action_level(self, score: float) -> str:
-        """
-        根据综合评分返回操作等级。
-        评分范围：-1.0 到 1.0，等级从“强烈卖出”到“极度看好”。
-        """
         thresholds = [0.8, 0.7, 0.6, 0.4, 0.2, 0.0, -0.2, -0.4, -0.6, -0.8]
         levels = [
             "极度看好",
@@ -912,42 +502,43 @@ class DataAnalyzer:
     ) -> Dict:
         if len(score_history) < 10:
             return params
-        window = self.get_dynamic_history_days(volatility)
-        window = min(window, len(score_history))
+        window = min(self.get_dynamic_history_days(volatility), len(score_history))
         recent = [s["score"] for s in score_history[-window:]]
         avg = sum(recent) / len(recent)
         slope = np.polyfit(range(len(recent)), recent, 1)[0] if len(recent) >= 3 else 0
-        short_window = min(3, len(score_history))
-        short_recent = [s["score"] for s in score_history[-short_window:]]
+        short_recent = [
+            s["score"] for s in score_history[-min(3, len(score_history)) :]
+        ]
         short_slope = (
-            np.polyfit(range(short_window), short_recent, 1)[0]
-            if short_window >= 2
+            np.polyfit(range(len(short_recent)), short_recent, 1)[0]
+            if len(short_recent) >= 2
             else 0
         )
         adjust_mult = 1.2 / market_factor
         adjusted = params.copy()
+
         if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
             delta = min(0.03, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
-            new_val = max(0.35, params["BUY_THRESHOLD"] - delta)
+            adjusted["BUY_THRESHOLD"] = max(0.35, params["BUY_THRESHOLD"] - delta)
         elif slope < -0.02 and avg < -0.15 and short_slope < -0.03:
             delta = min(0.03, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
-            new_val = min(0.65, params["BUY_THRESHOLD"] + delta)
+            adjusted["BUY_THRESHOLD"] = min(0.65, params["BUY_THRESHOLD"] + delta)
         else:
-            new_val = (
+            adjusted["BUY_THRESHOLD"] = (
                 params["BUY_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.1
             )
-        adjusted["BUY_THRESHOLD"] = new_val
+
         if slope < -0.02 and avg < -0.15 and short_slope < -0.03:
             delta = min(0.03, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
-            new_val = max(-0.45, params["SELL_THRESHOLD"] - delta)
+            adjusted["SELL_THRESHOLD"] = max(-0.45, params["SELL_THRESHOLD"] - delta)
         elif slope > 0.02 and avg > 0.15 and short_slope > 0.03:
             delta = min(0.03, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
-            new_val = min(-0.15, params["SELL_THRESHOLD"] + delta)
+            adjusted["SELL_THRESHOLD"] = min(-0.15, params["SELL_THRESHOLD"] + delta)
         else:
-            new_val = (
+            adjusted["SELL_THRESHOLD"] = (
                 params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
             )
-        adjusted["SELL_THRESHOLD"] = new_val
+
         if volatility > 0.04:
             adjusted["CONFIRM_DAYS"] = min(5, int(round(params["CONFIRM_DAYS"] * 1.1)))
         elif volatility < 0.01:
@@ -960,6 +551,164 @@ class DataAnalyzer:
                 )
             )
         return adjusted
+
+    # ---------- 核心分析计算（公共部分）----------
+    def _core_analysis(
+        self,
+        code: str,
+        name: str,
+        real_price: Optional[float],
+        hist_df: Optional[pd.DataFrame],
+        weekly_df: Optional[pd.DataFrame],
+        market: Dict,
+        today: datetime.date,
+        buy_w: Dict,
+        sell_w: Dict,
+        params: Dict,
+    ) -> Dict[str, Any]:
+        """
+        执行 ETF 分析的核心计算，返回一个包含所有中间结果和最终评分的字典。
+        """
+        result = {
+            "code": code,
+            "name": name,
+            "real_price": real_price,
+            "change_pct": 0.0,
+            "error": None,
+            "buy_factors": {},
+            "sell_factors": {},
+            "buy_score": 0.0,
+            "sell_score": 0.0,
+            "raw_score": 0.0,
+            "final_score": 0.0,
+            "tmsv": 50.0,
+            "tmsv_strength": 0.5,
+            "atr_pct": 0.0,
+            "downside_momentum": 0.0,
+            "max_drawdown_pct": 0.0,
+            "weekly_above": False,
+            "weekly_below": False,
+        }
+
+        if real_price is None:
+            result["error"] = "实时价格获取失败"
+            return result
+        if hist_df is None or len(hist_df) < 20:
+            result["error"] = "历史数据不足"
+            return result
+
+        # 涨跌幅
+        result["change_pct"] = self.calc_change_pct(real_price, hist_df, today)
+
+        d = hist_df.iloc[-1]
+        ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
+        rsi, boll_up, boll_low, williams_r = (
+            d["rsi"],
+            d["boll_up"],
+            d["boll_low"],
+            d["williams_r"],
+        )
+        atr_pct = d["atr"] / real_price if real_price > 0 else 0
+        result["atr_pct"] = atr_pct
+
+        recent_high = d.get(
+            f"recent_high_{params['RECENT_HIGH_WINDOW']}",
+            hist_df["high"].rolling(params["RECENT_HIGH_WINDOW"]).max().iloc[-1],
+        )
+        recent_low = d.get(
+            f"recent_low_{params['RECENT_LOW_WINDOW']}",
+            hist_df["low"].rolling(params["RECENT_LOW_WINDOW"]).min().iloc[-1],
+        )
+
+        # 金叉判断
+        if len(hist_df) >= 2:
+            prev = hist_df.iloc[-2]
+            macd_golden = (
+                1
+                if (
+                    d["macd_dif"] > d["macd_dea"]
+                    and prev["macd_dif"] <= prev["macd_dea"]
+                )
+                else 0
+            )
+            kdj_golden = (
+                1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
+            )
+        else:
+            macd_golden = kdj_golden = 0
+
+        ret_etf_5d = (
+            (real_price / hist_df.iloc[-5]["close"] - 1) if len(hist_df) >= 5 else 0
+        )
+        weekly_above = weekly_below = False
+        if weekly_df is not None and not weekly_df.empty:
+            w = weekly_df.iloc[-1]
+            if "ma_short" in w.index and not pd.isna(w["ma_short"]):
+                weekly_above = w["close"] > w["ma_short"]
+                weekly_below = w["close"] < w["ma_short"]
+        result["weekly_above"] = weekly_above
+        result["weekly_below"] = weekly_below
+
+        # TMSV
+        try:
+            tmsv_series = self.compute_tmsv(hist_df)
+            tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
+            tmsv = 50.0 if np.isnan(tmsv) else tmsv
+        except Exception:
+            tmsv = 50.0
+        tmsv_strength = tmsv / 100.0
+        result["tmsv"] = tmsv
+        result["tmsv_strength"] = tmsv_strength
+
+        downside_momentum = d.get("downside_momentum_raw", 0.0)
+        result["downside_momentum"] = downside_momentum
+        max_drawdown_pct = (
+            (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
+        )
+        result["max_drawdown_pct"] = max_drawdown_pct
+
+        # 计算因子
+        buy_factors, sell_factors = self._compute_factors(
+            real_price,
+            ma20,
+            volume,
+            vol_ma,
+            macd_golden,
+            kdj_golden,
+            rsi,
+            boll_up,
+            boll_low,
+            williams_r,
+            ret_etf_5d,
+            market["ret_market_5d"],
+            weekly_above,
+            weekly_below,
+            recent_high,
+            recent_low,
+            atr_pct,
+            market["market_above_ma20"],
+            market["market_above_ma60"],
+            market["market_amount_above_ma20"],
+            tmsv_strength,
+            downside_momentum,
+            max_drawdown_pct,
+        )
+        result["buy_factors"] = buy_factors
+        result["sell_factors"] = sell_factors
+
+        buy_score = sum(buy_w.get(k, 0) * buy_factors[k] for k in buy_factors)
+        sell_score = sum(sell_w.get(k, 0) * sell_factors[k] for k in sell_factors)
+        result["buy_score"] = buy_score
+        result["sell_score"] = sell_score
+        raw = buy_score - sell_score
+        result["raw_score"] = raw
+
+        # 环境因子裁剪（统一逻辑）
+        env_factor = self._clip_env_factor(market["market_factor"], market["sentiment_factor"])
+        final = max(-1.0, min(1.0, raw * env_factor))
+        result["final_score"] = final
+
+        return result
 
     # ---------- 单只 ETF 简要分析 ----------
     def analyze_single_etf(
@@ -976,132 +725,27 @@ class DataAnalyzer:
         sell_w: Dict,
         params: Dict,
     ) -> Tuple[str, Optional[Dict], Dict, float]:
+        # 使用核心分析获取结果
+        core = self._core_analysis(
+            code, name, real_price, hist_df, weekly_df, market, today,
+            buy_w, sell_w, params
+        )
 
-        # 计算涨跌幅（相对前一交易日收盘）
-        change_pct = self.calc_change_pct(real_price, hist_df, today) if real_price is not None else 0.0
-       
-        if real_price is None:
-            out = f"{pad_display(name, 16)} {pad_display(code, 12)} {'获取失败':<8} {pad_display('0.00%', 8, 'right')} {'0.00':<6}  {'价格缺失':<10}"
-            return out, None, state, 0.0
-        if hist_df is None or len(hist_df) < 20:
-            out = f"{pad_display(name, 16)} {pad_display(code, 12)} {real_price:<8.3f} {pad_display(f'{change_pct:+.2f}%', 8, 'right')} {0.00:<6}  {'数据不足':<10}"
+        if core["error"]:
+            if "实时价格" in core["error"]:
+                out = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
+                       f"{pad_display('获取失败', 8)} {pad_display('0.00%', 8, 'right')} "
+                       f"{pad_display('0.00', 6, 'right')}  {pad_display('价格缺失', 10)}")
+            else:
+                price_str = f"{real_price:.3f}" if real_price else "N/A"
+                change_str = f"{core['change_pct']:+.2f}%"
+                out = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
+                       f"{pad_display(price_str, 8, 'right')} "
+                       f"{pad_display(change_str, 8, 'right')} "
+                       f"{pad_display('0.00', 6, 'right')}  {pad_display('数据不足', 10)}")
             return out, None, state, 0.0
 
-        d = hist_df.iloc[-1]
-        ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
-        rsi, boll_up, boll_low, williams_r = (
-            d["rsi"],
-            d["boll_up"],
-            d["boll_low"],
-            d["williams_r"],
-        )
-        atr_pct = d["atr"] / real_price if real_price > 0 else 0
-        recent_high_window = params["RECENT_HIGH_WINDOW"]
-        recent_low_window = params["RECENT_LOW_WINDOW"]
-        recent_high = d.get(
-            f"recent_high_{recent_high_window}",
-            hist_df["high"].rolling(recent_high_window).max().iloc[-1],
-        )
-        recent_low = d.get(
-            f"recent_low_{recent_low_window}",
-            hist_df["low"].rolling(recent_low_window).min().iloc[-1],
-        )
-        if len(hist_df) >= 2:
-            prev = hist_df.iloc[-2]
-            macd_golden = (
-                1
-                if (
-                    d["macd_dif"] > d["macd_dea"]
-                    and prev["macd_dif"] <= prev["macd_dea"]
-                )
-                else 0
-            )
-            kdj_golden = (
-                1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
-            )
-        else:
-            macd_golden = kdj_golden = 0
-        ret_etf_5d = (
-            (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
-        )
-        weekly_above = weekly_below = False
-        if weekly_df is not None and not weekly_df.empty:
-            w = weekly_df.iloc[-1]
-            if "ma_short" in w.index and not pd.isna(w["ma_short"]):
-                weekly_above = w["close"] > w["ma_short"]
-                weekly_below = w["close"] < w["ma_short"]
-        try:
-            tmsv_series = self.compute_tmsv(hist_df)
-            tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
-            tmsv = 50.0 if np.isnan(tmsv) else tmsv
-        except Exception:
-            tmsv = 50.0
-        tmsv_strength = tmsv / 100.0
-        downside_momentum = d.get("downside_momentum_raw", 0.0)
-        max_drawdown_pct = (
-            (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
-        )
-        buy_score = self.strength(
-            real_price,
-            ma20,
-            volume,
-            vol_ma,
-            macd_golden,
-            kdj_golden,
-            rsi,
-            boll_up,
-            boll_low,
-            williams_r,
-            ret_etf_5d,
-            market["ret_market_5d"],
-            weekly_above,
-            weekly_below,
-            recent_high,
-            recent_low,
-            atr_pct,
-            market["market_above_ma20"],
-            market["market_above_ma60"],
-            market["market_amount_above_ma20"],
-            True,
-            buy_w,
-            sell_w,
-            tmsv_strength,
-            downside_momentum,
-            max_drawdown_pct,
-        )
-        sell_score = self.strength(
-            real_price,
-            ma20,
-            volume,
-            vol_ma,
-            macd_golden,
-            kdj_golden,
-            rsi,
-            boll_up,
-            boll_low,
-            williams_r,
-            ret_etf_5d,
-            market["ret_market_5d"],
-            weekly_above,
-            weekly_below,
-            recent_high,
-            recent_low,
-            atr_pct,
-            market["market_above_ma20"],
-            market["market_above_ma60"],
-            market["market_amount_above_ma20"],
-            False,
-            buy_w,
-            sell_w,
-            tmsv_strength,
-            downside_momentum,
-            max_drawdown_pct,
-        )
-        raw = buy_score - sell_score
-        env_factor = market["market_factor"] * market["sentiment_factor"]
-        env_factor = max(0.60, min(1.30, env_factor))
-        final = raw * env_factor
-        final = max(-1.0, min(1.0, final))
+        final = core["final_score"]
         today_str = today.strftime("%Y-%m-%d")
         if "score_history" not in state:
             state["score_history"] = []
@@ -1114,12 +758,16 @@ class DataAnalyzer:
         if not found:
             state["score_history"].append({"date": today_str, "score": final})
         state["score_history"].sort(key=lambda x: x["date"])
+
+        # 参数动态调整
         if len(state["score_history"]) >= 7:
             params = self.adjust_params_based_on_history(
-                params, state["score_history"], atr_pct, market["market_factor"]
+                params, state["score_history"], core["atr_pct"], market["market_factor"]
             )
-        action = self.get_action(final, state["score_history"], params, atr_pct)
+
+        action = self.get_action(final, state["score_history"], params, core["atr_pct"])
         action_level = self.get_action_level(final)
+
         risk_warning = ""
         if len(state["score_history"]) >= RISK_WARNING_DAYS:
             recent_scores = [
@@ -1129,16 +777,18 @@ class DataAnalyzer:
                 risk_warning = f"风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
             elif final < -0.5 or final > 0.8:
                 risk_warning = f"风险提示:极端评分{final:.2f}"
-            elif atr_pct > 0.03:
-                risk_warning = f"风险提示:高波动{atr_pct:.3f}"
+            elif core["atr_pct"] > 0.03:
+                risk_warning = f"风险提示:高波动{core['atr_pct']:.3f}"
 
-        output = (
-            f"{pad_display(name, 16)} {pad_display(code, 12)} "
-            f"{pad_display(f'{real_price:.3f}', 8, 'right')} "
-            f"{pad_display(f'{change_pct:+.2f}%', 8, 'right')} "
-            f"{pad_display(f'{final:.2f}', 6, 'right')}  "
-            f"{pad_display(action_level, 10)}"
-        )
+        price_str = f"{real_price:.3f}"
+        change_str = f"{core['change_pct']:+.2f}%"
+        final_str = f"{final:.2f}"
+        output = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
+                  f"{pad_display(price_str, 8, 'right')} "
+                  f"{pad_display(change_str, 8, 'right')} "
+                  f"{pad_display(final_str, 6, 'right')}  "
+                  f"{pad_display(action_level, 10)}")
+        
         if risk_warning:
             output += f"  {risk_warning}"
         signal = (
@@ -1164,154 +814,16 @@ class DataAnalyzer:
         params: Dict,
         ai_client: Optional[AIClient] = None,
     ) -> str:
-        if real_price is None:
-            return f"【{name} ({code})】实时价格获取失败，无法分析。"
-        if hist_df is None or len(hist_df) < 20:
-            return f"【{name} ({code})】历史数据不足，无法分析。"
-
-
-        # 计算涨跌幅：确定基准收盘价（上一个交易日收盘）
-        change_pct = self.calc_change_pct(real_price, hist_df, today)
-        
-
-        d = hist_df.iloc[-1]
-        ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
-        rsi, boll_up, boll_low, williams_r = (
-            d["rsi"],
-            d["boll_up"],
-            d["boll_low"],
-            d["williams_r"],
-        )
-        atr_pct = d["atr"] / real_price if real_price > 0 else 0
-        recent_high_window = params["RECENT_HIGH_WINDOW"]
-        recent_low_window = params["RECENT_LOW_WINDOW"]
-        recent_high = d.get(
-            f"recent_high_{recent_high_window}",
-            hist_df["high"].rolling(recent_high_window).max().iloc[-1],
-        )
-        recent_low = d.get(
-            f"recent_low_{recent_low_window}",
-            hist_df["low"].rolling(recent_low_window).min().iloc[-1],
-        )
-        macd_golden = kdj_golden = 0
-        if len(hist_df) >= 2:
-            prev = hist_df.iloc[-2]
-            macd_golden = (
-                1
-                if (
-                    d["macd_dif"] > d["macd_dea"]
-                    and prev["macd_dif"] <= prev["macd_dea"]
-                )
-                else 0
-            )
-            kdj_golden = (
-                1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
-            )
-        ret_etf_5d = (
-            (real_price / hist_df.iloc[-5]["close"]) - 1 if len(hist_df) >= 5 else 0
-        )
-        weekly_above = weekly_below = False
-        if weekly_df is not None and not weekly_df.empty:
-            w = weekly_df.iloc[-1]
-            if "ma_short" in w.index and not pd.isna(w["ma_short"]):
-                weekly_above = w["close"] > w["ma_short"]
-                weekly_below = w["close"] < w["ma_short"]
-        try:
-            tmsv_series = self.compute_tmsv(hist_df)
-            tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
-            tmsv = 50.0 if np.isnan(tmsv) else tmsv
-        except Exception:
-            tmsv = 50.0
-        tmsv_strength = tmsv / 100.0
-        downside_momentum = d.get("downside_momentum_raw", 0.0)
-        max_drawdown_pct = (
-            (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
+        # 使用核心分析获取结果
+        core = self._core_analysis(
+            code, name, real_price, hist_df, weekly_df, market, today,
+            buy_w, sell_w, params
         )
 
-        def cap(x):
-            return max(0.0, min(1.0, x))
+        if core["error"]:
+            return f"【{name} ({code})】{core['error']}，无法分析。"
 
-        buy_factors = {
-            "price_above_ma20": (
-                cap((real_price - ma20) / (ma20 * 0.1)) if real_price > ma20 else 0
-            ),
-            "volume_above_ma5": cap(volume / vol_ma) if volume > vol_ma else 0,
-            "macd_golden_cross": macd_golden,
-            "kdj_golden_cross": kdj_golden,
-            "bollinger_break_up": (
-                cap((real_price - boll_up) / boll_up) if real_price > boll_up else 0
-            ),
-            "williams_oversold": (
-                cap((-80 - williams_r) / 20) if williams_r < -80 else 0
-            ),
-            "market_above_ma20": 1 if market["market_above_ma20"] else 0,
-            "market_above_ma60": 1 if market["market_above_ma60"] else 0,
-            "market_amount_above_ma20": 1 if market["market_amount_above_ma20"] else 0,
-            "outperform_market": (
-                cap((ret_etf_5d - market["ret_market_5d"]) / 0.05)
-                if ret_etf_5d > market["ret_market_5d"]
-                else 0
-            ),
-            "weekly_above_ma20": 1 if weekly_above else 0,
-            "tmsv_score": tmsv_strength,
-        }
-        buy_score = sum(buy_w.get(k, 0) * buy_factors[k] for k in buy_factors)
-        sell_factors = {
-            "price_below_ma20": (
-                cap((ma20 - real_price) / (ma20 * 0.1)) if real_price < ma20 else 0
-            ),
-            "bollinger_break_down": (
-                cap((boll_low - real_price) / boll_low) if real_price < boll_low else 0
-            ),
-            "williams_overbought": (
-                cap((20 - williams_r) / 20) if williams_r < 20 else 0
-            ),
-            "rsi_overbought": cap((rsi - 70) / 30) if rsi > 70 else 0,
-            "underperform_market": (
-                cap((market["ret_market_5d"] - ret_etf_5d) / 0.05)
-                if ret_etf_5d < market["ret_market_5d"]
-                else 0
-            ),
-            "stop_loss_ma_break": (
-                cap((ma20 - real_price) / (ma20 * 0.05)) if real_price < ma20 else 0
-            ),
-            "trailing_stop_clear": (
-                cap(
-                    (recent_high - real_price) / recent_high / (ATR_STOP_MULT * atr_pct)
-                )
-                if recent_high > 0
-                and atr_pct > 0
-                and (recent_high - real_price) / recent_high >= ATR_STOP_MULT * atr_pct
-                else 0
-            ),
-            "trailing_stop_half": (
-                cap(
-                    (recent_high - real_price)
-                    / recent_high
-                    / (ATR_TRAILING_MULT * atr_pct)
-                )
-                if recent_high > 0
-                and atr_pct > 0
-                and (recent_high - real_price) / recent_high
-                >= ATR_TRAILING_MULT * atr_pct
-                else 0
-            ),
-            "profit_target_hit": (
-                cap((real_price - recent_low) / recent_low / PROFIT_TARGET)
-                if recent_low > 0
-                and (real_price - recent_low) / recent_low >= PROFIT_TARGET
-                else 0
-            ),
-            "weekly_below_ma20": 1 if weekly_below else 0,
-            "downside_momentum": cap(downside_momentum),
-            "max_drawdown_stop": (
-                cap(max_drawdown_pct / 0.08) if max_drawdown_pct >= 0.08 else 0
-            ),
-        }
-        sell_score = sum(sell_w.get(k, 0) * sell_factors[k] for k in sell_factors)
-        raw = buy_score - sell_score
-        final = raw * market["market_factor"] * market["sentiment_factor"]
-        final = max(-1.0, min(1.0, final))
+        final = core["final_score"]
         action_level = self.get_action_level(final)
 
         lines = []
@@ -1322,17 +834,17 @@ class DataAnalyzer:
         )
         lines.append("=" * 70)
         lines.append(f"实时价格：{real_price:.3f}")
-        lines.append(f"涨跌幅：{change_pct:+.2f}%")  # 新增行
+        lines.append(f"涨跌幅：{core['change_pct']:+.2f}%")
         lines.append(
             f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"
         )
-
         if market.get("sentiment_risk_tip"):
             lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
-        lines.append(f"波动率(ATR%)：{atr_pct*100:.2f}%")
-        lines.append(f"TMSV复合强度：{tmsv:.1f} (强度系数 {tmsv_strength:.3f})")
-        lines.append(f"最大回撤：{max_drawdown_pct*100:.2f}%")
+        lines.append(f"波动率(ATR%)：{core['atr_pct']*100:.2f}%")
+        lines.append(f"TMSV复合强度：{core['tmsv']:.1f} (强度系数 {core['tmsv_strength']:.3f})")
+        lines.append(f"最大回撤：{core['max_drawdown_pct']*100:.2f}%")
         lines.append("")
+
         col_name, col_strength, col_weight, col_contrib = 25, 8, 8, 8
 
         def row_line(items):
@@ -1348,36 +860,51 @@ class DataAnalyzer:
         lines.append("【买入因子详情】")
         lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
         lines.append("-" * 50)
-        buy_contributions = [
-            (k, buy_factors[k], buy_w.get(k, 0), buy_w.get(k, 0) * buy_factors[k])
-            for k in buy_factors
-        ]
-        buy_contributions.sort(key=lambda x: x[3], reverse=True)
-        for name_f, s, w, contrib in buy_contributions:
+        buy_factors = core["buy_factors"]
+        buy_contribs = sorted(
+            [
+                (k, buy_factors[k], buy_w.get(k, 0), buy_w.get(k, 0) * buy_factors[k])
+                for k in buy_factors
+            ],
+            key=lambda x: x[3],
+            reverse=True,
+        )
+        for name_f, s, w, contrib in buy_contribs:
             lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["买入总分", "", "", f"{buy_score:.3f}"]))
+        lines.append(row_line(["买入总分", "", "", f"{core['buy_score']:.3f}"]))
         lines.append("")
         lines.append("【卖出因子详情】")
         lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
         lines.append("-" * 50)
-        sell_contributions = [
-            (k, sell_factors[k], sell_w.get(k, 0), sell_w.get(k, 0) * sell_factors[k])
-            for k in sell_factors
-        ]
-        sell_contributions.sort(key=lambda x: x[3], reverse=True)
-        for name_f, s, w, contrib in sell_contributions:
+        sell_factors = core["sell_factors"]
+        sell_contribs = sorted(
+            [
+                (
+                    k,
+                    sell_factors[k],
+                    sell_w.get(k, 0),
+                    sell_w.get(k, 0) * sell_factors[k],
+                )
+                for k in sell_factors
+            ],
+            key=lambda x: x[3],
+            reverse=True,
+        )
+        for name_f, s, w, contrib in sell_contribs:
             lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["卖出总分", "", "", f"{sell_score:.3f}"]))
+        lines.append(row_line(["卖出总分", "", "", f"{core['sell_score']:.3f}"]))
         lines.append("")
         lines.append("【评分合成】")
         lines.append(
-            f"原始净分 = 买入总分 - 卖出总分 = {buy_score:.3f} - {sell_score:.3f} = {raw:.3f}"
+            f"原始净分 = 买入总分 - 卖出总分 = {core['buy_score']:.3f} - {core['sell_score']:.3f} = {core['raw_score']:.3f}"
         )
-        lines.append(f"最终评分 = 原始净分 × 市场因子 × 情绪因子")
+        lines.append("最终评分 = 原始净分 × 市场因子 × 情绪因子 (裁剪至[0.6,1.3])")
+        env_factor = self._clip_env_factor(market["market_factor"], market["sentiment_factor"])
         lines.append(
-            f"        = {raw:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} = {final:.3f}"
+            f"        = {core['raw_score']:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} → 裁剪后因子={env_factor:.2f} → {final:.3f}"
         )
         lines.append(f"操作等级：{action_level}")
+
         if ai_client:
             lines.append("")
             lines.append("【AI 专业点评】")
@@ -1393,8 +920,8 @@ class DataAnalyzer:
                 sell_w,
                 buy_factors,
                 sell_factors,
-                tmsv,
-                atr_pct,
+                core["tmsv"],
+                core["atr_pct"],
             )
             lines.append(ai_comment)
         else:
@@ -1404,13 +931,10 @@ class DataAnalyzer:
         return "\n".join(lines)
 
 
-# ========================== 顶层批量分析入口 ==========================
+# ========================== 批量分析入口 ==========================
 def run_batch_analysis(
     api_key: Optional[str] = None, target_code: Optional[str] = None
 ):
-    """
-    批量分析 ETF，若指定 target_code 则只分析单只并输出详细报告
-    """
     fetcher = DataFetcher()
     analyzer = DataAnalyzer()
 
@@ -1432,32 +956,23 @@ def run_batch_analysis(
         print("获取宏观数据失败")
         return
 
-    macro_df = analyzer.calculate_indicators(
-        macro_df, need_amount_ma=False, recent_high_window=10, recent_low_window=20
-    )
+    macro_df = analyzer.calculate_indicators(macro_df, need_amount_ma=False)
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
-    market_df = analyzer.calculate_indicators(
-        market_df, need_amount_ma=True, recent_high_window=10, recent_low_window=20
-    )
+    market_df = analyzer.calculate_indicators(market_df, need_amount_ma=True)
     market_df["atr"] = analyzer.calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
 
     ai_client = None
     if api_key:
         ai_client = AIClient(api_key)
-        # 使用带缓存的市场状态获取
         market_state, market_factor = fetcher.get_market_state(market_df, ai_client)
-        logger.info(f"市场状态: {market_state}, 因子: {market_factor}")
     else:
-        # 无AI时仍用简单规则（也可缓存，但没必要）
         last = market_df.iloc[-1]
-        if last["close"] > last["ma_short"] and last["close"] > last.get(
-            "ma_long", last["ma_short"]
-        ):
+        above_ma20 = last["close"] > last["ma_short"]
+        above_ma60 = last["close"] > last.get("ma_long", last["ma_short"])
+        if above_ma20 and above_ma60:
             market_state, market_factor = "正常牛市", 1.2
-        elif last["close"] < last["ma_short"] and last["close"] < last.get(
-            "ma_long", last["ma_short"]
-        ):
+        elif not above_ma20 and not above_ma60:
             market_state, market_factor = "熊市下跌", 0.8
         else:
             market_state, market_factor = "震荡偏弱", 1.0
@@ -1525,72 +1040,10 @@ def run_batch_analysis(
 
     state = fetcher.load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+
     if ai_client:
-        # 尝试从缓存加载
-        cache_key = fetcher._get_cache_key_fuzzy(
-            market_state,
-            sentiment,
-            market_info["market_above_ma20"],
-            market_info["market_above_ma60"],
-            market_info["market_amount_above_ma20"],
-            volatility,
-        )
-        cache = fetcher._load_cache()
-        if (
-            cache_key in cache
-            and "buy" in cache[cache_key]
-            and "sell" in cache[cache_key]
-        ):
-            cached_buy = validate_and_filter_weights(
-                cache[cache_key]["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入"
-            )
-            cached_sell = validate_and_filter_weights(
-                cache[cache_key]["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出"
-            )
-            if cached_buy and cached_sell:
-                buy_w, sell_w = cached_buy, cached_sell
-            else:
-                ai_buy, ai_sell = ai_client.generate_weights(
-                    market_state,
-                    sentiment,
-                    market_info["market_above_ma20"],
-                    market_info["market_above_ma60"],
-                    market_info["market_amount_above_ma20"],
-                    volatility,
-                )
-                trust = analyzer.compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS)
-                trust = min(
-                    trust, analyzer.compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS)
-                )
-                corr_buy = analyzer.compute_factor_correlation(
-                    None, list(DEFAULT_BUY_WEIGHTS.keys())
-                )
-                corr_sell = analyzer.compute_factor_correlation(
-                    None, list(DEFAULT_SELL_WEIGHTS.keys())
-                )
-                ai_buy = analyzer.apply_correlation_penalty(
-                    ai_buy, list(DEFAULT_BUY_WEIGHTS.keys()), corr_buy
-                )
-                ai_sell = analyzer.apply_correlation_penalty(
-                    ai_sell, list(DEFAULT_SELL_WEIGHTS.keys()), corr_sell
-                )
-                buy_w = analyzer.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
-                sell_w = analyzer.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
-                if sentiment >= 1.25:
-                    boost = 0.1
-                    sell_w["profit_target_hit"] = min(
-                        0.5, sell_w.get("profit_target_hit", 0) + boost
-                    )
-                    other_keys = [k for k in sell_w if k != "profit_target_hit"]
-                    if other_keys:
-                        reduce_each = boost / len(other_keys)
-                        for k in other_keys:
-                            sell_w[k] = max(0.02, sell_w[k] - reduce_each)
-                    total = sum(sell_w.values())
-                    sell_w = {k: v / total for k, v in sell_w.items()}
-                cache[cache_key] = {"buy": buy_w, "sell": sell_w}
-                fetcher._save_cache(cache)
-        else:
+        # ----- 内部函数：从 AI 生成权重并处理后返回 (buy_w, sell_w) -----
+        def _generate_weights_from_ai():
             ai_buy, ai_sell = ai_client.generate_weights(
                 market_state,
                 sentiment,
@@ -1599,9 +1052,9 @@ def run_batch_analysis(
                 market_info["market_amount_above_ma20"],
                 volatility,
             )
-            trust = analyzer.compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS)
             trust = min(
-                trust, analyzer.compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS)
+                analyzer.compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS),
+                analyzer.compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS),
             )
             corr_buy = analyzer.compute_factor_correlation(
                 None, list(DEFAULT_BUY_WEIGHTS.keys())
@@ -1617,6 +1070,8 @@ def run_batch_analysis(
             )
             buy_w = analyzer.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
             sell_w = analyzer.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
+
+            # 情绪过热时调整卖出止盈权重
             if sentiment >= 1.25:
                 boost = 0.1
                 sell_w["profit_target_hit"] = min(
@@ -1629,6 +1084,37 @@ def run_batch_analysis(
                         sell_w[k] = max(0.02, sell_w[k] - reduce_each)
                 total = sum(sell_w.values())
                 sell_w = {k: v / total for k, v in sell_w.items()}
+            return buy_w, sell_w
+
+        cache_key = fetcher._get_cache_key_fuzzy(
+            market_state,
+            sentiment,
+            market_info["market_above_ma20"],
+            market_info["market_above_ma60"],
+            market_info["market_amount_above_ma20"],
+            volatility,
+        )
+        cache = fetcher._load_cache()
+
+        if (
+            cache_key in cache
+            and "buy" in cache[cache_key]
+            and "sell" in cache[cache_key]
+        ):
+            cached_buy = validate_and_filter_weights(
+                cache[cache_key]["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入"
+            )
+            cached_sell = validate_and_filter_weights(
+                cache[cache_key]["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出"
+            )
+            if cached_buy and cached_sell:
+                buy_w, sell_w = cached_buy, cached_sell
+            else:
+                buy_w, sell_w = _generate_weights_from_ai()
+                cache[cache_key] = {"buy": buy_w, "sell": sell_w}
+                fetcher._save_cache(cache)
+        else:
+            buy_w, sell_w = _generate_weights_from_ai()
             cache[cache_key] = {"buy": buy_w, "sell": sell_w}
             fetcher._save_cache(cache)
 
@@ -1684,7 +1170,7 @@ def run_batch_analysis(
             pad_display("评分", 6, "right"),
             "  " + pad_display("操作", 10),
         )
-        print("-" * 80)  # 适当加长分隔线
+        print("-" * 80)
 
         output_lines = []
         results = []
@@ -1693,16 +1179,13 @@ def run_batch_analysis(
             for _, row in etf_list.iterrows():
                 code, name = row["代码"], row["名称"]
                 hist = fetcher.get_daily_data(code, start, today_str)
-                hist = (
-                    analyzer.calculate_indicators(
+                if hist is not None:
+                    hist = analyzer.calculate_indicators(
                         hist,
                         need_amount_ma=False,
                         recent_high_window=params["RECENT_HIGH_WINDOW"],
                         recent_low_window=params["RECENT_LOW_WINDOW"],
                     )
-                    if hist is not None
-                    else None
-                )
                 weekly = fetcher.get_weekly_data(code, start, today_str)
                 s = state.get(code, {})
                 futures.append(
@@ -1726,8 +1209,7 @@ def run_batch_analysis(
                 results.append((out, score))
                 m = re.search(r"【.*?\((.*?)\)】", out)
                 if m:
-                    code = m.group(1)
-                    state[code] = new_state
+                    state[m.group(1)] = new_state
         results.sort(key=lambda x: x[1], reverse=True)
         for out, _ in results:
             print(out)
@@ -1735,7 +1217,6 @@ def run_batch_analysis(
         fetcher.save_state(state)
     fetcher.logout()
 
-    # 发送邮件（如果需要）
     email_cfg = get_email_config()
     if email_cfg["send_email"]:
         subject = f"ETF分析报告 - {today_str}"
