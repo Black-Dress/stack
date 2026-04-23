@@ -1058,24 +1058,55 @@ def run_batch_analysis(api_key: Optional[str] = None, target_code: Optional[str]
                 sell_w = {k: v / total for k, v in sell_w.items()}
             return buy_w, sell_w
 
-        cache_key = fetcher._get_cache_key_fuzzy(
-            market_state, sentiment, market_info["market_above_ma20"],
-            market_info["market_above_ma60"], market_info["market_amount_above_ma20"], volatility
-        )
-        cache = fetcher._load_cache()
-        if cache_key in cache and "buy" in cache[cache_key] and "sell" in cache[cache_key]:
-            cached_buy = validate_and_filter_weights(cache[cache_key]["buy"], DEFAULT_BUY_WEIGHTS.keys(), "缓存买入")
-            cached_sell = validate_and_filter_weights(cache[cache_key]["sell"], DEFAULT_SELL_WEIGHTS.keys(), "缓存卖出")
-            if cached_buy and cached_sell:
-                buy_w, sell_w = cached_buy, cached_sell
-            else:
-                buy_w, sell_w = _generate_weights_from_ai()
-                cache[cache_key] = {"buy": buy_w, "sell": sell_w}
-                fetcher._save_cache(cache)
+        # 尝试从缓存读取当日环境数据（10分钟有效）
+        cached_env = fetcher.get_cached_environment()
+        if cached_env:
+            market_state = cached_env["market_state"]
+            market_factor = cached_env["market_factor"]
+            sentiment = cached_env["sentiment"]
+            buy_w = cached_env["buy_weights"]
+            sell_w = cached_env["sell_weights"]
+            sentiment_risk_tip = fetcher.get_sentiment_risk_tip(sentiment)
+            logger.info("使用缓存的环境数据（10分钟内有效）")
         else:
-            buy_w, sell_w = _generate_weights_from_ai()
-            cache[cache_key] = {"buy": buy_w, "sell": sell_w}
-            fetcher._save_cache(cache)
+            # 重新计算市场状态
+            if api_key:
+                ai_client = AIClient(api_key)
+                market_state, market_factor = fetcher.get_market_state(
+                    market_df, ai_client
+                )
+            else:
+                last = market_df.iloc[-1]
+                above_ma20 = last["close"] > last["ma_short"]
+                above_ma60 = last["close"] > last.get("ma_long", last["ma_short"])
+                if above_ma20 and above_ma60:
+                    market_state, market_factor = "正常牛市", 1.2
+                elif not above_ma20 and not above_ma60:
+                    market_state, market_factor = "熊市下跌", 0.8
+                else:
+                    market_state, market_factor = "震荡偏弱", 1.0
+
+            # 重新计算情绪因子
+            if AKSHARE_AVAILABLE:
+                try:
+                    indicators = fetcher.fetch_sentiment_indicators()
+                    sentiment = fetcher.compute_sentiment_factor(indicators)
+                except Exception as e:
+                    logger.warning(f"情绪指标获取失败，使用后备: {e}")
+                    sentiment = fetcher.get_sentiment_factor_simple(macro_df)
+            else:
+                sentiment = fetcher.get_sentiment_factor_simple(macro_df)
+            sentiment_risk_tip = fetcher.get_sentiment_risk_tip(sentiment)
+
+            # 生成权重（原有AI权重逻辑，可封装为函数）
+            buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
+            if api_key:
+                buy_w, sell_w = _generate_weights_from_ai()
+
+            # 保存到缓存
+            fetcher.save_environment_cache(
+                market_state, market_factor, buy_w, sell_w, sentiment
+            )
 
     analyzer.set_weights(buy_w, sell_w)
 
