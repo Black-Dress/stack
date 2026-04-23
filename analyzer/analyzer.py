@@ -39,7 +39,6 @@ from .fetcher import DataFetcher, AKSHARE_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
-# ========================== 硬编码常量化 ==========================
 # ---------- 技术指标参数 ----------
 MACD_FAST = 12
 MACD_SLOW = 26
@@ -54,12 +53,13 @@ TMSV_MA60_WINDOW = 60
 TMSV_ATR_WINDOW = 14
 TMSV_VOL_MA_WINDOW = 20
 
+# ---------- 动量缺失惩罚 ----------
+MOMENTUM_MISSING_PENALTY = 0.95   # MACD和KDJ均未金叉时，买入评分乘以此系数
 
 NONLINEAR_SCALE_BULL = 2.5      # 趋势市缩放系数
 NONLINEAR_SCALE_RANGE = 1.5     # 震荡市缩放系数
 
-# ---------- 非线性评分变换参数 ----------
-NONLINEAR_SCALE = 2.5          # tanh 缩放因子
+
 
 # ---------- Sigmoid 归一化参数 ----------
 SIGMOID_STEEPNESS_DEFAULT = 5.0        # 默认陡峭度
@@ -78,7 +78,7 @@ CACHE_EXPIRE_SECONDS = 600
 
 # ---------- 因子计算通用参数 ----------
 PRICE_DEVIATION_MA_MULT = 0.1           # 价格偏离均线的归一化除数（ma * 0.1）
-VOLUME_RATIO_CENTER = 0.1               # 成交量比率 sigmoid 中心偏移
+VOLUME_RATIO_CENTER = 0.2               # 成交量比率 sigmoid 中心偏移
 OUTPERFORM_MARKET_DIV = 0.05            # 超额收益归一化除数
 WILLIAMS_OVERBOUGHT_THRESH = -20        # 威廉指标超买阈值（注意负值）
 WILLIAMS_OVERSOLD_THRESH = -80          # 超卖阈值
@@ -214,7 +214,7 @@ class DataAnalyzer:
         elif "熊" in market_status:
             w = {'trend': 0.20, 'momentum': 0.30, 'volume': 0.25}
         else:  # 震荡
-            w = {'trend': 0.25, 'momentum': 0.35, 'volume': 0.20}
+            w = {'trend': 0.25, 'momentum': 0.40, 'volume': 0.15}
 
         # 高波动时略微降低趋势权重
         if volatility > 0.03:
@@ -522,30 +522,69 @@ class DataAnalyzer:
         }
 
         sell_factors = {
-            "price_below_ma20": self._sigmoid_normalize(-price_deviation, center=0.2) if price < ma20 else 0,
-            "bollinger_break_down": self._sigmoid_normalize((boll_low - price) / boll_low, center=0.01) if price < boll_low else 0,
-            "williams_overbought": self._sigmoid_normalize((WILLIAMS_OVERBOUGHT_THRESH - williams_r) / 20, center=0.5) if williams_r < WILLIAMS_OVERBOUGHT_THRESH else 0,
-            "rsi_overbought": self._sigmoid_normalize((rsi - RSI_OVERBOUGHT_THRESH) / RSI_OVERBOUGHT_DIV, center=0.2) if rsi > RSI_OVERBOUGHT_THRESH else 0,
-            "underperform_market": self._sigmoid_normalize((ret_market_5d - ret_etf_5d) / OUTPERFORM_MARKET_DIV, center=0.2) if ret_etf_5d < ret_market_5d else 0,
-            "stop_loss_ma_break": cap((ma20 - price) / (ma20 * HARD_STOP_MA_BREAK_PCT)) if price < ma20 else 0,
+            "price_below_ma20": (
+                self._sigmoid_normalize(-price_deviation, center=0.2)
+                if price < ma20
+                else 0
+            ),
+            "bollinger_break_down": (
+                self._sigmoid_normalize((boll_low - price) / boll_low, center=0.01)
+                if price < boll_low
+                else 0
+            ),
+            "williams_overbought": (
+                self._sigmoid_normalize(
+                    (WILLIAMS_OVERBOUGHT_THRESH - williams_r) / 20, center=0.5
+                )
+                if williams_r < WILLIAMS_OVERBOUGHT_THRESH
+                else 0
+            ),
+            "rsi_overbought": (
+                self._sigmoid_normalize(
+                    (rsi - RSI_OVERBOUGHT_THRESH) / RSI_OVERBOUGHT_DIV, center=0.2
+                )
+                if rsi > RSI_OVERBOUGHT_THRESH
+                else 0
+            ),
+            "underperform_market": (
+                self._sigmoid_normalize(
+                    (ret_market_5d - ret_etf_5d) / OUTPERFORM_MARKET_DIV, center=0.2
+                )
+                if ret_etf_5d < ret_market_5d
+                else 0
+            ),
+            "stop_loss_ma_break": (
+                cap((ma20 - price) / (ma20 * HARD_STOP_MA_BREAK_PCT))
+                if price < ma20
+                else 0
+            ),
             "trailing_stop_clear": (
                 cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
-                if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct
                 else 0
             ),
             "trailing_stop_half": (
                 cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
-                if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
+                if recent_high > 0
+                and atr_pct > 0
+                and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
                 else 0
             ),
             "profit_target_hit": (
                 cap((price - recent_low) / recent_low / PROFIT_TARGET_DIV)
-                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET_DIV
+                if recent_low > 0
+                and (price - recent_low) / recent_low >= PROFIT_TARGET_DIV
                 else 0
             ),
             "weekly_below_ma20": 1 if weekly_below else 0,
             "downside_momentum": cap(downside_momentum),
-            "max_drawdown_stop": cap(max_drawdown_pct / MAX_DRAWDOWN_STOP_DIV) if max_drawdown_pct >= MAX_DRAWDOWN_STOP_DIV else 0,
+            "max_drawdown_stop": (
+                cap(max_drawdown_pct / MAX_DRAWDOWN_STOP_DIV)
+                if max_drawdown_pct >= MAX_DRAWDOWN_STOP_DIV
+                else 0
+            ),
         }
         return buy_factors, sell_factors
 
@@ -752,7 +791,9 @@ class DataAnalyzer:
 
         ctx.buy_score = sum(self.buy_weights.get(k, 0) * ctx.buy_factors[k] for k in ctx.buy_factors)
         ctx.sell_score = sum(self.sell_weights.get(k, 0) * ctx.sell_factors[k] for k in ctx.sell_factors)
-
+        # 动量缺失惩罚
+        if ctx.buy_factors.get("macd_golden_cross", 0) == 0 and ctx.buy_factors.get("kdj_golden_cross", 0) == 0:
+            ctx.buy_score *= MOMENTUM_MISSING_PENALTY
         # 硬止损覆盖
         if ctx.sell_factors.get("max_drawdown_stop", 0) > 0 or ctx.sell_factors.get("stop_loss_ma_break", 0) > 0:
             ctx.final_score = -1.0

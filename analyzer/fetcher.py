@@ -38,6 +38,10 @@ except ImportError:
     logger.warning("未安装 akshare，情绪指标功能将不可用。请执行 pip install akshare")
 
 
+# ---------- 情绪因子保护 ----------
+SENTIMENT_LOWER_BOUND = 0.70   # 情绪因子下限，防止过度恐慌压制信号
+
+
 class DataFetcher:
     """负责所有数据获取（baostock, sina, akshare 情绪指标）"""
 
@@ -492,6 +496,7 @@ class DataFetcher:
             return max(0.6, min(1.5, adj))
 
         smoothed = adjust(smoothed)
+        smoothed = max(SENTIMENT_LOWER_BOUND, smoothed)
         return smoothed, raw_sentiment
 
     # ---------- 风险提示 ----------
@@ -539,4 +544,6 @@ class DataFetcher:
                 adj = 1.0 + 1.2 * math.tanh(3.0 * x)
             return max(0.6, min(1.5, adj))
 
-        return adjust(smoothed), raw_sentiment
+        smoothed = adjust(smoothed)
+        smoothed = max(SENTIMENT_LOWER_BOUND, smoothed)
+        return smoothed, raw_sentiment
