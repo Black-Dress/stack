@@ -40,22 +40,83 @@ from .fetcher import DataFetcher, AKSHARE_AVAILABLE
 logger = logging.getLogger(__name__)
 
 # ========================== 硬编码常量化 ==========================
-# 非线性评分变换参数
+# ---------- 技术指标参数 ----------
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+KDJ_N = 9
+BOLL_WINDOW = 20
+BOLL_STD_MULT = 2
+WILLIAMS_WINDOW = 14
+RSI_WINDOW = 14
+TMSV_MA20_WINDOW = 20
+TMSV_MA60_WINDOW = 60
+TMSV_ATR_WINDOW = 14
+TMSV_VOL_MA_WINDOW = 20
+
+
+NONLINEAR_SCALE_BULL = 2.5      # 趋势市缩放系数
+NONLINEAR_SCALE_RANGE = 1.5     # 震荡市缩放系数
+
+# ---------- 非线性评分变换参数 ----------
 NONLINEAR_SCALE = 2.5          # tanh 缩放因子
 
-# Sigmoid 归一化参数
-SIGMOID_STEEPNESS = 5.0        # 陡峭度
+# ---------- Sigmoid 归一化参数 ----------
+SIGMOID_STEEPNESS_DEFAULT = 5.0        # 默认陡峭度
+SIGMOID_STEEPNESS_VOLUME = 3.0         # 成交量因子专用陡峭度
 
-# 硬止损阈值
+# ---------- 硬止损阈值 ----------
 HARD_STOP_DRAWDOWN = 0.08      # 最大回撤触发阈值
 HARD_STOP_MA_BREAK_PCT = 0.05  # 均线跌破幅度阈值
 
-# 情绪过热惩罚
+# ---------- 情绪过热惩罚 ----------
 SENTIMENT_OVERHEAT_THRESHOLD = 1.25
 SENTIMENT_PENALTY_FACTOR = 0.8
 
-# 缓存有效期
+# ---------- 缓存有效期 ----------
 CACHE_EXPIRE_SECONDS = 600
+
+# ---------- 因子计算通用参数 ----------
+PRICE_DEVIATION_MA_MULT = 0.1           # 价格偏离均线的归一化除数（ma * 0.1）
+VOLUME_RATIO_CENTER = 0.1               # 成交量比率 sigmoid 中心偏移
+OUTPERFORM_MARKET_DIV = 0.05            # 超额收益归一化除数
+WILLIAMS_OVERBOUGHT_THRESH = -20        # 威廉指标超买阈值（注意负值）
+WILLIAMS_OVERSOLD_THRESH = -80          # 超卖阈值
+RSI_OVERBOUGHT_THRESH = 70
+RSI_OVERBOUGHT_DIV = 30
+PROFIT_TARGET_DIV = PROFIT_TARGET       # 止盈目标（沿用 config）
+MAX_DRAWDOWN_STOP_DIV = 0.08            # 最大回撤归一化除数（与硬止损一致）
+
+# ---------- 动态确认天数波动率阈值 ----------
+VOL_HIGH_CONFIRM = 0.04
+VOL_MID_CONFIRM = 0.025
+
+# ---------- 评分等级阈值 ----------
+ACTION_LEVEL_THRESHOLDS = [0.8, 0.7, 0.6, 0.4, 0.2, 0.0, -0.2, -0.4, -0.6, -0.8]
+ACTION_LEVEL_NAMES = [
+    "极度看好", "强烈买入", "买入", "谨慎买入", "偏多持有",
+    "中性偏多", "中性偏空", "偏空持有", "谨慎卖出", "卖出"
+]
+
+# ---------- TMSV 计算参数 ----------
+TMSV_TREND_MA20_WEIGHT = 0.5
+TMSV_TREND_MA60_WEIGHT = 0.3
+TMSV_TREND_SLOPE_WEIGHT = 0.2
+TMSV_MOM_RSI_WEIGHT = 0.6
+TMSV_MOM_MACD_WEIGHT = 0.4
+TMSV_VOL_RATIO_WEIGHT = 0.7
+TMSV_VOL_CONSIST_WEIGHT = 0.3
+TMSV_VOL_LOW_THRESH = 0.01
+TMSV_VOL_HIGH_THRESH = 0.03
+TMSV_VOL_LOW_FACTOR = 1.5
+TMSV_VOL_HIGH_FACTOR = 0.6
+TMSV_VOL_MID_FACTOR_BASE = 1.2
+TMSV_VOL_MID_FACTOR_SLOPE = 0.6
+
+# ---------- 参数动态调整 ----------
+ADJUST_MULT_BASE = 1.2
+ADJUST_BUY_DELTA_MAX = 0.03
+ADJUST_SELL_DELTA_MAX = 0.03
 
 
 # ========================== 数据类定义 ==========================
@@ -90,7 +151,7 @@ class ETFContext:
 
 
 # ========================== 公共指标计算函数 ==========================
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def calc_rsi(series: pd.Series, period: int = RSI_WINDOW) -> pd.Series:
     """计算 RSI 指标"""
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
@@ -98,7 +159,7 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - 100 / (1 + gain / loss)
 
 
-def calc_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+def calc_macd(series: pd.Series, fast: int = MACD_FAST, slow: int = MACD_SLOW, signal: int = MACD_SIGNAL):
     """计算 MACD 指标，返回 (dif, dea, hist)"""
     exp_fast = series.ewm(span=fast, adjust=False).mean()
     exp_slow = series.ewm(span=slow, adjust=False).mean()
@@ -130,13 +191,20 @@ class DataAnalyzer:
 
     # ---------- 非线性辅助函数 ----------
     @staticmethod
-    def _sigmoid_normalize(x: float, center: float = 0.0, steepness: float = SIGMOID_STEEPNESS) -> float:
+    def _sigmoid_normalize(x: float, center: float = 0.0, steepness: float = SIGMOID_STEEPNESS_DEFAULT) -> float:
         """Sigmoid 归一化，将任意实数映射到 [0,1]"""
         return 1.0 / (1.0 + math.exp(-steepness * (x - center)))
 
-    def _nonlinear_score_transform(self, raw: float) -> float:
-        """对原始净分进行非线性变换，增强中间区分度"""
-        return math.tanh(NONLINEAR_SCALE * raw)
+    def _get_nonlinear_scale(self, market_status: str) -> float:
+        status_lower = market_status.lower()
+        if "牛" in status_lower or "熊" in status_lower:
+            return NONLINEAR_SCALE_BULL
+        else:
+            return NONLINEAR_SCALE_RANGE
+    
+    def _nonlinear_score_transform(self, raw: float, market_status: str = "震荡偏弱") -> float:
+        scale = self._get_nonlinear_scale(market_status)
+        return math.tanh(scale * raw)
 
     # ---------- TMSV 动态权重 ----------
     def _get_tmsv_weights(self, market_status: str, volatility: float) -> Dict[str, float]:
@@ -227,22 +295,22 @@ class DataAnalyzer:
         # MACD
         df["macd_dif"], df["macd_dea"], _ = calc_macd(df["close"])
         # KDJ
-        low_n = df["low"].rolling(9).min()
-        high_n = df["high"].rolling(9).max()
+        low_n = df["low"].rolling(KDJ_N).min()
+        high_n = df["high"].rolling(KDJ_N).max()
         rsv = (df["close"] - low_n) / (high_n - low_n) * 100
         df["kdj_k"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
         df["kdj_d"] = df["kdj_k"].ewm(alpha=1 / 3, adjust=False).mean()
         # 布林
-        df["boll_mid"] = df["close"].rolling(20).mean()
-        df["boll_std"] = df["close"].rolling(20).std()
-        df["boll_up"] = df["boll_mid"] + 2 * df["boll_std"]
-        df["boll_low"] = df["boll_mid"] - 2 * df["boll_std"]
+        df["boll_mid"] = df["close"].rolling(BOLL_WINDOW).mean()
+        df["boll_std"] = df["close"].rolling(BOLL_WINDOW).std()
+        df["boll_up"] = df["boll_mid"] + BOLL_STD_MULT * df["boll_std"]
+        df["boll_low"] = df["boll_mid"] - BOLL_STD_MULT * df["boll_std"]
         # 威廉
-        high_14 = df["high"].rolling(14).max()
-        low_14 = df["low"].rolling(14).min()
+        high_14 = df["high"].rolling(WILLIAMS_WINDOW).max()
+        low_14 = df["low"].rolling(WILLIAMS_WINDOW).min()
         df["williams_r"] = (high_14 - df["close"]) / (high_14 - low_14) * -100
         # RSI
-        df["rsi"] = calc_rsi(df["close"], 14)
+        df["rsi"] = calc_rsi(df["close"])
         # ATR
         df["atr"] = self.calculate_atr(df, ATR_PERIOD)
         # ADX
@@ -281,17 +349,17 @@ class DataAnalyzer:
         df = df.copy()
         # 确保所需列存在
         if "ma20" not in df.columns:
-            df["ma20"] = df["close"].rolling(20).mean()
+            df["ma20"] = df["close"].rolling(TMSV_MA20_WINDOW).mean()
         if "ma60" not in df.columns:
-            df["ma60"] = df["close"].rolling(60).mean()
+            df["ma60"] = df["close"].rolling(TMSV_MA60_WINDOW).mean()
         if "rsi" not in df.columns:
-            df["rsi"] = calc_rsi(df["close"], 14)
+            df["rsi"] = calc_rsi(df["close"])
         if "macd_hist" not in df.columns:
             _, _, df["macd_hist"] = calc_macd(df["close"])
         if "atr" not in df.columns:
-            df["atr"] = self.calculate_atr(df, 14)
+            df["atr"] = self.calculate_atr(df, TMSV_ATR_WINDOW)
         if "vol_ma" not in df.columns:
-            df["vol_ma"] = df["volume"].rolling(20).mean()
+            df["vol_ma"] = df["volume"].rolling(TMSV_VOL_MA_WINDOW).mean()
 
         price_above_ma20 = (
             ((df["close"] - df["ma20"]) / (df["ma20"].replace(0, np.nan) * 0.1))
@@ -306,26 +374,28 @@ class DataAnalyzer:
         ma20_slope = df["ma20"].diff(5) / df["ma20"].shift(5).replace(0, np.nan)
         slope_score = (ma20_slope * 10).clip(0, 1).fillna(0)
         trend_score = (
-            price_above_ma20 * 0.5 + price_above_ma60 * 0.3 + slope_score * 0.2
+            price_above_ma20 * TMSV_TREND_MA20_WEIGHT +
+            price_above_ma60 * TMSV_TREND_MA60_WEIGHT +
+            slope_score * TMSV_TREND_SLOPE_WEIGHT
         ) * 100
 
         rsi_score = ((df["rsi"] - 50) * 3.33).clip(0, 100).fillna(50)
         macd_change = df["macd_hist"].diff() / (df["macd_hist"].shift(1).abs() + 0.001)
         macd_score = (macd_change * 100).clip(0, 100).fillna(50)
-        mom_score = rsi_score * 0.6 + macd_score * 0.4
+        mom_score = rsi_score * TMSV_MOM_RSI_WEIGHT + macd_score * TMSV_MOM_MACD_WEIGHT
 
         vol_ratio = df["volume"] / df["vol_ma"].replace(0, np.nan)
         vol_ratio_score = ((vol_ratio - 0.8) / 1.2 * 100).clip(0, 100).fillna(50)
         price_up = df["close"] > df["close"].shift(1)
         vol_up = df["volume"] > df["vol_ma"]
         consistency = np.where(price_up == vol_up, 100, 0)
-        vol_score = vol_ratio_score * 0.7 + consistency * 0.3
+        vol_score = vol_ratio_score * TMSV_VOL_RATIO_WEIGHT + consistency * TMSV_VOL_CONSIST_WEIGHT
 
         atr_pct = df["atr"] / df["close"].replace(0, np.nan)
         vol_factor = np.select(
-            [atr_pct < 0.01, atr_pct > 0.03],
-            [1.5, 0.6],
-            default=1.2 - (atr_pct - 0.01) / 0.02 * 0.6,
+            [atr_pct < TMSV_VOL_LOW_THRESH, atr_pct > TMSV_VOL_HIGH_THRESH],
+            [TMSV_VOL_LOW_FACTOR, TMSV_VOL_HIGH_FACTOR],
+            default=TMSV_VOL_MID_FACTOR_BASE - (atr_pct - TMSV_VOL_LOW_THRESH) / 0.02 * TMSV_VOL_MID_FACTOR_SLOPE,
         )
         vol_factor = np.nan_to_num(vol_factor, nan=1.0)
 
@@ -435,18 +505,18 @@ class DataAnalyzer:
             return max(0.0, min(1.0, x))
 
         # 价格偏离均线比例（用于 sigmoid 输入）
-        price_deviation = (price - ma20) / (ma20 * 0.1) if ma20 > 0 else 0
+        price_deviation = (price - ma20) / (ma20 * PRICE_DEVIATION_MA_MULT) if ma20 > 0 else 0
         buy_factors = {
             "price_above_ma20": self._sigmoid_normalize(price_deviation, center=0.2) if price > ma20 else 0,
-            "volume_above_ma5": self._sigmoid_normalize(volume / vol_ma - 1.0, center=0.1, steepness=3.0) if volume > vol_ma else 0,
+            "volume_above_ma5": self._sigmoid_normalize(volume / vol_ma - 1.0, center=VOLUME_RATIO_CENTER, steepness=SIGMOID_STEEPNESS_VOLUME) if volume > vol_ma else 0,
             "macd_golden_cross": macd_golden,
             "kdj_golden_cross": kdj_golden,
             "bollinger_break_up": self._sigmoid_normalize((price - boll_up) / boll_up, center=0.01) if price > boll_up else 0,
-            "williams_oversold": self._sigmoid_normalize((-80 - williams_r) / 20, center=0.5) if williams_r < -80 else 0,
+            "williams_oversold": self._sigmoid_normalize((WILLIAMS_OVERSOLD_THRESH - williams_r) / 20, center=0.5) if williams_r < WILLIAMS_OVERSOLD_THRESH else 0,
             "market_above_ma20": 1 if market_above_ma20 else 0,
             "market_above_ma60": 1 if market_above_ma60 else 0,
             "market_amount_above_ma20": 1 if market_amount_above_ma20 else 0,
-            "outperform_market": self._sigmoid_normalize((ret_etf_5d - ret_market_5d) / 0.05, center=0.2) if ret_etf_5d > ret_market_5d else 0,
+            "outperform_market": self._sigmoid_normalize((ret_etf_5d - ret_market_5d) / OUTPERFORM_MARKET_DIV, center=0.2) if ret_etf_5d > ret_market_5d else 0,
             "weekly_above_ma20": 1 if weekly_above else 0,
             "tmsv_score": tmsv_strength,
         }
@@ -454,9 +524,9 @@ class DataAnalyzer:
         sell_factors = {
             "price_below_ma20": self._sigmoid_normalize(-price_deviation, center=0.2) if price < ma20 else 0,
             "bollinger_break_down": self._sigmoid_normalize((boll_low - price) / boll_low, center=0.01) if price < boll_low else 0,
-            "williams_overbought": self._sigmoid_normalize((20 - williams_r) / 20, center=0.5) if williams_r < 20 else 0,
-            "rsi_overbought": self._sigmoid_normalize((rsi - 70) / 30, center=0.2) if rsi > 70 else 0,
-            "underperform_market": self._sigmoid_normalize((ret_market_5d - ret_etf_5d) / 0.05, center=0.2) if ret_etf_5d < ret_market_5d else 0,
+            "williams_overbought": self._sigmoid_normalize((WILLIAMS_OVERBOUGHT_THRESH - williams_r) / 20, center=0.5) if williams_r < WILLIAMS_OVERBOUGHT_THRESH else 0,
+            "rsi_overbought": self._sigmoid_normalize((rsi - RSI_OVERBOUGHT_THRESH) / RSI_OVERBOUGHT_DIV, center=0.2) if rsi > RSI_OVERBOUGHT_THRESH else 0,
+            "underperform_market": self._sigmoid_normalize((ret_market_5d - ret_etf_5d) / OUTPERFORM_MARKET_DIV, center=0.2) if ret_etf_5d < ret_market_5d else 0,
             "stop_loss_ma_break": cap((ma20 - price) / (ma20 * HARD_STOP_MA_BREAK_PCT)) if price < ma20 else 0,
             "trailing_stop_clear": (
                 cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
@@ -469,21 +539,21 @@ class DataAnalyzer:
                 else 0
             ),
             "profit_target_hit": (
-                cap((price - recent_low) / recent_low / PROFIT_TARGET)
-                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET
+                cap((price - recent_low) / recent_low / PROFIT_TARGET_DIV)
+                if recent_low > 0 and (price - recent_low) / recent_low >= PROFIT_TARGET_DIV
                 else 0
             ),
             "weekly_below_ma20": 1 if weekly_below else 0,
             "downside_momentum": cap(downside_momentum),
-            "max_drawdown_stop": cap(max_drawdown_pct / HARD_STOP_DRAWDOWN) if max_drawdown_pct >= HARD_STOP_DRAWDOWN else 0,
+            "max_drawdown_stop": cap(max_drawdown_pct / MAX_DRAWDOWN_STOP_DIV) if max_drawdown_pct >= MAX_DRAWDOWN_STOP_DIV else 0,
         }
         return buy_factors, sell_factors
 
     # ---------- 信号确认（含动态确认天数）----------
     def get_dynamic_history_days(self, volatility: float) -> int:
-        if volatility > 0.04:
+        if volatility > VOL_HIGH_CONFIRM:
             return 5
-        if volatility > 0.025:
+        if volatility > VOL_MID_CONFIRM:
             return 8
         if volatility > 0.015:
             return 12
@@ -493,9 +563,9 @@ class DataAnalyzer:
         """根据波动率动态调整确认天数：高波动缩短，低波动延长"""
         if atr_pct is None:
             return base_days
-        if atr_pct > 0.04:
+        if atr_pct > VOL_HIGH_CONFIRM:
             return max(2, base_days - 1)
-        elif atr_pct > 0.025:
+        elif atr_pct > VOL_MID_CONFIRM:
             return base_days
         else:
             return min(5, base_days + 1)
@@ -554,13 +624,13 @@ class DataAnalyzer:
             return "PREP_SELL"
 
         # 高波动特殊处理
-        if atr_pct and atr_pct > 0.04:
+        if atr_pct and atr_pct > VOL_HIGH_CONFIRM:
             if score > buy_thresh + 0.15 and slope > 0.1 and up_days >= 4:
                 return "BUY"
             if score < sell_thresh - 0.05 and slope < -0.08 and down_days >= 3:
                 return "SELL"
             return "HOLD"
-        if atr_pct and atr_pct > 0.03:
+        if atr_pct and atr_pct > VOL_MID_CONFIRM:
             if score > buy_thresh + 0.1 and slope > 0.08 and up_days >= 3:
                 return "BUY"
             if score < sell_thresh - 0.1 and slope < -0.08 and down_days >= 3:
@@ -568,12 +638,7 @@ class DataAnalyzer:
         return "HOLD"
 
     def get_action_level(self, score: float) -> str:
-        thresholds = [0.8, 0.7, 0.6, 0.4, 0.2, 0.0, -0.2, -0.4, -0.6, -0.8]
-        levels = [
-            "极度看好", "强烈买入", "买入", "谨慎买入", "偏多持有",
-            "中性偏多", "中性偏空", "偏空持有", "谨慎卖出", "卖出"
-        ]
-        for th, level in zip(thresholds, levels):
+        for th, level in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
             if score >= th:
                 return level
         return "强烈卖出"
@@ -593,28 +658,28 @@ class DataAnalyzer:
         slope = np.polyfit(range(len(recent)), recent, 1)[0] if len(recent) >= 3 else 0
         short_recent = [s["score"] for s in score_history[-min(3, len(score_history)):]]
         short_slope = np.polyfit(range(len(short_recent)), short_recent, 1)[0] if len(short_recent) >= 2 else 0
-        adjust_mult = 1.2 / market_factor
+        adjust_mult = ADJUST_MULT_BASE / market_factor
         adjusted = params.copy()
 
         if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
-            delta = min(0.03, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
+            delta = min(ADJUST_BUY_DELTA_MAX, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
             adjusted["BUY_THRESHOLD"] = max(0.35, params["BUY_THRESHOLD"] - delta)
         elif slope < -0.02 and avg < -0.15 and short_slope < -0.03:
-            delta = min(0.03, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
+            delta = min(ADJUST_BUY_DELTA_MAX, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
             adjusted["BUY_THRESHOLD"] = min(0.65, params["BUY_THRESHOLD"] + delta)
         else:
             adjusted["BUY_THRESHOLD"] = params["BUY_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.1
 
         if slope < -0.02 and avg < -0.15 and short_slope < -0.03:
-            delta = min(0.03, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
+            delta = min(ADJUST_SELL_DELTA_MAX, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
             adjusted["SELL_THRESHOLD"] = max(-0.45, params["SELL_THRESHOLD"] - delta)
         elif slope > 0.02 and avg > 0.15 and short_slope > 0.03:
-            delta = min(0.03, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
+            delta = min(ADJUST_SELL_DELTA_MAX, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
             adjusted["SELL_THRESHOLD"] = min(-0.15, params["SELL_THRESHOLD"] + delta)
         else:
             adjusted["SELL_THRESHOLD"] = params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
 
-        if volatility > 0.04:
+        if volatility > VOL_HIGH_CONFIRM:
             adjusted["CONFIRM_DAYS"] = min(5, int(round(params["CONFIRM_DAYS"] * 1.1)))
         elif volatility < 0.01:
             adjusted["CONFIRM_DAYS"] = max(2, int(round(params["CONFIRM_DAYS"] * 0.9)))
@@ -702,7 +767,7 @@ class DataAnalyzer:
             ctx.raw_score = ctx.buy_score - ctx.sell_score
 
         # 非线性评分变换
-        transformed_raw = self._nonlinear_score_transform(ctx.raw_score)
+        transformed_raw = self._nonlinear_score_transform(ctx.raw_score, market_status)
         env_factor = self._clip_env_factor(ctx.market["market_factor"], sentiment)
         ctx.final_score = max(-1.0, min(1.0, transformed_raw * env_factor))
         return ctx
