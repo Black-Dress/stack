@@ -923,10 +923,11 @@ class DataAnalyzer:
         lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
         lines.append("")
         lines.append("【评分合成】")
+        scale = self._get_nonlinear_scale(market["macro_status"])  # 获取实际使用的缩放因子
         lines.append(f"原始净分 = 买入总分 - 卖出总分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}")
-        lines.append("非线性变换: tanh(2.5 * raw) → 最终评分 = 变换后 × 环境因子")
+        lines.append(f"非线性变换: tanh({scale} * raw) → 最终评分 = 变换后 × 环境因子")
         env_factor = self._clip_env_factor(market["market_factor"], market["sentiment_factor"])
-        lines.append(f"        = tanh(2.5×{ctx.raw_score:.3f}) × {env_factor:.2f} = {final:.3f}")
+        lines.append(f"        = tanh({scale} × {ctx.raw_score:.3f}) × {env_factor:.2f} = {final:.3f}")
         lines.append(f"操作等级：{action_level}")
 
         if ai_client:
