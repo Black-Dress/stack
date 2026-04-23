@@ -47,26 +47,42 @@ class DataFetcher:
         self._raw_sentiment_history: List[float] = []  # 原始值（用于动态阈值）
         self._last_trade_date: Optional[str] = None
         self._breadth_cache: Optional[Tuple[float, float, float]] = None  # (timestamp, up, down)
-        self._load_histories_from_cache()
+        self._rebuild_histories_from_cache()
 
-    # ---------- 历史序列与缓存整合 ----------
-    def _load_histories_from_cache(self):
-        """从 CACHE_FILE 中加载滚动历史列表（用于动态阈值）"""
+    # ---------- 从所有历史日期键重建滚动列表 ----------
+    def _rebuild_histories_from_cache(self):
+        """遍历缓存中所有 env_YYYY-MM-DD 键，按日期排序提取最近60条情绪值"""
         cache = self._load_cache()
-        if "_sentiment_history" in cache:
-            self._sentiment_history = cache["_sentiment_history"]
-        if "_raw_sentiment_history" in cache:
-            self._raw_sentiment_history = cache["_raw_sentiment_history"]
+        env_keys = [k for k in cache.keys() if k.startswith("env_")]
+        if not env_keys:
+            return
 
-    def _save_histories_to_cache(self):
-        """将滚动历史列表写入缓存文件（同时保留每日归档记录）"""
-        cache = self._load_cache()
-        cache["_sentiment_history"] = self._sentiment_history[-60:]
-        cache["_raw_sentiment_history"] = self._raw_sentiment_history[-60:]
-        self._save_cache(cache)
+        # 提取日期并排序
+        dated_entries = []
+        for key in env_keys:
+            try:
+                date_str = key[4:]  # 去掉 "env_"
+                datetime.datetime.strptime(date_str, "%Y-%m-%d")  # 校验格式
+                dated_entries.append((date_str, cache[key]))
+            except ValueError:
+                continue
 
+        dated_entries.sort(key=lambda x: x[0])  # 按日期升序
+
+        # 提取情绪值（取最近60条）
+        for _, entry in dated_entries[-60:]:
+            if isinstance(entry, dict):
+                if "sentiment" in entry:
+                    self._sentiment_history.append(entry["sentiment"])
+                if "sentiment_raw" in entry:
+                    self._raw_sentiment_history.append(entry["sentiment_raw"])
+
+        # 确保长度不超过60
+        self._sentiment_history = self._sentiment_history[-60:]
+        self._raw_sentiment_history = self._raw_sentiment_history[-60:]
+
+    # ---------- 登录/登出 ----------
     def login(self) -> bool:
-        """登录 baostock"""
         with open(os.devnull, "w") as f, redirect_stdout(f):
             lg = bs.login()
         if lg.error_code != "0":
@@ -76,7 +92,6 @@ class DataFetcher:
         return True
 
     def logout(self):
-        """登出 baostock"""
         if self._logged_in:
             with open(os.devnull, "w") as f, redirect_stdout(f):
                 bs.logout()
@@ -97,48 +112,33 @@ class DataFetcher:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
-    # ---------- 缓存管理（权重/市场/情绪统一缓存）----------
-    def _get_daily_cache_key(self) -> str:
-        """返回当日日期字符串，作为环境缓存的键"""
-        return datetime.date.today().strftime("%Y-%m-%d")
-
+    # ---------- 缓存管理 ----------
     def _load_cache(self) -> Dict:
-        """加载整个缓存文件"""
         if not os.path.exists(CACHE_FILE):
             return {}
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-            # 清理过期的权重缓存条目（保留日期键和特殊键）
-            now = time.time()
-            keys_to_delete = []
-            for k, v in cache.items():
-                if isinstance(v, dict) and "timestamp" in v:
-                    # 只清理有过期时间戳且超过10分钟的条目（排除滚动历史等特殊键）
-                    if k not in ["_sentiment_history", "_raw_sentiment_history"]:
-                        if v["timestamp"] < now - 600:
-                            keys_to_delete.append(k)
-            for k in keys_to_delete:
-                del cache[k]
-            return cache
+                return json.load(f)
         except:
             return {}
 
     def _save_cache(self, cache: Dict):
-        """保存整个缓存文件"""
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存缓存失败: {e}")
 
+    def _get_env_key(self, date_str: str = None) -> str:
+        """返回环境缓存键，格式 env_YYYY-MM-DD"""
+        if date_str is None:
+            date_str = datetime.date.today().strftime("%Y-%m-%d")
+        return f"env_{date_str}"
+
     def get_cached_environment(self) -> Optional[Dict]:
-        """
-        获取当日缓存的环境数据（市场状态、因子、权重、情绪）。
-        若缓存存在且未超过10分钟，则返回数据；否则返回 None。
-        """
+        """获取当日环境缓存，若存在且未超过10分钟则返回，否则返回None"""
         cache = self._load_cache()
-        key = self._get_daily_cache_key()
+        key = self._get_env_key()
         if key not in cache:
             return None
         data = cache[key]
@@ -151,29 +151,33 @@ class DataFetcher:
 
     def save_environment_cache(self, market_state: str, market_factor: float,
                                buy_weights: Dict, sell_weights: Dict,
-                               sentiment: float):
-        """
-        保存当日环境数据到缓存（覆盖）。
-        同时更新滚动情绪历史列表。
-        """
+                               sentiment: float, sentiment_raw: float):
+        """保存当日环境数据到缓存，同时更新滚动历史列表"""
         cache = self._load_cache()
-        key = self._get_daily_cache_key()
+        key = self._get_env_key()
+
         cache[key] = {
             "market_state": market_state,
             "market_factor": market_factor,
             "buy_weights": buy_weights,
             "sell_weights": sell_weights,
             "sentiment": sentiment,
+            "sentiment_raw": sentiment_raw,
             "timestamp": time.time()
         }
-        # 持久化滚动历史
-        cache["_sentiment_history"] = self._sentiment_history[-60:]
-        cache["_raw_sentiment_history"] = self._raw_sentiment_history[-60:]
+
+        # 更新内存中的滚动历史（追加新值）
+        self._sentiment_history.append(sentiment)
+        self._raw_sentiment_history.append(sentiment_raw)
+        if len(self._sentiment_history) > 60:
+            self._sentiment_history.pop(0)
+        if len(self._raw_sentiment_history) > 60:
+            self._raw_sentiment_history.pop(0)
+
         self._save_cache(cache)
 
-    # ---------- 市场状态缓存辅助（兼容旧逻辑）----------
+    # ---------- 市场状态（兼容旧逻辑）----------
     def _get_market_cache_key(self, market_df: pd.DataFrame) -> str:
-        """根据市场数据生成缓存键（保留用于兼容）"""
         recent = market_df.tail(20)
         data_str = recent[["close", "volume", "macd_dif", "rsi"]].round(4).to_json()
         key = hashlib.md5(data_str.encode()).hexdigest()
@@ -183,19 +187,17 @@ class DataFetcher:
     def get_market_state(
         self, market_df: pd.DataFrame, ai_client: Optional["AIClient"] = None
     ) -> Tuple[str, float]:
-        """获取市场状态（优先使用当日统一缓存）"""
-        # 优先尝试统一缓存
-        cached_env = self.get_cached_environment()
-        if cached_env:
-            return cached_env["market_state"], cached_env["market_factor"]
+        # 优先从统一缓存读取
+        cached = self.get_cached_environment()
+        if cached:
+            return cached["market_state"], cached["market_factor"]
 
-        # 若无统一缓存，尝试旧的独立缓存
+        # 尝试旧缓存
         cache = self._load_cache()
         cache_key = self._get_market_cache_key(market_df)
         if cache_key in cache and isinstance(cache[cache_key], dict):
             entry = cache[cache_key]
             if "state" in entry and "factor" in entry:
-                logger.info(f"使用旧缓存市场状态: {entry['state']}, 因子: {entry['factor']}")
                 return entry["state"], entry["factor"]
 
         # 计算新状态
@@ -212,16 +214,14 @@ class DataFetcher:
             else:
                 state, factor = "震荡偏弱", 1.0
 
-        # 保存到旧缓存（可选）
         cache[cache_key] = {"state": state, "factor": factor, "timestamp": time.time()}
         self._save_cache(cache)
-        logger.info(f"市场状态已缓存: {state}, 因子: {factor}")
         return state, factor
 
+    # ---------- 日线数据 ----------
     def get_daily_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
-        """获取日线数据（原始数据，未计算指标）"""
         rs = bs.query_history_k_data_plus(
             code,
             "date,code,open,high,low,close,volume,amount",
@@ -246,7 +246,6 @@ class DataFetcher:
     def get_weekly_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
-        """获取周线数据（基于日线重采样）"""
         from .config import WEEKLY_MA
         df = self.get_daily_data(code, start_date, end_date)
         if df is None:
@@ -256,7 +255,6 @@ class DataFetcher:
         return weekly
 
     def get_realtime_price(self, code: str) -> Optional[float]:
-        """获取新浪实时价格"""
         try:
             for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
                 url = f"http://{domain}/list={code.replace('.','')}"
@@ -272,14 +270,13 @@ class DataFetcher:
             return None
 
     def load_positions(self) -> pd.DataFrame:
-        """加载持仓列表（CSV）"""
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
             df = pd.read_csv(POSITION_FILE, encoding="gbk")
         return df[["代码", "名称"]]
 
-    # ---------- 辅助：获取最近交易日 ----------
+    # ---------- 辅助：最近交易日 ----------
     def _get_latest_trade_date(self) -> str:
         if self._last_trade_date:
             return self._last_trade_date
@@ -299,19 +296,18 @@ class DataFetcher:
         if not AKSHARE_AVAILABLE:
             return raw
 
-        # 1. 北向资金（过滤NaN）
+        # 1. 北向资金
         try:
             df_north = ak.stock_hsgt_hist_em(symbol="北向资金")
             if not df_north.empty:
                 north_series = df_north["当日成交净买额"].dropna()
                 if len(north_series) > 0:
-                    latest = north_series.iloc[-1]
-                    raw["north_net"] = float(latest)
+                    raw["north_net"] = float(north_series.iloc[-1])
                     raw["north_net_20d_avg"] = float(north_series.tail(20).mean())
         except Exception as e:
             logger.debug(f"北向资金获取失败: {e}")
 
-        # 2. 主力资金（候选列名）
+        # 2. 主力资金
         try:
             df_fund = ak.stock_market_fund_flow()
             if not df_fund.empty:
@@ -435,10 +431,13 @@ class DataFetcher:
         score = 1.0 + change_pct / 5 * 0.3
         return max(0.6, min(1.4, score))
 
-    # ---------- 情绪因子合成（含动态权重）----------
-    def compute_sentiment_factor(self, indicators: dict) -> float:
+    # ---------- 情绪因子合成 ----------
+    def compute_sentiment_factor(self, indicators: dict) -> Tuple[float, float]:
+        """
+        计算综合情绪因子，返回 (平滑后情绪, 原始情绪)
+        """
         if not indicators:
-            return 1.0
+            return 1.0, 1.0
 
         weights = {
             "north": 0.25,
@@ -449,7 +448,6 @@ class DataFetcher:
             "margin": 0.10,
         }
 
-        # 动态调整：高波动时降低资金流权重，提高波动率权重
         hv = indicators.get("hv", 20.0)
         if hv > 30:
             weights["north"] *= 0.7
@@ -464,59 +462,39 @@ class DataFetcher:
         else:
             scores["north"] = 1.0
 
-        if "main_net_pct" in indicators:
-            scores["main"] = self._normalize_main(indicators["main_net_pct"])
-        else:
-            scores["main"] = 1.0
-
-        if "zt_dt_ratio" in indicators:
-            scores["zt_dt"] = self._normalize_zt_dt(indicators["zt_dt_ratio"])
-        else:
-            scores["zt_dt"] = 1.0
-
-        if "up_down_ratio" in indicators:
-            scores["up_down"] = self._normalize_up_down(indicators["up_down_ratio"])
-        else:
-            scores["up_down"] = 1.0
+        scores["main"] = self._normalize_main(indicators.get("main_net_pct", 0.0)) if "main_net_pct" in indicators else 1.0
+        scores["zt_dt"] = self._normalize_zt_dt(indicators.get("zt_dt_ratio", 1.0)) if "zt_dt_ratio" in indicators else 1.0
+        scores["up_down"] = self._normalize_up_down(indicators.get("up_down_ratio", 1.0)) if "up_down_ratio" in indicators else 1.0
 
         if "hv" in indicators and "hv_ma20" in indicators:
             scores["volatility"] = self._normalize_volatility(indicators["hv"], indicators["hv_ma20"])
         else:
             scores["volatility"] = 1.0
 
-        if "margin_change" in indicators:
-            scores["margin"] = self._normalize_margin(indicators["margin_change"])
-        else:
-            scores["margin"] = 1.0
+        scores["margin"] = self._normalize_margin(indicators.get("margin_change", 0.0)) if "margin_change" in indicators else 1.0
 
         raw_sentiment = sum(scores[k] * weights[k] for k in weights)
         raw_sentiment = max(0.6, min(1.5, raw_sentiment))
 
-        self._raw_sentiment_history.append(raw_sentiment)
-        if len(self._raw_sentiment_history) > 60:
-            self._raw_sentiment_history.pop(0)
-
-        # EWMA 平滑 (alpha=0.3)
+        # EWMA 平滑
         if self._sentiment_history:
             smoothed = 0.7 * self._sentiment_history[-1] + 0.3 * raw_sentiment
         else:
             smoothed = raw_sentiment
-        self._sentiment_history.append(smoothed)
-        if len(self._sentiment_history) > 60:
-            self._sentiment_history.pop(0)
 
-        self._save_histories_to_cache()
-        return self._sentiment_adjustment(smoothed)
+        # 非线性调整
+        def adjust(s):
+            x = s - 1.0
+            if x >= 0:
+                adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
+            else:
+                adj = 1.0 + 1.2 * math.tanh(3.0 * x)
+            return max(0.6, min(1.5, adj))
 
-    def _sentiment_adjustment(self, sentiment: float) -> float:
-        x = sentiment - 1.0
-        if x >= 0:
-            adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
-        else:
-            adj = 1.0 + 1.2 * math.tanh(3.0 * x)
-        return max(0.6, min(1.5, adj))
+        smoothed = adjust(smoothed)
+        return smoothed, raw_sentiment
 
-    # ---------- 风险提示（动态阈值）----------
+    # ---------- 风险提示 ----------
     def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
         if len(self._raw_sentiment_history) >= 20:
             recent = sorted(self._raw_sentiment_history[-20:])
@@ -536,10 +514,10 @@ class DataFetcher:
         else:
             return f"💡💡 市场情绪极度恐慌(<{panic:.2f})，左侧布局良机"
 
-    # ---------- 后备情绪因子（连续映射+平滑）----------
-    def get_sentiment_factor_simple(self, macro_df: pd.DataFrame) -> float:
+    # ---------- 后备情绪因子 ----------
+    def get_sentiment_factor_simple(self, macro_df: pd.DataFrame) -> Tuple[float, float]:
         if len(macro_df) < RSI_PERIOD + 1:
-            return 1.0
+            return 1.0, 1.0
         delta = macro_df["close"].diff()
         gain = delta.where(delta > 0, 0).rolling(RSI_PERIOD).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(RSI_PERIOD).mean()
@@ -548,17 +526,17 @@ class DataFetcher:
         raw_sentiment = 1.0 + (50 - latest_rsi) / 100
         raw_sentiment = max(0.6, min(1.4, raw_sentiment))
 
-        self._raw_sentiment_history.append(raw_sentiment)
-        if len(self._raw_sentiment_history) > 60:
-            self._raw_sentiment_history.pop(0)
-
         if self._sentiment_history:
             smoothed = 0.7 * self._sentiment_history[-1] + 0.3 * raw_sentiment
         else:
             smoothed = raw_sentiment
-        self._sentiment_history.append(smoothed)
-        if len(self._sentiment_history) > 60:
-            self._sentiment_history.pop(0)
 
-        self._save_histories_to_cache()
-        return self._sentiment_adjustment(smoothed)
+        def adjust(s):
+            x = s - 1.0
+            if x >= 0:
+                adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
+            else:
+                adj = 1.0 + 1.2 * math.tanh(3.0 * x)
+            return max(0.6, min(1.5, adj))
+
+        return adjust(smoothed), raw_sentiment
