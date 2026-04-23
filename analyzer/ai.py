@@ -22,7 +22,8 @@ class AIClient:
         self.client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
     # ---------- 权重生成 ----------
-    def _build_weights_prompt(self, macro_status: str, sentiment_factor: float,
+    @staticmethod
+    def _build_weights_prompt(macro_status: str, sentiment_factor: float,
                               market_above_ma20: bool, market_above_ma60: bool,
                               market_amount_above_ma20: bool, volatility: float) -> str:
         buy_keys = list(DEFAULT_BUY_WEIGHTS.keys())

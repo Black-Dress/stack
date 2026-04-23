@@ -12,6 +12,7 @@ import pandas as pd
 import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
 
 from .config import (
     ETF_MA,
@@ -37,8 +38,77 @@ from .fetcher import DataFetcher, AKSHARE_AVAILABLE
 logger = logging.getLogger(__name__)
 
 
+# ========================== 数据类定义 ==========================
+@dataclass
+class ETFContext:
+    """ETF 分析上下文数据容器，用于传递和存储分析过程中的所有状态"""
+
+    code: str
+    name: str
+    real_price: Optional[float]
+    hist_df: Optional[pd.DataFrame]
+    weekly_df: Optional[pd.DataFrame]
+    today: datetime.date
+    market: Dict[str, Any]
+    params: Dict[str, Any]
+
+    # 以下字段在分析过程中填充
+    change_pct: float = 0.0
+    atr_pct: float = 0.0
+    tmsv: float = 50.0
+    tmsv_strength: float = 0.5
+    downside_momentum: float = 0.0
+    max_drawdown_pct: float = 0.0
+    weekly_above: bool = False
+    weekly_below: bool = False
+    buy_factors: Dict = field(default_factory=dict)
+    sell_factors: Dict = field(default_factory=dict)
+    buy_score: float = 0.0
+    sell_score: float = 0.0
+    raw_score: float = 0.0
+    final_score: float = 0.0
+    error: Optional[str] = None
+
+
+# ========================== 公共指标计算函数 ==========================
+def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """计算 RSI 指标"""
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    return 100 - 100 / (1 + gain / loss)
+
+
+def calc_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """计算 MACD 指标，返回 (dif, dea, hist)"""
+    exp_fast = series.ewm(span=fast, adjust=False).mean()
+    exp_slow = series.ewm(span=slow, adjust=False).mean()
+    dif = exp_fast - exp_slow
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = dif - dea
+    return dif, dea, hist
+
+
+# ========================== 核心分析类 ==========================
 class DataAnalyzer:
     """负责所有技术指标计算、评分、信号确认、状态管理、缓存等"""
+
+    def __init__(
+        self, buy_weights: Dict = None, sell_weights: Dict = None, params: Dict = None
+    ):
+        self.buy_weights = buy_weights or DEFAULT_BUY_WEIGHTS.copy()
+        self.sell_weights = sell_weights or DEFAULT_SELL_WEIGHTS.copy()
+        self.params = params or DEFAULT_PARAMS.copy()
+        self.market_info = {}  # 在批量分析时通过 set_market_info 设置
+
+    def set_market_info(self, market_info: Dict):
+        """设置市场环境信息"""
+        self.market_info = market_info
+
+    def set_weights(self, buy_w: Dict, sell_w: Dict):
+        """设置当前使用的买卖权重"""
+        self.buy_weights = buy_w
+        self.sell_weights = sell_w
 
     # ---------- 涨跌幅计算 ----------
     def calc_change_pct(
@@ -98,10 +168,7 @@ class DataAnalyzer:
         if need_amount_ma:
             df["amount_ma"] = df["amount"].rolling(window=ETF_VOL_MA).mean()
         # MACD
-        exp1 = df["close"].ewm(span=12, adjust=False).mean()
-        exp2 = df["close"].ewm(span=26, adjust=False).mean()
-        df["macd_dif"] = exp1 - exp2
-        df["macd_dea"] = df["macd_dif"].ewm(span=9, adjust=False).mean()
+        df["macd_dif"], df["macd_dea"], _ = calc_macd(df["close"])
         # KDJ
         low_n = df["low"].rolling(9).min()
         high_n = df["high"].rolling(9).max()
@@ -118,10 +185,7 @@ class DataAnalyzer:
         low_14 = df["low"].rolling(14).min()
         df["williams_r"] = (high_14 - df["close"]) / (high_14 - low_14) * -100
         # RSI
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        df["rsi"] = 100 - 100 / (1 + gain / loss)
+        df["rsi"] = calc_rsi(df["close"], 14)
         # ATR
         df["atr"] = self.calculate_atr(df, ATR_PERIOD)
         # ADX
@@ -161,16 +225,9 @@ class DataAnalyzer:
         if "ma60" not in df.columns:
             df["ma60"] = df["close"].rolling(60).mean()
         if "rsi" not in df.columns:
-            delta = df["close"].diff()
-            gain = delta.where(delta > 0, 0).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            df["rsi"] = 100 - 100 / (1 + gain / loss)
+            df["rsi"] = calc_rsi(df["close"], 14)
         if "macd_hist" not in df.columns:
-            exp12 = df["close"].ewm(span=12, adjust=False).mean()
-            exp26 = df["close"].ewm(span=26, adjust=False).mean()
-            df["macd"] = exp12 - exp26
-            df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-            df["macd_hist"] = df["macd"] - df["macd_signal"]
+            _, _, df["macd_hist"] = calc_macd(df["close"])
         if "atr" not in df.columns:
             df["atr"] = self.calculate_atr(df, 14)
         if "vol_ma" not in df.columns:
@@ -280,7 +337,7 @@ class DataAnalyzer:
     # ---------- 环境因子裁剪 ----------
     @staticmethod
     def _clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
-        """环境因子裁剪，与 analyze_single_etf 保持一致"""
+        """环境因子裁剪，统一逻辑"""
         env_factor = market_factor * sentiment_factor
         return max(0.60, min(1.30, env_factor))
 
@@ -386,14 +443,6 @@ class DataAnalyzer:
             ),
         }
         return buy_factors, sell_factors
-
-    def strength(
-        self, *args, is_buy: bool, buy_weights: Dict, sell_weights: Dict, **kwargs
-    ) -> float:
-        """计算买入或卖出评分"""
-        factors = self._compute_factors(*args, **kwargs)[0 if is_buy else 1]
-        weights = buy_weights if is_buy else sell_weights
-        return sum(weights.get(k, 0) * factors.get(k, 0) for k in factors)
 
     # ---------- 信号确认与参数调整 ----------
     def get_dynamic_history_days(self, volatility: float) -> int:
@@ -552,55 +601,19 @@ class DataAnalyzer:
             )
         return adjusted
 
-    # ---------- 核心分析计算（公共部分）----------
-    def _core_analysis(
-        self,
-        code: str,
-        name: str,
-        real_price: Optional[float],
-        hist_df: Optional[pd.DataFrame],
-        weekly_df: Optional[pd.DataFrame],
-        market: Dict,
-        today: datetime.date,
-        buy_w: Dict,
-        sell_w: Dict,
-        params: Dict,
-    ) -> Dict[str, Any]:
-        """
-        执行 ETF 分析的核心计算，返回一个包含所有中间结果和最终评分的字典。
-        """
-        result = {
-            "code": code,
-            "name": name,
-            "real_price": real_price,
-            "change_pct": 0.0,
-            "error": None,
-            "buy_factors": {},
-            "sell_factors": {},
-            "buy_score": 0.0,
-            "sell_score": 0.0,
-            "raw_score": 0.0,
-            "final_score": 0.0,
-            "tmsv": 50.0,
-            "tmsv_strength": 0.5,
-            "atr_pct": 0.0,
-            "downside_momentum": 0.0,
-            "max_drawdown_pct": 0.0,
-            "weekly_above": False,
-            "weekly_below": False,
-        }
+    # ---------- 核心分析计算（基于上下文对象）----------
+    def _core_analysis(self, ctx: ETFContext) -> ETFContext:
+        """执行 ETF 分析的核心计算，填充 ctx 并返回"""
+        if ctx.real_price is None:
+            ctx.error = "实时价格获取失败"
+            return ctx
+        if ctx.hist_df is None or len(ctx.hist_df) < 20:
+            ctx.error = "历史数据不足"
+            return ctx
 
-        if real_price is None:
-            result["error"] = "实时价格获取失败"
-            return result
-        if hist_df is None or len(hist_df) < 20:
-            result["error"] = "历史数据不足"
-            return result
+        ctx.change_pct = self.calc_change_pct(ctx.real_price, ctx.hist_df, ctx.today)
 
-        # 涨跌幅
-        result["change_pct"] = self.calc_change_pct(real_price, hist_df, today)
-
-        d = hist_df.iloc[-1]
+        d = ctx.hist_df.iloc[-1]
         ma20, vol_ma, volume = d["ma_short"], d["vol_ma"], d["volume"]
         rsi, boll_up, boll_low, williams_r = (
             d["rsi"],
@@ -608,21 +621,25 @@ class DataAnalyzer:
             d["boll_low"],
             d["williams_r"],
         )
-        atr_pct = d["atr"] / real_price if real_price > 0 else 0
-        result["atr_pct"] = atr_pct
+        atr_pct = d["atr"] / ctx.real_price if ctx.real_price > 0 else 0
+        ctx.atr_pct = atr_pct
 
         recent_high = d.get(
-            f"recent_high_{params['RECENT_HIGH_WINDOW']}",
-            hist_df["high"].rolling(params["RECENT_HIGH_WINDOW"]).max().iloc[-1],
+            f"recent_high_{ctx.params['RECENT_HIGH_WINDOW']}",
+            ctx.hist_df["high"]
+            .rolling(ctx.params["RECENT_HIGH_WINDOW"])
+            .max()
+            .iloc[-1],
         )
         recent_low = d.get(
-            f"recent_low_{params['RECENT_LOW_WINDOW']}",
-            hist_df["low"].rolling(params["RECENT_LOW_WINDOW"]).min().iloc[-1],
+            f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
+            ctx.hist_df["low"].rolling(ctx.params["RECENT_LOW_WINDOW"]).min().iloc[-1],
         )
 
         # 金叉判断
-        if len(hist_df) >= 2:
-            prev = hist_df.iloc[-2]
+        macd_golden = kdj_golden = 0
+        if len(ctx.hist_df) >= 2:
+            prev = ctx.hist_df.iloc[-2]
             macd_golden = (
                 1
                 if (
@@ -634,42 +651,40 @@ class DataAnalyzer:
             kdj_golden = (
                 1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
             )
-        else:
-            macd_golden = kdj_golden = 0
 
         ret_etf_5d = (
-            (real_price / hist_df.iloc[-5]["close"] - 1) if len(hist_df) >= 5 else 0
+            (ctx.real_price / ctx.hist_df.iloc[-5]["close"] - 1)
+            if len(ctx.hist_df) >= 5
+            else 0
         )
+
         weekly_above = weekly_below = False
-        if weekly_df is not None and not weekly_df.empty:
-            w = weekly_df.iloc[-1]
+        if ctx.weekly_df is not None and not ctx.weekly_df.empty:
+            w = ctx.weekly_df.iloc[-1]
             if "ma_short" in w.index and not pd.isna(w["ma_short"]):
                 weekly_above = w["close"] > w["ma_short"]
                 weekly_below = w["close"] < w["ma_short"]
-        result["weekly_above"] = weekly_above
-        result["weekly_below"] = weekly_below
+        ctx.weekly_above = weekly_above
+        ctx.weekly_below = weekly_below
 
         # TMSV
         try:
-            tmsv_series = self.compute_tmsv(hist_df)
+            tmsv_series = self.compute_tmsv(ctx.hist_df)
             tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
             tmsv = 50.0 if np.isnan(tmsv) else tmsv
         except Exception:
             tmsv = 50.0
-        tmsv_strength = tmsv / 100.0
-        result["tmsv"] = tmsv
-        result["tmsv_strength"] = tmsv_strength
+        ctx.tmsv = tmsv
+        ctx.tmsv_strength = tmsv / 100.0
 
-        downside_momentum = d.get("downside_momentum_raw", 0.0)
-        result["downside_momentum"] = downside_momentum
-        max_drawdown_pct = (
-            (recent_high - real_price) / recent_high if recent_high > 0 else 0.0
+        ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
+        ctx.max_drawdown_pct = (
+            (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0.0
         )
-        result["max_drawdown_pct"] = max_drawdown_pct
 
-        # 计算因子
-        buy_factors, sell_factors = self._compute_factors(
-            real_price,
+        # 因子计算
+        ctx.buy_factors, ctx.sell_factors = self._compute_factors(
+            ctx.real_price,
             ma20,
             volume,
             vol_ma,
@@ -680,35 +695,33 @@ class DataAnalyzer:
             boll_low,
             williams_r,
             ret_etf_5d,
-            market["ret_market_5d"],
+            ctx.market["ret_market_5d"],
             weekly_above,
             weekly_below,
             recent_high,
             recent_low,
             atr_pct,
-            market["market_above_ma20"],
-            market["market_above_ma60"],
-            market["market_amount_above_ma20"],
-            tmsv_strength,
-            downside_momentum,
-            max_drawdown_pct,
+            ctx.market["market_above_ma20"],
+            ctx.market["market_above_ma60"],
+            ctx.market["market_amount_above_ma20"],
+            ctx.tmsv_strength,
+            ctx.downside_momentum,
+            ctx.max_drawdown_pct,
         )
-        result["buy_factors"] = buy_factors
-        result["sell_factors"] = sell_factors
 
-        buy_score = sum(buy_w.get(k, 0) * buy_factors[k] for k in buy_factors)
-        sell_score = sum(sell_w.get(k, 0) * sell_factors[k] for k in sell_factors)
-        result["buy_score"] = buy_score
-        result["sell_score"] = sell_score
-        raw = buy_score - sell_score
-        result["raw_score"] = raw
+        ctx.buy_score = sum(
+            self.buy_weights.get(k, 0) * ctx.buy_factors[k] for k in ctx.buy_factors
+        )
+        ctx.sell_score = sum(
+            self.sell_weights.get(k, 0) * ctx.sell_factors[k] for k in ctx.sell_factors
+        )
+        ctx.raw_score = ctx.buy_score - ctx.sell_score
 
-        # 环境因子裁剪（统一逻辑）
-        env_factor = self._clip_env_factor(market["market_factor"], market["sentiment_factor"])
-        final = max(-1.0, min(1.0, raw * env_factor))
-        result["final_score"] = final
-
-        return result
+        env_factor = self._clip_env_factor(
+            ctx.market["market_factor"], ctx.market["sentiment_factor"]
+        )
+        ctx.final_score = max(-1.0, min(1.0, ctx.raw_score * env_factor))
+        return ctx
 
     # ---------- 单只 ETF 简要分析 ----------
     def analyze_single_etf(
@@ -721,31 +734,35 @@ class DataAnalyzer:
         market: Dict,
         today: datetime.date,
         state: Dict,
-        buy_w: Dict,
-        sell_w: Dict,
-        params: Dict,
     ) -> Tuple[str, Optional[Dict], Dict, float]:
-        # 使用核心分析获取结果
-        core = self._core_analysis(
-            code, name, real_price, hist_df, weekly_df, market, today,
-            buy_w, sell_w, params
+        # 构建上下文
+        ctx = ETFContext(
+            code,
+            name,
+            real_price,
+            hist_df,
+            weekly_df,
+            today,
+            market,
+            self.params.copy(),
         )
+        ctx = self._core_analysis(ctx)
 
-        if core["error"]:
-            if "实时价格" in core["error"]:
+        if ctx.error:
+            if "实时价格" in ctx.error:
                 out = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
                        f"{pad_display('获取失败', 8)} {pad_display('0.00%', 8, 'right')} "
                        f"{pad_display('0.00', 6, 'right')}  {pad_display('价格缺失', 10)}")
             else:
                 price_str = f"{real_price:.3f}" if real_price else "N/A"
-                change_str = f"{core['change_pct']:+.2f}%"
+                change_str = f"{ctx.change_pct:+.2f}%"
                 out = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
                        f"{pad_display(price_str, 8, 'right')} "
                        f"{pad_display(change_str, 8, 'right')} "
                        f"{pad_display('0.00', 6, 'right')}  {pad_display('数据不足', 10)}")
             return out, None, state, 0.0
 
-        final = core["final_score"]
+        final = ctx.final_score
         today_str = today.strftime("%Y-%m-%d")
         if "score_history" not in state:
             state["score_history"] = []
@@ -761,11 +778,16 @@ class DataAnalyzer:
 
         # 参数动态调整
         if len(state["score_history"]) >= 7:
-            params = self.adjust_params_based_on_history(
-                params, state["score_history"], core["atr_pct"], market["market_factor"]
+            self.params = self.adjust_params_based_on_history(
+                self.params,
+                state["score_history"],
+                ctx.atr_pct,
+                market["market_factor"],
             )
 
-        action = self.get_action(final, state["score_history"], params, core["atr_pct"])
+        action = self.get_action(
+            final, state["score_history"], self.params, ctx.atr_pct
+        )
         action_level = self.get_action_level(final)
 
         risk_warning = ""
@@ -777,18 +799,19 @@ class DataAnalyzer:
                 risk_warning = f"风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
             elif final < -0.5 or final > 0.8:
                 risk_warning = f"风险提示:极端评分{final:.2f}"
-            elif core["atr_pct"] > 0.03:
-                risk_warning = f"风险提示:高波动{core['atr_pct']:.3f}"
+            elif ctx.atr_pct > 0.03:
+                risk_warning = f"风险提示:高波动{ctx.atr_pct:.3f}"
 
         price_str = f"{real_price:.3f}"
-        change_str = f"{core['change_pct']:+.2f}%"
+        change_str = f"{ctx.change_pct:+.2f}%"
         final_str = f"{final:.2f}"
-        output = (f"{pad_display(name, 16)} {pad_display(code, 12)} "
-                  f"{pad_display(price_str, 8, 'right')} "
-                  f"{pad_display(change_str, 8, 'right')} "
-                  f"{pad_display(final_str, 6, 'right')}  "
-                  f"{pad_display(action_level, 10)}")
-        
+        output = (
+            f"{pad_display(name, 16)} {pad_display(code, 12)} "
+            f"{pad_display(price_str, 8, 'right')} "
+            f"{pad_display(change_str, 8, 'right')} "
+            f"{pad_display(final_str, 6, 'right')}  "
+            f"{pad_display(action_level, 10)}"
+        )
         if risk_warning:
             output += f"  {risk_warning}"
         signal = (
@@ -809,21 +832,24 @@ class DataAnalyzer:
         market: Dict,
         today: datetime.date,
         state: Dict,
-        buy_w: Dict,
-        sell_w: Dict,
-        params: Dict,
         ai_client: Optional[AIClient] = None,
     ) -> str:
-        # 使用核心分析获取结果
-        core = self._core_analysis(
-            code, name, real_price, hist_df, weekly_df, market, today,
-            buy_w, sell_w, params
+        ctx = ETFContext(
+            code,
+            name,
+            real_price,
+            hist_df,
+            weekly_df,
+            today,
+            market,
+            self.params.copy(),
         )
+        ctx = self._core_analysis(ctx)
 
-        if core["error"]:
-            return f"【{name} ({code})】{core['error']}，无法分析。"
+        if ctx.error:
+            return f"【{name} ({code})】{ctx.error}，无法分析。"
 
-        final = core["final_score"]
+        final = ctx.final_score
         action_level = self.get_action_level(final)
 
         lines = []
@@ -834,15 +860,15 @@ class DataAnalyzer:
         )
         lines.append("=" * 70)
         lines.append(f"实时价格：{real_price:.3f}")
-        lines.append(f"涨跌幅：{core['change_pct']:+.2f}%")
+        lines.append(f"涨跌幅：{ctx.change_pct:+.2f}%")
         lines.append(
             f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"
         )
         if market.get("sentiment_risk_tip"):
             lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
-        lines.append(f"波动率(ATR%)：{core['atr_pct']*100:.2f}%")
-        lines.append(f"TMSV复合强度：{core['tmsv']:.1f} (强度系数 {core['tmsv_strength']:.3f})")
-        lines.append(f"最大回撤：{core['max_drawdown_pct']*100:.2f}%")
+        lines.append(f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%")
+        lines.append(f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})")
+        lines.append(f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%")
         lines.append("")
 
         col_name, col_strength, col_weight, col_contrib = 25, 8, 8, 8
@@ -860,48 +886,51 @@ class DataAnalyzer:
         lines.append("【买入因子详情】")
         lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
         lines.append("-" * 50)
-        buy_factors = core["buy_factors"]
         buy_contribs = sorted(
             [
-                (k, buy_factors[k], buy_w.get(k, 0), buy_w.get(k, 0) * buy_factors[k])
-                for k in buy_factors
+                (
+                    k,
+                    ctx.buy_factors[k],
+                    self.buy_weights.get(k, 0),
+                    self.buy_weights.get(k, 0) * ctx.buy_factors[k],
+                )
+                for k in ctx.buy_factors
             ],
             key=lambda x: x[3],
             reverse=True,
         )
         for name_f, s, w, contrib in buy_contribs:
             lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["买入总分", "", "", f"{core['buy_score']:.3f}"]))
+        lines.append(row_line(["买入总分", "", "", f"{ctx.buy_score:.3f}"]))
         lines.append("")
         lines.append("【卖出因子详情】")
         lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
         lines.append("-" * 50)
-        sell_factors = core["sell_factors"]
         sell_contribs = sorted(
             [
                 (
                     k,
-                    sell_factors[k],
-                    sell_w.get(k, 0),
-                    sell_w.get(k, 0) * sell_factors[k],
+                    ctx.sell_factors[k],
+                    self.sell_weights.get(k, 0),
+                    self.sell_weights.get(k, 0) * ctx.sell_factors[k],
                 )
-                for k in sell_factors
+                for k in ctx.sell_factors
             ],
             key=lambda x: x[3],
             reverse=True,
         )
         for name_f, s, w, contrib in sell_contribs:
             lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["卖出总分", "", "", f"{core['sell_score']:.3f}"]))
+        lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
         lines.append("")
         lines.append("【评分合成】")
         lines.append(
-            f"原始净分 = 买入总分 - 卖出总分 = {core['buy_score']:.3f} - {core['sell_score']:.3f} = {core['raw_score']:.3f}"
+            f"原始净分 = 买入总分 - 卖出总分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}"
         )
         lines.append("最终评分 = 原始净分 × 市场因子 × 情绪因子 (裁剪至[0.6,1.3])")
         env_factor = self._clip_env_factor(market["market_factor"], market["sentiment_factor"])
         lines.append(
-            f"        = {core['raw_score']:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} → 裁剪后因子={env_factor:.2f} → {final:.3f}"
+            f"        = {ctx.raw_score:.3f} × {market['market_factor']:.2f} × {market['sentiment_factor']:.2f} → 裁剪后因子={env_factor:.2f} → {final:.3f}"
         )
         lines.append(f"操作等级：{action_level}")
 
@@ -916,12 +945,12 @@ class DataAnalyzer:
                 market["macro_status"],
                 market["market_factor"],
                 market["sentiment_factor"],
-                buy_w,
-                sell_w,
-                buy_factors,
-                sell_factors,
-                core["tmsv"],
-                core["atr_pct"],
+                self.buy_weights,
+                self.sell_weights,
+                ctx.buy_factors,
+                ctx.sell_factors,
+                ctx.tmsv,
+                ctx.atr_pct,
             )
             lines.append(ai_comment)
         else:
@@ -1009,6 +1038,9 @@ def run_batch_analysis(
         ),
     }
 
+    # 设置 analyzer 的市场信息
+    analyzer.set_market_info(market_info)
+
     params = DEFAULT_PARAMS.copy()
     if volatility > 0.04:
         params.update(
@@ -1037,6 +1069,7 @@ def run_batch_analysis(
                 "QUICK_BUY_THRESHOLD": 0.5,
             }
         )
+    analyzer.params = params
 
     state = fetcher.load_state()
     buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
@@ -1118,6 +1151,8 @@ def run_batch_analysis(
             cache[cache_key] = {"buy": buy_w, "sell": sell_w}
             fetcher._save_cache(cache)
 
+    analyzer.set_weights(buy_w, sell_w)
+
     if target_code:
         target = etf_list[etf_list["代码"] == target_code]
         if target.empty:
@@ -1146,9 +1181,6 @@ def run_batch_analysis(
             market_info,
             today,
             etf_state,
-            buy_w,
-            sell_w,
-            params,
             ai_client,
         )
         print(report)
@@ -1199,9 +1231,6 @@ def run_batch_analysis(
                         market_info,
                         today,
                         s,
-                        buy_w,
-                        sell_w,
-                        params,
                     )
                 )
             for f in futures:

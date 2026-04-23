@@ -19,6 +19,7 @@ logging.basicConfig(
 for lib in ["openai", "httpx", "httpcore", "urllib3"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+
 def main():
     parser = argparse.ArgumentParser(description="ETF智能分析系统")
     parser.add_argument(
@@ -30,6 +31,7 @@ def main():
 
     api_key = os.getenv("DEEPSEEK_API_KEY")
     run_batch_analysis(api_key=api_key, target_code=args.code)
+
 
 if __name__ == "__main__":
     main()
