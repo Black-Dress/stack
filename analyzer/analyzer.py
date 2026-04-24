@@ -60,10 +60,12 @@ class ETFContext:
     raw_score: float = 0.0  # 原始净分（买入-卖出）
     final_score: float = 0.0  # 最终评分（非线性变换+环境因子）
     error: Optional[str] = None  # 错误信息
-    # 新增止盈相关字段
+    # 止盈相关字段
     recent_low_price: float = 0.0
     profit_pct_from_low: float = 0.0
     should_take_profit: bool = False
+    effective_profit_threshold: float = TAKE_PROFIT_WARNING_THRESHOLD  # 动态阈值
+    rsi: float = 50.0  # 当期 RSI
 
 
 # ========================== 公共指标计算 ==========================
@@ -455,7 +457,6 @@ class DataAnalyzer:
         self, df: pd.DataFrame, factor_names: List[str]
     ) -> pd.DataFrame:
         """计算因子之间的相关性矩阵（当前简化为单位矩阵）"""
-        # 实际项目中可根据历史因子序列计算
         return pd.DataFrame(
             np.eye(len(factor_names)), index=factor_names, columns=factor_names
         )
@@ -512,7 +513,6 @@ class DataAnalyzer:
         )
         buy_w = self.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
         sell_w = self.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
-            
         return buy_w, sell_w
 
     # ---------- 因子计算 ----------
@@ -552,7 +552,6 @@ class DataAnalyzer:
                 1 if (d["kdj_k"] > d["kdj_d"] and prev["kdj_k"] <= prev["kdj_d"]) else 0
             )
 
-        # 近期收益比较
         ret_etf_5d = (
             (price / ctx.hist_df.iloc[-5]["close"] - 1) if len(ctx.hist_df) >= 5 else 0
         )
@@ -677,7 +676,6 @@ class DataAnalyzer:
                 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
                 else 0
             ),
-
             "weekly_below_ma20": 1 if weekly_below else 0,
             "downside_momentum": cap(downside_momentum),
             "max_drawdown_stop": (
@@ -859,7 +857,6 @@ class DataAnalyzer:
         adjust_mult = ADJUST_MULT_BASE / market_factor
         adjusted = params.copy()
 
-        # 根据趋势调整买入阈值
         if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
             delta = (
                 min(ADJUST_BUY_DELTA_MAX, abs(avg - params["BUY_THRESHOLD"]) * 0.15)
@@ -877,7 +874,6 @@ class DataAnalyzer:
                 params["BUY_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.1
             )
 
-        # 调整卖出阈值
         if slope < -0.02 and avg < -0.15 and short_slope < -0.03:
             delta = (
                 min(ADJUST_SELL_DELTA_MAX, abs(avg - params["SELL_THRESHOLD"]) * 0.15)
@@ -895,7 +891,6 @@ class DataAnalyzer:
                 params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
             )
 
-        # 根据波动率调整确认天数
         if volatility > VOL_HIGH_CONFIRM:
             adjusted["CONFIRM_DAYS"] = min(5, int(round(params["CONFIRM_DAYS"] * 1.1)))
         elif volatility < 0.01:
@@ -908,6 +903,19 @@ class DataAnalyzer:
                 )
             )
         return adjusted
+
+    # ---------- 动态止盈阈值 ----------
+    def _get_effective_take_profit_threshold(self, ctx: ETFContext) -> float:
+        """根据市场环境、波动率等动态调整止盈提示的触发阈值"""
+        base = TAKE_PROFIT_WARNING_THRESHOLD
+        market_status = ctx.market.get("macro_status", "")
+        if "牛" in market_status:
+            base *= 1.10
+        elif "熊" in market_status:
+            base *= 0.90
+        if ctx.atr_pct > 0.03:
+            base *= 0.85
+        return base
 
     # ---------- 核心分析 ----------
     def _core_analysis(self, ctx: ETFContext) -> ETFContext:
@@ -932,7 +940,6 @@ class DataAnalyzer:
         atr_pct = d["atr"] / ctx.real_price if ctx.real_price > 0 else 0
         ctx.atr_pct = atr_pct
 
-        # 周线状态
         weekly_above = weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
@@ -965,19 +972,23 @@ class DataAnalyzer:
             (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0.0
         )
 
-        # 计算近期低点并判断止盈信号
-        recent_low = d.get(f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
-                        ctx.hist_df["low"].rolling(ctx.params["RECENT_LOW_WINDOW"]).min().iloc[-1])
+        # 近期低点及止盈判断（动态阈值）
+        recent_low = d.get(
+            f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
+            ctx.hist_df["low"].rolling(ctx.params["RECENT_LOW_WINDOW"]).min().iloc[-1],
+        )
         ctx.recent_low_price = recent_low
+        ctx.rsi = d["rsi"]
         if recent_low > 0:
             ctx.profit_pct_from_low = (ctx.real_price - recent_low) / recent_low
-            # 使用独立的提示阈值，例如 0.10
-            if ctx.profit_pct_from_low >= TAKE_PROFIT_WARNING_THRESHOLD:   # 新配置项
+            ctx.effective_profit_threshold = self._get_effective_take_profit_threshold(
+                ctx
+            )
+            if ctx.profit_pct_from_low >= ctx.effective_profit_threshold:
                 ctx.should_take_profit = True
 
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
 
-        # 加权计算买入/卖出总分
         ctx.buy_score = sum(
             self.buy_weights.get(k, 0) * ctx.buy_factors[k] for k in ctx.buy_factors
         )
@@ -985,14 +996,12 @@ class DataAnalyzer:
             self.sell_weights.get(k, 0) * ctx.sell_factors[k] for k in ctx.sell_factors
         )
 
-        # 动量因子缺失惩罚
         if (
             ctx.buy_factors.get("macd_golden_cross", 0) == 0
             and ctx.buy_factors.get("kdj_golden_cross", 0) == 0
         ):
             ctx.buy_score *= MOMENTUM_MISSING_PENALTY
 
-        # 强制止损信号（最大回撤或均线跌破）直接锁定最终评分
         if (
             ctx.sell_factors.get("max_drawdown_stop", 0) > 0
             or ctx.sell_factors.get("stop_loss_ma_break", 0) > 0
@@ -1022,6 +1031,7 @@ class DataAnalyzer:
         market: Dict,
         today: datetime.date,
         state: Dict,
+        ai_client: Optional[AIClient] = None,
     ) -> Tuple[str, Optional[Dict], Dict, float]:
         """
         对单只 ETF 进行简要分析，返回格式化的输出行、交易信号、状态字典及最终评分
@@ -1035,6 +1045,7 @@ class DataAnalyzer:
             market: 市场环境字典
             today: 分析日期
             state: 该 ETF 的状态（含历史评分）
+            ai_client: AI 客户端（用于生成止盈建议，可选）
 
         Returns:
             (输出字符串, 信号字典或None, 更新后的状态, 最终评分)
@@ -1054,24 +1065,23 @@ class DataAnalyzer:
         if ctx.error:
             if "实时价格" in ctx.error:
                 out = (
-                    f"{pad_display(name, 16)} {pad_display(code, 12)} "
+                    f"{pad_display(name, 12)} {pad_display(code, 12)} "
                     f"{pad_display('获取失败', 8)} {pad_display('0.00%', 8, 'right')} "
-                    f"{pad_display('0.00', 6, 'right')}  {pad_display('价格缺失', 10)}"
+                    f"{pad_display('0.00', 6, 'right')}  {pad_display('价格缺失', 16)}"
                 )
             else:
                 price_str = f"{real_price:.3f}" if real_price else "N/A"
                 change_str = f"{ctx.change_pct:+.2f}%"
                 out = (
-                    f"{pad_display(name, 16)} {pad_display(code, 12)} "
+                    f"{pad_display(name, 12)} {pad_display(code, 12)} "
                     f"{pad_display(price_str, 8, 'right')} "
                     f"{pad_display(change_str, 8, 'right')} "
-                    f"{pad_display('0.00', 6, 'right')}  {pad_display('数据不足', 10)}"
+                    f"{pad_display('0.00', 6, 'right')}  {pad_display('数据不足', 16)}"
                 )
             return out, None, state, 0.0
 
         final = ctx.final_score
         today_str = today.strftime("%Y-%m-%d")
-        # 更新评分历史
         if "score_history" not in state:
             state["score_history"] = []
         found = False
@@ -1084,7 +1094,6 @@ class DataAnalyzer:
             state["score_history"].append({"date": today_str, "score": final})
         state["score_history"].sort(key=lambda x: x["date"])
 
-        # 根据历史自适应调整参数
         if len(state["score_history"]) >= 7:
             self.params = self.adjust_params_based_on_history(
                 self.params,
@@ -1097,45 +1106,66 @@ class DataAnalyzer:
             final, state["score_history"], self.params, ctx.atr_pct
         )
         action_level = self.get_action_level(final)
-        display_action = action_level
-        if action == "PREP_BUY":
-            display_action = "预备买入"
-        elif action == "PREP_SELL":
-            display_action = "预备卖出"
+
+        # 格式化操作显示（信号驱动，符号与文字统一）
+        def fmt_signal(action, level):
+            symbols = (
+                {"BUY": "🟢 ", "SELL": "🔴 ", "PREP_BUY": "🟡 ", "PREP_SELL": "🟠 "}
+                if USE_UNICODE
+                else {}
+            )
+            prefix = symbols.get(action, "")
+            # 有明确动作时，直接使用动作对应的文字；无动作时才使用评分等级
+            if action == "BUY":
+                text = "买入"
+            elif action == "SELL":
+                text = "卖出"
+            elif action == "PREP_BUY":
+                text = "预备买入"
+            elif action == "PREP_SELL":
+                text = "预备卖出"
+            else:
+                text = level  # HOLD 情况仍展示评分等级
+            return f"{prefix}{text}"
+
+        display_action = fmt_signal(action, action_level)
 
         # 风险提示
-        risk_warning = ""
+        risk_str = ""
         if len(state["score_history"]) >= RISK_WARNING_DAYS:
             recent_scores = [
                 s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]
             ]
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
-                risk_warning = f"风险提示:连续{RISK_WARNING_DAYS}天评分低于{RISK_WARNING_THRESHOLD}"
+                risk_str = f"连续{RISK_WARNING_DAYS}日低评分"
             elif final < -0.5 or final > 0.8:
-                risk_warning = f"风险提示:极端评分{final:.2f}"
+                risk_str = f"极端评分 {final:.2f}"
             elif ctx.atr_pct > 0.03:
-                risk_warning = f"风险提示:高波动{ctx.atr_pct:.3f}"
+                risk_str = f"高波动 {ctx.atr_pct:.3f}"
+
+        # 止盈提示
+        tp_str = ""
+        if ctx.should_take_profit and action not in ("SELL", "PREP_SELL"):
+            profit_pct = ctx.profit_pct_from_low
+            if USE_UNICODE:
+                icon = "💡" if profit_pct < 0.12 else "🔔"
+            else:
+                icon = "[TP]" if profit_pct < 0.12 else "[TP!!]"
+            tp_str = f"{icon} 止盈 +{profit_pct:.1%}"
 
         price_str = f"{real_price:.3f}"
         change_str = f"{ctx.change_pct:+.2f}%"
         final_str = f"{final:.2f}"
         output = (
-            f"{pad_display(name, 16)} {pad_display(code, 12)} "
+            f"{pad_display(name, 14)} {pad_display(code, 12)} "
             f"{pad_display(price_str, 8, 'right')} "
             f"{pad_display(change_str, 8, 'right')} "
             f"{pad_display(final_str, 6, 'right')}  "
-            f"{pad_display(display_action, 10)}"
+            f"{pad_display(display_action, 16)}"
         )
-        if risk_warning:
-            output += f"  {risk_warning}"
-        if ctx.should_take_profit:
-            profit_pct = ctx.profit_pct_from_low
-            if profit_pct < 0.12:
-                tip = f"💡 止盈预警({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
-            else :
-                tip = f"🔔 止盈提醒({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
-            
-            output += f"  {tip}"
+        tips = "  ".join(filter(None, [risk_str, tp_str]))
+        if tips:
+            output += f"  {tips}"
         signal = (
             {"action": action, "name": name, "code": code, "score": final}
             if action in ("BUY", "SELL")
@@ -1157,13 +1187,13 @@ class DataAnalyzer:
         ai_client: Optional[AIClient] = None,
     ) -> str:
         """
-        生成单个 ETF 的详细分析报告（包含因子明细、AI 点评）
+        生成单个 ETF 的详细分析报告（包含因子明细、AI 点评及止盈建议）
 
         Args:
             code: ETF 代码
             name: ETF 名称
             ... (同上)
-            ai_client: AI 客户端用于生成点评
+            ai_client: AI 客户端用于生成点评和止盈建议
 
         Returns:
             格式化的多行文本报告
@@ -1203,11 +1233,31 @@ class DataAnalyzer:
             f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
             "",
         ]
+
+        # 止盈观察区
         if ctx.should_take_profit:
+            lines.append("【止盈观察】")
             lines.append(
-                f"🔔 止盈提示：当前价格较{ctx.params['RECENT_LOW_WINDOW']}日内最低点 "
-                f"{ctx.recent_low_price:.3f} 上涨 {ctx.profit_pct_from_low:.1%}，已达到10%止盈线。"
+                f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 已涨 {ctx.profit_pct_from_low:.1%}"
             )
+            if ai_client:
+                try:
+                    advice = ai_client.take_profit_advice(
+                        code,
+                        name,
+                        ctx.profit_pct_from_low,
+                        ctx.recent_low_price,
+                        real_price,
+                        ctx.tmsv,
+                        ctx.rsi,
+                        ctx.atr_pct,
+                        market["macro_status"],
+                        market.get("sentiment_factor", 1.0),
+                    )
+                    if advice:
+                        lines.append(f"  AI建议：{advice}")
+                except:
+                    pass
             lines.append("")
 
         col_name, col_strength, col_weight, col_contrib = 25, 8, 8, 8
@@ -1274,9 +1324,8 @@ class DataAnalyzer:
         )
         lines += [
             "【评分合成】",
-            f"原始净分 = 买入总分 - 卖出总分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
-            f"非线性变换: tanh({scale} * raw) → 最终评分 = 变换后 × 环境因子",
-            f"        = tanh({scale} × {ctx.raw_score:.3f}) × {env_factor:.2f} = {final:.3f}",
+            f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
+            f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
             f"操作等级：{action_level}",
         ]
 
@@ -1472,7 +1521,6 @@ def run_batch_analysis(
     analyzer.set_market_info(market_info)
     analyzer.set_weights(buy_w, sell_w)
 
-    # 根据波动率初始化参数
     params = DEFAULT_PARAMS.copy()
     if volatility > 0.04:
         params.update(
@@ -1506,7 +1554,6 @@ def run_batch_analysis(
     state = fetcher.load_state()
     ai_client = AIClient(api_key) if api_key else None
 
-    # 单只详细分析模式
     if target_code:
         target = etf_list[etf_list["代码"] == target_code]
         if target.empty:
@@ -1533,7 +1580,6 @@ def run_batch_analysis(
         fetcher.logout()
         return
 
-    # 批量分析模式
     print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ETF 分析报告")
     print(f"市场状态: {market_state}, 市场因子: {market_factor:.2f}")
     if risk_tip:
@@ -1542,14 +1588,15 @@ def run_batch_analysis(
         print(f"情绪因子: {sentiment:.3f}")
 
     print(
-        pad_display("名称", 16),
+        pad_display("名称", 14),
         pad_display("代码", 12),
         pad_display("价格", 8, "right"),
-        pad_display("涨跌幅", 8, "right"),
+        pad_display("涨跌", 8, "right"),
         pad_display("评分", 6, "right"),
-        "  " + pad_display("操作", 10),
+        " " + pad_display("操作", 16),
+        " 信号/提示",
     )
-    print("-" * 80)
+    print("-" * 95)
 
     output_lines, results = [], []
     with ThreadPoolExecutor(max_workers=5) as ex:
@@ -1571,6 +1618,7 @@ def run_batch_analysis(
                     market_info,
                     today,
                     s,
+                    ai_client,  # 传入 AI 客户端
                 )
             )
         for f in futures:

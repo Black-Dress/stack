@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-AI 服务模块：调用 DeepSeek API 生成权重、市场状态分析、ETF 评论。
+AI 服务模块：调用 DeepSeek API 生成权重、市场状态分析、ETF 评论及止盈建议。
 """
 import json
 import re
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class AIClient:
-    """封装 DeepSeek API 调用，负责权重生成、市场状态分析及 ETF 评论生成。"""
+    """封装 DeepSeek API 调用，负责权重生成、市场状态分析、ETF 评论及止盈建议生成。"""
     def __init__(self, api_key: str):
         """
         初始化 AI 客户端
@@ -59,7 +59,8 @@ class AIClient:
 - 波动率(ATR/收盘价)：{volatility:.3f}
 
 买入因子说明：tmsv_score 是复合指标(0-100)，强度为 tmsv/100。
-卖出因子新增：downside_momentum（下跌动量）、max_drawdown_stop（最大回撤止损，通常权重应较低，仅在触发时有效）。
+卖出因子说明：downside_momentum（下跌动量）、max_drawdown_stop（最大回撤止损，通常权重应较低）。
+注意：策略已去除固定止盈因子，卖出权重应聚焦于风险控制和趋势反转。
 
 特别提示：以下指标存在较高相关性，请避免同时给予高权重以防止信号放大失真：
 1. 威廉指标、RSI、KDJ 均为超买超卖类指标，震荡市可侧重一个，趋势市建议全部降权。
@@ -72,7 +73,7 @@ class AIClient:
 3. 价格站上均线(price_above_ma20)和成交量(volume_above_ma5)是趋势确认的核心，合计权重不应低于 0.30。
 4. 卖出因子中，止损类(stop_loss, trailing_stop)在震荡市应保持中等权重(0.05~0.15)，超买类(williams, rsi)在当前市场可适当提高至 0.12~0.18。
 5. 权重分布应体现分散化原则，单个因子权重上限为 0.40（熊市止损除外）。
-6. 新因子 downside_momentum 在下跌趋势明显时赋予较高权重（0.10~0.20），max_drawdown_stop 作为强制止损信号，平时权重可接近0。
+6. 新因子 downside_momentum 在下跌趋势明显时赋予较高权重（0.10~0.20），max_drawdown_stop 平时权重可接近0。
 
 请输出买入权重和卖出权重，JSON格式：{{"buy":{{...}},"sell":{{...}}}}，每个部分总和为1。禁止添加未列出的键。严格JSON，无解释。"""
 
@@ -241,3 +242,55 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
         except Exception as e:
             logger.error(f"AI评论生成失败: {e}")
             return "（AI 评论生成失败）"
+
+    # ---------- 止盈建议 ----------
+    def take_profit_advice(
+        self,
+        code: str,
+        name: str,
+        profit_pct: float,
+        recent_low: float,
+        current_price: float,
+        tmsv: float,
+        rsi: float,
+        atr_pct: float,
+        market_state: str,
+        sentiment_factor: float,
+    ) -> str:
+        """
+        生成 ETF 的止盈策略建议
+
+        Args:
+            profit_pct: 距离近期低点涨幅
+            recent_low: 近期最低价
+            current_price: 当前价格
+            tmsv: TMSV 复合强度
+            rsi: RSI 值
+            atr_pct: ATR 波动率
+            market_state: 市场状态
+            sentiment_factor: 情绪因子
+
+        Returns:
+            50~80字的止盈建议文本，失败返回空字符串
+        """
+        prompt = f"""
+你是一名量化交易策略师。某ETF当前距近期低点已上涨{profit_pct:.1%}，请给出50~80字的止盈操作建议。
+基本信息：
+- ETF：{name} ({code})
+- 近期低点：{recent_low:.3f}，现价：{current_price:.3f}
+- TMSV强度：{tmsv:.1f}，RSI：{rsi:.1f}，ATR波动率：{atr_pct*100:.2f}%
+- 市场状态：{market_state}，情绪因子：{sentiment_factor:.2f}
+请从技术角度建议：1) 是否应分批止盈；2) 建议止盈比例；3) 移动止盈价位参考。简洁专业，不重复数据。
+"""
+        try:
+            resp = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120,
+                temperature=0.3,
+                timeout=10,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"AI止盈建议生成失败: {e}")
+            return ""

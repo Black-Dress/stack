@@ -25,7 +25,7 @@ RSI_PERIOD = 14  # RSI 周期
 ATR_PERIOD = 14  # ATR 周期
 ATR_STOP_MULT = 2.0  # 移动止损倍数
 ATR_TRAILING_MULT = 1.0  # 移动止盈倍数
-PROFIT_TARGET = 0.15  # 止盈目标比例
+PROFIT_TARGET = 0.15  # 止盈目标比例（已不再参与评分，仅作参考）
 WEEKLY_MA = 20  # 周线短期均线
 RISK_WARNING_DAYS = 3  # 连续风险提示天数阈值
 RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
@@ -56,7 +56,7 @@ DEFAULT_SELL_WEIGHTS = {
     "trailing_stop_half": 0.50,
     "weekly_below_ma20": 0.20,
     "downside_momentum": 0.15,
-    "max_drawdown_stop": 0.00,
+    "max_drawdown_stop": 0.02,  # 赋予极小权重，触发时可以微弱影响评分
 }
 DEFAULT_PARAMS = {
     "CONFIRM_DAYS": 3,  # 信号确认所需连续天数
@@ -66,6 +66,9 @@ DEFAULT_PARAMS = {
     "RECENT_HIGH_WINDOW": 10,  # 近期高点计算窗口
     "RECENT_LOW_WINDOW": 14,  # 近期低点计算窗口
 }
+
+# ---------------------------- 最终输出是否使用 Unicode 符号 ----------------------------
+USE_UNICODE = True  # 若终端不支持可改为 False
 
 # ---------------------------- 技术指标参数 ----------------------------
 MACD_FAST = 12  # MACD 快线周期
@@ -111,8 +114,8 @@ WILLIAMS_OVERBOUGHT_THRESH = -20  # 威廉超买阈值
 WILLIAMS_OVERSOLD_THRESH = -80  # 威廉超卖阈值
 RSI_OVERBOUGHT_THRESH = 70  # RSI 超买阈值
 RSI_OVERBOUGHT_DIV = 30  # RSI 超买归一化除数
-TAKE_PROFIT_WARNING_THRESHOLD = 0.10   # 止盈提示启动阈值
-PROFIT_TARGET_DIV = PROFIT_TARGET  # 止盈目标除数（引用前面）
+TAKE_PROFIT_WARNING_THRESHOLD = 0.10   # 止盈提示基础阈值
+PROFIT_TARGET_DIV = PROFIT_TARGET  # 止盈目标除数（引用前面，仅保留兼容）
 MAX_DRAWDOWN_STOP_DIV = 0.08  # 最大回撤止损触发除数
 WILLIAMS_NORMALIZE_DIV = 20  # 威廉指标归一化除数
 
