@@ -1132,10 +1132,9 @@ class DataAnalyzer:
             profit_pct = ctx.profit_pct_from_low
             if profit_pct < 0.12:
                 tip = f"💡 止盈预警({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
-            elif profit_pct < 0.15:
+            else :
                 tip = f"🔔 止盈提醒({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
-            else:
-                tip = f"🔔🔔 强烈止盈({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
+            
             output += f"  {tip}"
         signal = (
             {"action": action, "name": name, "code": code, "score": final}
