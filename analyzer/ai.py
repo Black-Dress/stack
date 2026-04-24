@@ -17,7 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 class AIClient:
+    """封装 DeepSeek API 调用，负责权重生成、市场状态分析及 ETF 评论生成。"""
     def __init__(self, api_key: str):
+        """
+        初始化 AI 客户端
+
+        Args:
+            api_key: DeepSeek API 密钥
+        """
         self.api_key = api_key
         self.client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
@@ -26,6 +33,20 @@ class AIClient:
     def _build_weights_prompt(macro_status: str, sentiment_factor: float,
                               market_above_ma20: bool, market_above_ma60: bool,
                               market_amount_above_ma20: bool, volatility: float) -> str:
+        """
+        构建权重生成提示词
+
+        Args:
+            macro_status: 宏观状态描述（如牛市、熊市）
+            sentiment_factor: 市场情绪因子
+            market_above_ma20: 大盘是否在20日均线上方
+            market_above_ma60: 大盘是否在60日均线上方
+            market_amount_above_ma20: 成交额是否在20日均额上方
+            volatility: 波动率（ATR/收盘价）
+
+        Returns:
+            生成包含所有约束的提示词字符串
+        """
         buy_keys = list(DEFAULT_BUY_WEIGHTS.keys())
         sell_keys = list(DEFAULT_SELL_WEIGHTS.keys())
         return f"""
@@ -58,7 +79,20 @@ class AIClient:
     def generate_weights(self, macro_status: str, sentiment_factor: float,
                          market_above_ma20: bool, market_above_ma60: bool,
                          market_amount_above_ma20: bool, volatility: float) -> Tuple[Dict, Dict]:
-        """调用 AI 生成原始权重（未混合、未惩罚）"""
+        """
+        调用 AI 生成原始权重（未混合、未惩罚）
+
+        Args:
+            macro_status: 市场状态标签
+            sentiment_factor: 情绪因子
+            market_above_ma20: 大盘站上20日均线
+            market_above_ma60: 大盘站上60日均线
+            market_amount_above_ma20: 成交额超20日均额
+            volatility: 波动率
+
+        Returns:
+            (买入权重字典, 卖出权重字典) 失败时返回默认权重
+        """
         prompt = self._build_weights_prompt(
             macro_status, sentiment_factor, market_above_ma20,
             market_above_ma60, market_amount_above_ma20, volatility
@@ -76,12 +110,14 @@ class AIClient:
                     timeout=15,
                 )
                 content = resp.choices[0].message.content
+                # 提取 JSON 部分
                 json_match = re.search(r"\{.*\}", content, re.DOTALL)
                 if not json_match:
                     raise ValueError("未找到JSON")
                 data = json.loads(json_match.group())
                 if "buy" not in data or "sell" not in data:
                     raise ValueError("缺少buy/sell字段")
+                # 验证并归一化权重
                 ai_buy = validate_and_filter_weights(
                     data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
                 )
@@ -93,14 +129,23 @@ class AIClient:
             except Exception as e:
                 logger.warning(f"AI权重生成失败(尝试{attempt+1}/3): {e}")
                 import time
-                time.sleep(2 ** attempt)
+                time.sleep(2 ** attempt)  # 指数退避
         logger.warning("AI权重生成失败，使用默认权重")
         return DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
 
     # ---------- 市场状态分析 ----------
     def refine_market_state(self, market_df: pd.DataFrame) -> Tuple[str, float]:
-        """使用 AI 分析市场状态，返回 (状态标签, 市场因子)"""
+        """
+        使用 AI 分析市场状态，返回（状态标签, 市场因子）
+
+        Args:
+            market_df: 包含技术指标的日线数据（含近日20日数据）
+
+        Returns:
+            (市场状态描述字符串, 市场因子系数[0.6,1.4])
+        """
         recent = market_df.tail(20)
+        # 计算近期统计特征
         close_pct = recent["close"].pct_change().mean()
         vol_pct = recent["volume"].pct_change().mean()
         volatility = (recent["close"].pct_change().std()) * 100
@@ -130,6 +175,7 @@ class AIClient:
             return state, factor
         except Exception as e:
             logger.error(f"市场状态AI分析失败: {e}")
+            # 回退规则：按均线简单判断
             if above_ma20 and above_ma60:
                 return "正常牛市", 1.2
             if not above_ma20 and not above_ma60:
@@ -141,7 +187,27 @@ class AIClient:
                        action_level: str, market_state: str, market_factor: float,
                        sentiment_factor: float, buy_weights: Dict, sell_weights: Dict,
                        buy_factors: Dict, sell_factors: Dict, tmsv: float, atr_pct: float) -> str:
-        """生成 ETF 的 AI 点评"""
+        """
+        生成 ETF 的 AI 点评
+
+        Args:
+            code: ETF代码
+            name: ETF名称
+            final_score: 最终综合评分
+            action_level: 操作等级文本
+            market_state: 市场状态
+            market_factor: 市场因子
+            sentiment_factor: 情绪因子
+            buy_weights: 当前买入权重
+            sell_weights: 当前卖出权重
+            buy_factors: 买入因子强度字典
+            sell_factors: 卖出因子强度字典
+            tmsv: TMSV复合强度值
+            atr_pct: ATR波动率百分比
+
+        Returns:
+            80~120字的点评文本
+        """
         prompt = f"""
 你是一名资深 ETF 量化分析师。请根据以下数据，对该 ETF 给出 80~120 字的专业点评。
 

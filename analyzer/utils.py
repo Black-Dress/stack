@@ -12,10 +12,22 @@ logger = logging.getLogger(__name__)
 
 
 def get_display_width(text):
+    """计算字符串在等宽字体下的显示宽度（中文占2，英文占1）"""
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(text))
 
 
 def pad_display(text, width, align="left"):
+    """
+    将字符串补足到指定的显示宽度
+
+    Args:
+        text: 原始字符串
+        width: 目标显示宽度
+        align: 对齐方式（left/right/center）
+
+    Returns:
+        补足空格后的字符串
+    """
     text = str(text)
     cur = get_display_width(text)
     if cur >= width:
@@ -30,6 +42,16 @@ def pad_display(text, width, align="left"):
 
 
 def discretize(value: float, bins: List[float]) -> int:
+    """
+    根据给定的区间边界将值离散化为索引
+
+    Args:
+        value: 待离散化的值
+        bins: 区间边界（递增）
+
+    Returns:
+        所属区间的索引
+    """
     for i, thresh in enumerate(bins):
         if value < thresh:
             return i
@@ -37,6 +59,17 @@ def discretize(value: float, bins: List[float]) -> int:
 
 
 def validate_and_filter_weights(weights: dict, expected_keys: List[str], name: str):
+    """
+    验证并归一化权重字典：仅保留期望的键，补全缺失的键，归一化到总和为1
+
+    Args:
+        weights: 输入的权重字典
+        expected_keys: 允许的因子名列表
+        name: 用于日志的权重名称
+
+    Returns:
+        归一化后的权重字典，若输入无效则返回 None
+    """
     if not isinstance(weights, dict):
         return None
     filtered = {k: max(0.0, min(1.0, weights.get(k, 0.0))) for k in expected_keys}
@@ -66,7 +99,15 @@ def nonlinear_score_transform(
 
 
 def apply_sentiment_adjustment(sentiment: float) -> float:
-    """情绪因子非线性调整，增强极端区域区分度"""
+    """
+    情绪因子非线性调整，增强极端区域区分度
+
+    Args:
+        sentiment: 原始情绪值（1.0为中性）
+
+    Returns:
+        调整后的情绪值
+    """
     x = sentiment - 1.0
     if x >= 0:
         adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
@@ -77,7 +118,14 @@ def apply_sentiment_adjustment(sentiment: float) -> float:
 
 def clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
     """
-    环境因子非线性映射：将产品映射到 [0.6, 1.3] 区间，中性值1.0附近保持灵敏度。
+    环境因子非线性映射：将市场因子与情绪因子的乘积压缩到 [0.6, 1.3] 区间
+
+    Args:
+        market_factor: 市场因子
+        sentiment_factor: 情绪因子
+
+    Returns:
+        映射后的环境因子
     """
     raw = market_factor * sentiment_factor
     center = 1.0
@@ -90,6 +138,16 @@ def clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
 
 # ---------------------------- 邮件发送 ----------------------------
 def send_email(subject: str, body: str) -> bool:
+    """
+    使用 SMTP 发送邮件通知
+
+    Args:
+        subject: 邮件主题
+        body: 邮件正文
+
+    Returns:
+        是否发送成功
+    """
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart

@@ -56,6 +56,7 @@ class DataFetcher:
 
     # ---------- 从缓存中恢复滚动历史（优化：只读取日期列表中的最近60个键）----------
     def _rebuild_histories_from_cache(self):
+        """启动时从缓存文件恢复情绪历史"""
         cache = self._load_cache()
         date_list = cache.get("_env_date_list", [])
         if not date_list:
@@ -78,6 +79,7 @@ class DataFetcher:
 
     # ---------- 登录/登出 ----------
     def login(self) -> bool:
+        """登录 baostock"""
         with open(os.devnull, "w") as f, redirect_stdout(f):
             lg = bs.login()
         if lg.error_code != "0":
@@ -87,6 +89,7 @@ class DataFetcher:
         return True
 
     def logout(self):
+        """登出 baostock"""
         if self._logged_in:
             with open(os.devnull, "w") as f, redirect_stdout(f):
                 bs.logout()
@@ -94,6 +97,7 @@ class DataFetcher:
 
     # ---------- 状态管理 ----------
     def load_state(self) -> Dict:
+        """从文件加载 ETF 状态字典"""
         if not os.path.exists(STATE_FILE):
             return {}
         try:
@@ -104,11 +108,13 @@ class DataFetcher:
             return {}
 
     def save_state(self, state: Dict):
+        """保存 ETF 状态到文件"""
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     # ---------- 缓存管理 ----------
     def _load_cache(self) -> Dict:
+        """加载缓存文件"""
         if not os.path.exists(CACHE_FILE):
             return {}
         try:
@@ -118,6 +124,7 @@ class DataFetcher:
             return {}
 
     def _save_cache(self, cache: Dict):
+        """保存缓存文件"""
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -125,11 +132,18 @@ class DataFetcher:
             logger.error(f"保存缓存失败: {e}")
 
     def _get_env_key(self, date_str: str = None) -> str:
+        """生成环境缓存的键（按日期）"""
         if date_str is None:
             date_str = datetime.date.today().strftime("%Y-%m-%d")
         return f"env_{date_str}"
 
     def get_cached_environment(self) -> Optional[Dict]:
+        """
+        获取当天的环境缓存（若存在且未过期）
+
+        Returns:
+            缓存的环境字典或 None
+        """
         cache = self._load_cache()
         key = self._get_env_key()
         if key not in cache:
@@ -145,6 +159,17 @@ class DataFetcher:
     def save_environment_cache(self, market_state: str, market_factor: float,
                                buy_weights: Dict, sell_weights: Dict,
                                sentiment: float, sentiment_raw: float):
+        """
+        保存当天的市场环境、权重和情绪到缓存，并更新情绪历史
+
+        Args:
+            market_state: 市场状态文本
+            market_factor: 市场因子
+            buy_weights: 买入权重
+            sell_weights: 卖出权重
+            sentiment: 平滑后的情绪因子
+            sentiment_raw: 原始情绪因子
+        """
         cache = self._load_cache()
         key = self._get_env_key()
         today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -166,8 +191,8 @@ class DataFetcher:
         date_list = cache.get("_env_date_list", [])
         if today_str not in date_list:
             date_list.append(today_str)
-        # 只保留最近 MAX_HISTORY_DAYS 个日期（可选，为性能）
-        if len(date_list) > MAX_HISTORY_DAYS * 2:  # 防止无限膨胀
+        # 只保留最近 MAX_HISTORY_DAYS * 2 个日期（防止无限膨胀）
+        if len(date_list) > MAX_HISTORY_DAYS * 2:
             date_list = date_list[-MAX_HISTORY_DAYS * 2:]
         cache["_env_date_list"] = date_list
 
@@ -183,6 +208,7 @@ class DataFetcher:
 
     # ---------- 市场状态（兼容旧逻辑）----------
     def _get_market_cache_key(self, market_df: pd.DataFrame) -> str:
+        """根据最新的 20 根 K 线生成市场状态缓存键"""
         recent = market_df.tail(20)
         data_str = recent[["close", "volume", "macd_dif", "rsi"]].round(4).to_json()
         key = hashlib.md5(data_str.encode()).hexdigest()
@@ -192,6 +218,16 @@ class DataFetcher:
     def get_market_state(
         self, market_df: pd.DataFrame, ai_client: Optional["AIClient"] = None
     ) -> Tuple[str, float]:
+        """
+        获取市场状态和因子（优先使用环境缓存，其次调用 AI 或简单规则）
+
+        Args:
+            market_df: 大盘日线数据（含技术指标）
+            ai_client: AI 客户端（可选）
+
+        Returns:
+            (市场状态标签, 市场因子)
+        """
         cached = self.get_cached_environment()
         if cached:
             return cached["market_state"], cached["market_factor"]
@@ -224,6 +260,17 @@ class DataFetcher:
     def get_daily_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
+        """
+        从 baostock 获取日线数据
+
+        Args:
+            code: 股票/指数代码（如 sh.000001）
+            start_date: 开始日期 'YYYY-MM-DD'
+            end_date: 结束日期
+
+        Returns:
+            包含 OHLCV 的 DataFrame，若失败返回 None
+        """
         rs = bs.query_history_k_data_plus(
             code,
             "date,code,open,high,low,close,volume,amount",
@@ -248,15 +295,25 @@ class DataFetcher:
     def get_weekly_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
+        """获取周线数据（基于日线 resample），并计算周线 MA20"""
         from .config import WEEKLY_MA
         df = self.get_daily_data(code, start_date, end_date)
         if df is None:
             return None
-        weekly = df.resample("W-FRI").last()
+        weekly = df.resample("W-FRI").last()  # 取每周五收盘
         weekly["ma_short"] = weekly["close"].rolling(window=WEEKLY_MA).mean()
         return weekly
 
     def get_realtime_price(self, code: str) -> Optional[float]:
+        """
+        从新浪接口获取实时价格
+
+        Args:
+            code: 代码（如 sh.000001）
+
+        Returns:
+            实时价格，失败返回 None
+        """
         try:
             for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
                 url = f"http://{domain}/list={code.replace('.','')}"
@@ -272,6 +329,7 @@ class DataFetcher:
             return None
 
     def load_positions(self) -> pd.DataFrame:
+        """加载持仓列表（CSV 文件，包含“代码”和“名称”列）"""
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
@@ -280,6 +338,7 @@ class DataFetcher:
 
     # ---------- 辅助：最近交易日 ----------
     def _get_latest_trade_date(self) -> str:
+        """获取最近的一个交易日（格式 YYYYMMDD）"""
         if self._last_trade_date:
             return self._last_trade_date
         today = datetime.date.today()
@@ -292,8 +351,20 @@ class DataFetcher:
             self._last_trade_date = today.strftime("%Y%m%d")
         return self._last_trade_date
 
-    # ---------- 情绪指标获取 ----------
+    # ---------- 情绪指标获取 (akshare) ----------
     def fetch_sentiment_indicators(self) -> dict:
+        """
+        通过 akshare 获取情绪相关原始指标：
+        - 北向资金净买额及20日均值
+        - 主力资金净流入占比
+        - 涨跌停家数比
+        - 上涨下跌家数比
+        - 历史波动率（沪深300）
+        - 融资余额变化率
+
+        Returns:
+            包含各项原始数据的字典，获取失败的指标会缺失
+        """
         raw = {}
         if not AKSHARE_AVAILABLE:
             return raw
@@ -393,6 +464,7 @@ class DataFetcher:
     # ---------- 标准化函数 ----------
     @staticmethod
     def _normalize_north(north_net: float, north_avg: float) -> float:
+        """北向资金标准化"""
         if north_avg is None or north_avg == 0:
             return 1.0
         ratio = north_net / (abs(north_avg) + 1e-8)
@@ -402,11 +474,13 @@ class DataFetcher:
 
     @staticmethod
     def _normalize_main(main_pct: float) -> float:
+        """主力资金净占比标准化"""
         score = 1.0 + main_pct / 100 * 8
         return max(0.6, min(1.4, score))
 
     @staticmethod
     def _normalize_zt_dt(ratio: float) -> float:
+        """涨跌停比率标准化"""
         if ratio <= 0.1:
             return 0.6
         score = 1.0 + math.log10(ratio) * 0.3
@@ -414,6 +488,7 @@ class DataFetcher:
 
     @staticmethod
     def _normalize_up_down(ratio: float) -> float:
+        """上涨下跌家数比率标准化"""
         if ratio <= 0.1:
             return 0.6
         score = 1.0 + math.log10(ratio) * 0.3
@@ -421,6 +496,7 @@ class DataFetcher:
 
     @staticmethod
     def _normalize_volatility(hv: float, hv_ma: float) -> float:
+        """历史波动率标准化（高于均值则情绪中性偏负面）"""
         if hv_ma is None or hv_ma == 0:
             return 1.0
         ratio = hv / hv_ma
@@ -429,12 +505,22 @@ class DataFetcher:
 
     @staticmethod
     def _normalize_margin(change_pct: float) -> float:
+        """融资余额变化率标准化"""
         change_pct = max(-10.0, min(10.0, change_pct))
         score = 1.0 + change_pct / 5 * 0.3
         return max(0.6, min(1.4, score))
 
     # ---------- 情绪因子合成 ----------
     def compute_sentiment_factor(self, indicators: dict) -> Tuple[float, float]:
+        """
+        综合各情绪指标，输出平滑后的情绪因子 (sentiment) 与原始值
+
+        Args:
+            indicators: fetch_sentiment_indicators 返回的原始数据
+
+        Returns:
+            (平滑情绪因子, 原始情绪因子)
+        """
         if not indicators:
             return 1.0, 1.0
 
@@ -447,6 +533,7 @@ class DataFetcher:
             "margin": 0.10,
         }
 
+        # 高波动时调整权重
         hv = indicators.get("hv", 20.0)
         if hv > 30:
             weights["north"] *= 0.7
@@ -475,6 +562,7 @@ class DataFetcher:
         raw_sentiment = sum(scores[k] * weights[k] for k in weights)
         raw_sentiment = max(0.6, min(1.5, raw_sentiment))
 
+        # 指数加权平滑
         if self._sentiment_history:
             smoothed = 0.7 * self._sentiment_history[-1] + 0.3 * raw_sentiment
         else:
@@ -486,6 +574,16 @@ class DataFetcher:
 
     # ---------- 风险提示 ----------
     def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
+        """
+        根据情绪因子和近期历史给出风险提示文本
+
+        Args:
+            sentiment_factor: 当前平滑情绪因子
+
+        Returns:
+            风险提示字符串
+        """
+        # 动态过热/恐慌阈值（基于近期20日百分位）
         if len(self._raw_sentiment_history) >= 20:
             recent = sorted(self._raw_sentiment_history[-20:])
             overheat = recent[int(len(recent) * 0.8)]
@@ -506,6 +604,15 @@ class DataFetcher:
 
     # ---------- 后备情绪因子 ----------
     def get_sentiment_factor_simple(self, macro_df: pd.DataFrame) -> Tuple[float, float]:
+        """
+        当 akshare 不可用时，基于大盘 RSI 计算简化的情绪因子
+
+        Args:
+            macro_df: 大盘日线数据
+
+        Returns:
+            (平滑情绪因子, 原始情绪因子)
+        """
         if len(macro_df) < RSI_PERIOD + 1:
             return 1.0, 1.0
         delta = macro_df["close"].diff()
