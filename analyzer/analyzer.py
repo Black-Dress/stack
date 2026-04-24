@@ -691,7 +691,7 @@ class DataAnalyzer:
             ),
         }
         return buy_factors, sell_factors
-    
+
     # ---------- 信号确认 ----------
     def get_dynamic_history_days(self, volatility: float) -> int:
         """根据波动率动态调整用于判断趋势的评分历史窗口天数"""
@@ -946,7 +946,7 @@ class DataAnalyzer:
         atr_pct = d["atr"] / ctx.real_price if ctx.real_price > 0 else 0
         ctx.atr_pct = atr_pct
         ctx.rsi = d["rsi"]
-        
+
         weekly_above = weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
@@ -1117,23 +1117,17 @@ class DataAnalyzer:
         # 格式化操作显示（信号驱动，符号与文字统一）
         def fmt_signal(action, level):
             symbols = (
-                {"BUY": "🟢 ", "SELL": "🔴 ", "PREP_BUY": "🟡 ", "PREP_SELL": "🟠 "}
+                {
+                    "BUY": "🟢 ",
+                    "SELL": "🔴 ",
+                    "PREP_BUY": "🟡 ",
+                    "PREP_SELL": "🟠 ",
+                }
                 if USE_UNICODE
                 else {}
             )
             prefix = symbols.get(action, "")
-            # 有明确动作时，直接使用动作对应的文字；无动作时才使用评分等级
-            if action == "BUY":
-                text = "买入"
-            elif action == "SELL":
-                text = "卖出"
-            elif action == "PREP_BUY":
-                text = "预备买入"
-            elif action == "PREP_SELL":
-                text = "预备卖出"
-            else:
-                text = level  # HOLD 情况仍展示评分等级
-            return f"{prefix}{text}"
+            return f"{prefix}{level}"
 
         display_action = fmt_signal(action, action_level)
 
