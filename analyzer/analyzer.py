@@ -86,6 +86,14 @@ class ETFContext:
     effective_profit_threshold: float = TAKE_PROFIT_WARNING_THRESHOLD
     rsi: float = 50.0
 
+    recent_high_price: float = 0.0                # 近期高点（用于移动止盈计算）
+    trailing_profit_level: Optional[str] = None   # 'clear', 'half', 或 None
+    trailing_profit_detail: str = ""              # 止盈提示文本（预留）
+
+    # 新增：低点涨幅止盈提示级别
+    profit_level: Optional[str] = None            # 'clear', 'half', 'watch', None
+    take_profit_summary: str = ""                 # 综合提示文本
+
 
 # ========================== 公共指标计算 ==========================
 def calc_rsi(series: pd.Series, period: int = RSI_WINDOW) -> pd.Series:
@@ -365,13 +373,13 @@ class DataAnalyzer:
             "rsi_overbought":        factor_sell_rsi_overbought(rsi),
             "underperform_market":   factor_sell_underperform_market(ret_etf_5d, ret_market_5d),
             "stop_loss_ma_break":    factor_sell_stop_loss_ma_break(price, ma20),
-            "trailing_stop_clear":   factor_sell_trailing_stop_clear(price, recent_high, atr_pct),
-            "trailing_stop_half":    factor_sell_trailing_stop_half(price, recent_high, atr_pct),
+            # 注意：不再包含 trailing_stop_clear 和 trailing_stop_half
             "weekly_below_ma20":     1 if weekly_below else 0,
             "downside_momentum":     factor_sell_downside_momentum(downside_momentum),
             "max_drawdown_stop":     factor_sell_max_drawdown_stop(max_drawdown_pct),
         }
         return buy_factors, sell_factors
+    
 
     # ---------- 信号确认 ----------
     def get_action(self, score, score_history, params, atr_pct=None) -> Tuple[str, str]:
@@ -514,6 +522,7 @@ class DataAnalyzer:
         ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
         recent_high = d.get(f"recent_high_{ctx.params['RECENT_HIGH_WINDOW']}",
                             ctx.hist_df["high"].rolling(ctx.params["RECENT_HIGH_WINDOW"]).max().iloc[-1])
+        ctx.recent_high_price = recent_high
         ctx.max_drawdown_pct = (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0.0
 
         recent_low = d.get(f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
@@ -525,6 +534,12 @@ class DataAnalyzer:
             if ctx.profit_pct_from_low >= ctx.effective_profit_threshold:
                 ctx.should_take_profit = True
 
+        # --- 移动止盈判断（不参与评分）---
+        from .utils import get_trailing_profit_signals
+        ctx.trailing_profit_level = get_trailing_profit_signals(
+            ctx.real_price, recent_high, ctx.atr_pct
+        )
+
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
         ctx.buy_score = weighted_sum(ctx.buy_factors, self.buy_weights)
         ctx.sell_score = weighted_sum(ctx.sell_factors, self.sell_weights)
@@ -535,6 +550,7 @@ class DataAnalyzer:
         if ctx.sell_factors.get("max_drawdown_stop",0) > 0 or ctx.sell_factors.get("stop_loss_ma_break",0) > 0:
             ctx.final_score = -1.0
             ctx.raw_score = ctx.buy_score - ctx.sell_score
+            # 强制卖出逻辑保留，但止盈提示不参与此处分值
             return ctx
 
         sentiment = ctx.market.get("sentiment_factor", 1.0)
@@ -545,7 +561,34 @@ class DataAnalyzer:
         transformed_raw = self._nonlinear_score_transform(ctx.raw_score, market_status)
         env_factor = clip_env_factor(ctx.market["market_factor"], sentiment)
         ctx.final_score = max(-1.0, min(1.0, transformed_raw * env_factor))
+
+        # ---------- 纯提示止盈判断（不修改评分）----------
+        ctx.profit_level = None
+        if ctx.profit_pct_from_low >= ctx.effective_profit_threshold * PROFIT_LOW_CLEAR_MULT:
+            ctx.profit_level = 'clear'
+        elif ctx.profit_pct_from_low >= ctx.effective_profit_threshold * PROFIT_LOW_HALF_MULT:
+            ctx.profit_level = 'half'
+        elif ctx.profit_pct_from_low >= ctx.effective_profit_threshold * PROFIT_LOW_WATCH_MULT:
+            ctx.profit_level = 'watch'
+
+        # 综合提示文本（可选，供详细报告使用）
+        parts = []
+        if ctx.trailing_profit_level == 'clear':
+            parts.append("🔻移动清仓")
+        elif ctx.trailing_profit_level == 'half':
+            parts.append("🔻移动半仓")
+        if ctx.profit_level:
+            pct = ctx.profit_pct_from_low * 100
+            if ctx.profit_level == 'clear':
+                parts.append(f"🚨  低点涨+{pct:.1f}%")
+            elif ctx.profit_level == 'half':
+                parts.append(f"📈  低点涨+{pct:.1f}%")
+            else:
+                parts.append(f"💡  低点涨+{pct:.1f}%")
+        ctx.take_profit_summary = " ".join(parts)
+
         return ctx
+    
 
     # ---------- 简要分析 ----------
     def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
@@ -584,7 +627,7 @@ class DataAnalyzer:
 
         action, action_level = self.get_action(final, state["score_history"], self.params, ctx.atr_pct)
 
-        # 风险提示
+        # 风险提示（保留原逻辑）
         risk_str = ""
         if len(state["score_history"]) >= RISK_WARNING_DAYS:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
@@ -595,28 +638,26 @@ class DataAnalyzer:
             elif ctx.atr_pct > 0.03:
                 risk_str = f"高波动 {ctx.atr_pct:.3f}"
 
-        tp_str = ""
-        if ctx.should_take_profit and action not in ("SELL", "PREP_SELL"):
-            profit_pct = ctx.profit_pct_from_low
-            if USE_UNICODE:
-                icon = "💡" if profit_pct < 0.12 else "🔔"
-            else:
-                icon = "[TP]" if profit_pct < 0.12 else "[TP!!]"
-            tp_str = f"{icon} 止盈提醒 +{profit_pct:.1%}"
+        # 使用统一的格式化函数生成输出行（增加 profit_level 和 profit_pct_from_low）
+        from .utils import format_etf_output_line
+        output = format_etf_output_line(
+            name=name,
+            code=code,
+            price=real_price,
+            change_pct=ctx.change_pct,
+            final_score=final,
+            action_level=action_level,
+            atr_pct=ctx.atr_pct,
+            trailing_profit_level=ctx.trailing_profit_level,
+            recent_high_price=ctx.recent_high_price,
+            risk_str=risk_str,
+            profit_level=ctx.profit_level,
+            profit_pct_from_low=ctx.profit_pct_from_low,
+        )
 
-        price_str = f"{real_price:.3f}"
-        change_str = f"{ctx.change_pct:+.2f}%"
-        final_str = f"{final:.2f}"
-        output = (f"{pad_display(name, 14)} {pad_display(code, 12)} "
-                  f"{pad_display(price_str, 8, 'right')} "
-                  f"{pad_display(change_str, 8, 'right')} "
-                  f"{pad_display(final_str, 6, 'right')}  "
-                  f"{pad_display(action_level, 16)}")
-        tips = "  ".join(filter(None, [risk_str, tp_str]))
-        if tips:
-            output += f"  {tips}"
         signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY", "SELL") else None
-        return output, signal, state, final
+        return output, signal, state, final    
+
 
     # ---------- 详细分析报告 ----------
     def detailed_analysis(self, code, name, real_price, hist_df, weekly_df,
@@ -641,18 +682,21 @@ class DataAnalyzer:
                   f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
                   f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%", ""]
 
-        if ctx.should_take_profit:
-            lines.append("【止盈观察】")
-            lines.append(f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 已涨 {ctx.profit_pct_from_low:.1%}")
-            if ai_client:
-                try:
-                    advice = ai_client.take_profit_advice(
-                        code, name, ctx.profit_pct_from_low,
-                        ctx.recent_low_price, real_price,
-                        ctx.tmsv, ctx.rsi, ctx.atr_pct,
-                        market["macro_status"], market.get("sentiment_factor", 1.0))
-                    if advice: lines.append(f"  AI建议：{advice}")
-                except: pass
+        
+        # 止盈观察区块（展示移动止盈 + 低点涨幅止盈）
+        if ctx.trailing_profit_level or ctx.profit_level:
+            lines.append("【止盈观察 (仅供参考)】")
+            if ctx.trailing_profit_level:
+                recent_high = ctx.recent_high_price
+                from_high_pct = (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
+                lines.append(f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}")
+                level_text = "清仓级" if ctx.trailing_profit_level == 'clear' else "半仓级"
+                lines.append(f"  移动止盈信号：{level_text}")
+            if ctx.profit_level:
+                lines.append(f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}")
+                level_map = {'clear': '清仓级', 'half': '半仓级', 'watch': '关注级'}
+                lines.append(f"  低点涨幅信号：{level_map.get(ctx.profit_level, '')}")
+            lines.append("  *以上提示不构成自动卖出指令，请结合其他因素决策。")
             lines.append("")
 
         col_name, col_strength, col_weight, col_contrib = 25, 8, 8, 8
@@ -696,6 +740,22 @@ class DataAnalyzer:
             lines.append(ai_comment)
         else:
             lines += ["", "【AI 专业点评】未配置 API_KEY，无法生成。"]
+
+        # AI 止盈建议（当存在止盈提示时显示）
+        if ai_client and (ctx.trailing_profit_level or ctx.profit_level):
+            lines += ["", "【AI 止盈建议】"]
+            try:
+                ai_tp_advice = ai_client.take_profit_advice(
+                    code, name, ctx.profit_pct_from_low,
+                    ctx.recent_low_price, real_price,
+                    ctx.tmsv, ctx.rsi, ctx.atr_pct,
+                    market["macro_status"], market["sentiment_factor"]
+                )
+                lines.append(ai_tp_advice)
+            except Exception as e:
+                logger.error(f"AI止盈建议生成失败: {e}")
+                lines.append("（止盈建议生成失败）")
+
         lines.append("=" * 70)
         return "\n".join(lines)
 

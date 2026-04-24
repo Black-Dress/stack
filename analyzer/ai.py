@@ -34,18 +34,7 @@ class AIClient:
                               market_above_ma20: bool, market_above_ma60: bool,
                               market_amount_above_ma20: bool, volatility: float) -> str:
         """
-        构建权重生成提示词
-
-        Args:
-            macro_status: 宏观状态描述（如牛市、熊市）
-            sentiment_factor: 市场情绪因子
-            market_above_ma20: 大盘是否在20日均线上方
-            market_above_ma60: 大盘是否在60日均线上方
-            market_amount_above_ma20: 成交额是否在20日均额上方
-            volatility: 波动率（ATR/收盘价）
-
-        Returns:
-            生成包含所有约束的提示词字符串
+        构建权重生成提示词（已移除 trailing_stop 相关约束）
         """
         buy_keys = list(DEFAULT_BUY_WEIGHTS.keys())
         sell_keys = list(DEFAULT_SELL_WEIGHTS.keys())
@@ -73,11 +62,14 @@ class AIClient:
 1. 任何因子的权重不得低于 0.02（除非该因子在当前市场状态下完全无效）。
 2. tmsv_score 是复合指标，其权重在 [0.25,0.40]。
 3. 价格站上均线(price_above_ma20)和成交量(volume_above_ma5)是趋势确认的核心，合计权重不应低于 0.30。
-4. 卖出因子中，止损类(stop_loss, trailing_stop)在震荡市应保持中等权重(0.05~0.15)，超买类(williams, rsi)在当前市场可适当提高至 0.12~0.18。
+4. 卖出因子中，止损类(stop_loss)在震荡市应保持中等权重(0.05~0.15)，超买类(williams, rsi)在当前市场可适当提高至 0.12~0.18。
 5. 权重分布应体现分散化原则，单个因子权重上限为 0.40（熊市止损除外）。
 6. 新因子 downside_momentum 在下跌趋势明显时赋予较高权重（0.10~0.20），max_drawdown_stop 平时权重可接近0。
 7. 根据市场状态灵活调整 rsi_oversold 权重：恐慌/震荡时增大，强势牛市时减小。
-请输出买入权重和卖出权重，JSON格式：{{"buy":{{...}},"sell":{{...}}}}，每个部分总和为1。禁止添加未列出的键。严格JSON，无解释。"""
+请输出买入权重和卖出权重，JSON格式：{{"buy":{{...}},"sell":{{...}}}}，每个部分总和为1。禁止添加未列出的键。严格JSON，无解释。"""    
+    
+    
+    
     
     def generate_weights(self, macro_status: str, sentiment_factor: float,
                          market_above_ma20: bool, market_above_ma60: bool,

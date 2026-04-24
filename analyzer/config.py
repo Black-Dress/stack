@@ -33,6 +33,12 @@ RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
 # ---------------------------- 最终输出是否使用 Unicode 符号 ----------------------------
 USE_UNICODE = True  # 若终端不支持可改为 False
 
+# ---------------------------- 止盈提示控制 ----------------------------
+TAKE_PROFIT_DISPLAY_LEVELS = True      # 是否在输出行中显示止盈提示
+PROFIT_LOW_WATCH_MULT = 0.7           # 低点涨幅关注级阈值乘数
+PROFIT_LOW_HALF_MULT = 1.0            # 低点涨幅半仓级阈值乘数
+PROFIT_LOW_CLEAR_MULT = 1.3           # 低点涨幅清仓级阈值乘数
+
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
     "price_above_ma20": 0.18,
@@ -49,6 +55,7 @@ DEFAULT_BUY_WEIGHTS = {
     "tmsv_score": 0.18,
     "rsi_oversold": 0.06,
 }
+
 DEFAULT_SELL_WEIGHTS = {
     "price_below_ma20": 0.40,
     "bollinger_break_down": 0.20,
@@ -56,12 +63,11 @@ DEFAULT_SELL_WEIGHTS = {
     "rsi_overbought": 0.15,
     "underperform_market": 0.20,
     "stop_loss_ma_break": 1.00,
-    "trailing_stop_clear": 1.00,
-    "trailing_stop_half": 0.50,
     "weekly_below_ma20": 0.20,
     "downside_momentum": 0.15,
     "max_drawdown_stop": 0.02,
 }
+
 DEFAULT_PARAMS = {
     "CONFIRM_DAYS": 3,
     "BUY_THRESHOLD": 0.5,

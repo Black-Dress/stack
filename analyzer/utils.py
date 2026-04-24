@@ -7,7 +7,7 @@
 import unicodedata
 import logging
 import math
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -271,3 +271,85 @@ def send_email(subject: str, body: str) -> bool:
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")
         return False
+
+
+def get_trailing_profit_signals(
+    price: float, recent_high: float, atr_pct: float
+) -> Optional[str]:
+    """
+    返回移动止盈提醒级别：'clear'（建议清仓）、'half'（建议半仓止盈）或 None
+
+    复用了原有的因子计算逻辑，但仅用于触发判断，不再参与评分。
+    """
+    # 复用原有的强度计算函数（它们仍返回[0,1]的强度）
+    clear_strength = factor_sell_trailing_stop_clear(price, recent_high, atr_pct)
+    half_strength = factor_sell_trailing_stop_half(price, recent_high, atr_pct)
+    if clear_strength > 0:
+        return "clear"
+    if half_strength > 0:
+        return "half"
+    return None
+
+
+def format_etf_output_line(name, code, price, change_pct, final_score, action_level,
+                           atr_pct=None, trailing_profit_level=None,
+                           recent_high_price=None, risk_str="",
+                           profit_level=None, profit_pct_from_low=None):
+    """
+    格式化单只 ETF 的分析输出行，返回字符串。
+
+    参数：
+        name: ETF 名称
+        code: ETF 代码
+        price: 实时价格
+        change_pct: 涨跌幅（百分比，如 2.35 表示 +2.35%）
+        final_score: 最终评分
+        action_level: 操作等级文本
+        atr_pct: 波动率（ATR/价格），用于风险提示
+        trailing_profit_level: 移动止盈级别 'clear' 或 'half'，None 表示未触发
+        recent_high_price: 近期高点价格（用于计算回落幅度）
+        risk_str: 风险提示字符串，可为空
+        profit_level: 低点涨幅止盈提示级别，'clear', 'half', 'watch' 或 None
+        profit_pct_from_low: 低点涨幅百分比（小数，如 0.15 表示 +15%）
+    """
+    from .config import USE_UNICODE
+
+    price_str = f"{price:.3f}" if price is not None else "N/A"
+    change_str = f"{change_pct:+.2f}%" if change_pct is not None else "0.00%"
+    final_str = f"{final_score:.2f}" if final_score is not None else "0.00"
+
+    output = (f"{pad_display(name, 14)} {pad_display(code, 12)} "
+              f"{pad_display(price_str, 8, 'right')} "
+              f"{pad_display(change_str, 8, 'right')} "
+              f"{pad_display(final_str, 6, 'right')}  "
+              f"{pad_display(action_level, 16)}")
+
+    # 移动止盈提示
+    tips = []
+    if risk_str:
+        tips.append(risk_str)
+
+    if trailing_profit_level and trailing_profit_level != 'none' and recent_high_price and price and recent_high_price > 0:
+        from_high_pct = (recent_high_price - price) / recent_high_price
+        icon = "🔻" if USE_UNICODE else "[TRAIL]"
+        level_text = "清仓" if trailing_profit_level == 'clear' else "半仓"
+        tips.append(f"{icon}移动止盈({level_text}) -{from_high_pct:.1%}")
+
+    # 低点涨幅止盈提示
+    if profit_level and profit_pct_from_low is not None:
+        pct = profit_pct_from_low * 100
+        if profit_level == 'clear':
+            icon = "🚨 " if USE_UNICODE else "[P]"
+            tips.append(f"{icon}低点涨+{pct:.1f}%")
+        elif profit_level == 'half':
+            icon = "📈 " if USE_UNICODE else "[p]"
+            tips.append(f"{icon}低点涨+{pct:.1f}%")
+        else:  # watch
+            icon = "💡 " if USE_UNICODE else "[w]"
+            tips.append(f"{icon}低点涨+{pct:.1f}%")
+
+    tip_str = "  ".join(tips)
+    if tip_str:
+        output += f"  {tip_str}"
+
+    return output
