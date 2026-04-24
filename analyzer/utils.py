@@ -331,7 +331,7 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
 
     if trailing_profit_level and trailing_profit_level != 'none' and recent_high_price and price and recent_high_price > 0:
         from_high_pct = (recent_high_price - price) / recent_high_price
-        icon = "🔻" if USE_UNICODE else "[TRAIL]"
+        icon = "🚨" if USE_UNICODE else "[TRAIL]"
         level_text = "清仓" if trailing_profit_level == 'clear' else "半仓"
         tips.append(f"{icon}移动止盈({level_text}) -{from_high_pct:.1%}")
 

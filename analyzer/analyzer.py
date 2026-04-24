@@ -574,9 +574,9 @@ class DataAnalyzer:
         # 综合提示文本（可选，供详细报告使用）
         parts = []
         if ctx.trailing_profit_level == 'clear':
-            parts.append("🔻移动清仓")
+            parts.append("🚨 移动清仓")
         elif ctx.trailing_profit_level == 'half':
-            parts.append("🔻移动半仓")
+            parts.append("📈 移动半仓")
         else:
             pct = ctx.profit_pct_from_low * 100
             if ctx.profit_level == 'clear':
