@@ -43,9 +43,9 @@
     "market_state": "强势牛市",
     "market_factor": 1.35,
     "buy_weights": {
-      "price_above_ma20": 0.22576530612244894,
-      "volume_above_ma5": 0.1581632653061224,
-      "macd_golden_cross": 0.06760204081632652,
+      "price_above_ma20": 0.23557692307692304,
+      "volume_above_ma5": 0.165521978021978,
+      "macd_golden_cross": 0.035714285714285705,
       "kdj_golden_cross": 0.035714285714285705,
       "bollinger_break_up": 0.035714285714285705,
       "williams_oversold": 0.035714285714285705,
@@ -54,25 +54,25 @@
       "market_amount_above_ma20": 0.022321428571428565,
       "outperform_market": 0.04464285714285713,
       "weekly_above_ma20": 0.04464285714285713,
-      "tmsv_score": 0.27168367346938765
+      "tmsv_score": 0.2864010989010988
     },
     "sell_weights": {
-      "price_below_ma20": 0.07692307692307694,
-      "bollinger_break_down": 0.03846153846153847,
-      "williams_overbought": 0.019230769230769235,
-      "rsi_overbought": 0.028846153846153848,
-      "underperform_market": 0.03846153846153847,
-      "stop_loss_ma_break": 0.19230769230769235,
-      "trailing_stop_clear": 0.19230769230769235,
-      "trailing_stop_half": 0.09615384615384617,
-      "profit_target_hit": 0.057692307692307696,
-      "weekly_below_ma20": 0.03846153846153847,
-      "downside_momentum": 0.19852941176470593,
-      "max_drawdown_stop": 0.022624434389140278
+      "price_below_ma20": 0.16433566433566435,
+      "bollinger_break_down": 0.038461538461538464,
+      "williams_overbought": 0.019230769230769232,
+      "rsi_overbought": 0.028846153846153844,
+      "underperform_market": 0.038461538461538464,
+      "stop_loss_ma_break": 0.1923076923076923,
+      "trailing_stop_clear": 0.1923076923076923,
+      "trailing_stop_half": 0.09615384615384615,
+      "profit_target_hit": 0.05769230769230769,
+      "weekly_below_ma20": 0.038461538461538464,
+      "downside_momentum": 0.11625874125874126,
+      "max_drawdown_stop": 0.017482517482517484
     },
     "sentiment": 0.7,
-    "sentiment_raw": 0.8405732720289861,
-    "timestamp": 1776997297.6096122
+    "sentiment_raw": 0.8519115909932535,
+    "timestamp": 1776998035.4775286
   },
   "_env_date_list": [
     "2026-04-24"
