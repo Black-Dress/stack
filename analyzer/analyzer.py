@@ -577,7 +577,7 @@ class DataAnalyzer:
             parts.append("🔻移动清仓")
         elif ctx.trailing_profit_level == 'half':
             parts.append("🔻移动半仓")
-        if ctx.profit_level:
+        else:
             pct = ctx.profit_pct_from_low * 100
             if ctx.profit_level == 'clear':
                 parts.append(f"🚨  低点涨+{pct:.1f}%")

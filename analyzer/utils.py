@@ -336,7 +336,11 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
         tips.append(f"{icon}移动止盈({level_text}) -{from_high_pct:.1%}")
 
     # 低点涨幅止盈提示
-    if profit_level and profit_pct_from_low is not None:
+    if (
+        trailing_profit_level is None
+        and profit_level
+        and profit_pct_from_low is not None
+    ):
         pct = profit_pct_from_low * 100
         if profit_level == 'clear':
             icon = "🚨 " if USE_UNICODE else "[P]"

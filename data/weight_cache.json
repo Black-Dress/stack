@@ -34,10 +34,15 @@
       "max_drawdown_stop": 0.016881827209533268
     },
     "sentiment": 0.7,
-    "sentiment_raw": 0.8788258383660168,
-    "timestamp": 1777022485.4575832
+    "sentiment_raw": 0.8817758317267718,
+    "timestamp": 1777025007.8742523
   },
   "_env_date_list": [
     "2026-04-24"
-  ]
+  ],
+  "market_state_2026-04-24_2ed7f9e6a80d8c85468fbf6fc691ae32": {
+    "state": "强势牛市",
+    "factor": 1.35,
+    "timestamp": 1777023956.1653237
+  }
 }
