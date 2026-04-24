@@ -26,7 +26,7 @@ from .config import (
     RSI_PERIOD,
     get_email_config,
 )
-from .utils import discretize
+from .utils import discretize, apply_sentiment_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ except ImportError:
 
 # ---------- 情绪因子保护 ----------
 SENTIMENT_LOWER_BOUND = 0.70   # 情绪因子下限，防止过度恐慌压制信号
+MAX_HISTORY_DAYS = 60          # 最大历史情绪记录数
 
 
 class DataFetcher:
@@ -53,37 +54,27 @@ class DataFetcher:
         self._breadth_cache: Optional[Tuple[float, float, float]] = None  # (timestamp, up, down)
         self._rebuild_histories_from_cache()
 
-    # ---------- 从所有历史日期键重建滚动列表 ----------
+    # ---------- 从缓存中恢复滚动历史（优化：只读取日期列表中的最近60个键）----------
     def _rebuild_histories_from_cache(self):
-        """遍历缓存中所有 env_YYYY-MM-DD 键，按日期排序提取最近60条情绪值"""
         cache = self._load_cache()
-        env_keys = [k for k in cache.keys() if k.startswith("env_")]
-        if not env_keys:
-            return
+        date_list = cache.get("_env_date_list", [])
+        if not date_list:
+            # 降级：遍历所有 env_ 键
+            env_keys = sorted([k for k in cache.keys() if k.startswith("env_")])
+            date_list = [k[4:] for k in env_keys]  # 去掉前缀
 
-        # 提取日期并排序
-        dated_entries = []
-        for key in env_keys:
-            try:
-                date_str = key[4:]  # 去掉 "env_"
-                datetime.datetime.strptime(date_str, "%Y-%m-%d")  # 校验格式
-                dated_entries.append((date_str, cache[key]))
-            except ValueError:
-                continue
-
-        dated_entries.sort(key=lambda x: x[0])  # 按日期升序
-
-        # 提取情绪值（取最近60条）
-        for _, entry in dated_entries[-60:]:
+        # 取最近 MAX_HISTORY_DAYS 个日期
+        for date_str in date_list[-MAX_HISTORY_DAYS:]:
+            key = f"env_{date_str}"
+            entry = cache.get(key)
             if isinstance(entry, dict):
                 if "sentiment" in entry:
                     self._sentiment_history.append(entry["sentiment"])
                 if "sentiment_raw" in entry:
                     self._raw_sentiment_history.append(entry["sentiment_raw"])
 
-        # 确保长度不超过60
-        self._sentiment_history = self._sentiment_history[-60:]
-        self._raw_sentiment_history = self._raw_sentiment_history[-60:]
+        self._sentiment_history = self._sentiment_history[-MAX_HISTORY_DAYS:]
+        self._raw_sentiment_history = self._raw_sentiment_history[-MAX_HISTORY_DAYS:]
 
     # ---------- 登录/登出 ----------
     def login(self) -> bool:
@@ -134,13 +125,11 @@ class DataFetcher:
             logger.error(f"保存缓存失败: {e}")
 
     def _get_env_key(self, date_str: str = None) -> str:
-        """返回环境缓存键，格式 env_YYYY-MM-DD"""
         if date_str is None:
             date_str = datetime.date.today().strftime("%Y-%m-%d")
         return f"env_{date_str}"
 
     def get_cached_environment(self) -> Optional[Dict]:
-        """获取当日环境缓存，若存在且未超过10分钟则返回，否则返回None"""
         cache = self._load_cache()
         key = self._get_env_key()
         if key not in cache:
@@ -149,16 +138,19 @@ class DataFetcher:
         if not isinstance(data, dict):
             return None
         ts = data.get("timestamp", 0)
-        if time.time() - ts < 600:   # 10分钟内有效
+        if time.time() - ts < 600:
             return data
         return None
 
     def save_environment_cache(self, market_state: str, market_factor: float,
                                buy_weights: Dict, sell_weights: Dict,
                                sentiment: float, sentiment_raw: float):
-        """保存当日环境数据到缓存，同时更新滚动历史列表"""
         cache = self._load_cache()
         key = self._get_env_key()
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+        # 检查是否同一天已有记录，避免重复追加情绪历史
+        is_new_day = key not in cache
 
         cache[key] = {
             "market_state": market_state,
@@ -170,13 +162,22 @@ class DataFetcher:
             "timestamp": time.time()
         }
 
-        # 更新内存中的滚动历史（追加新值）
-        self._sentiment_history.append(sentiment)
-        self._raw_sentiment_history.append(sentiment_raw)
-        if len(self._sentiment_history) > 60:
-            self._sentiment_history.pop(0)
-        if len(self._raw_sentiment_history) > 60:
-            self._raw_sentiment_history.pop(0)
+        # 维护日期列表，用于快速加载历史
+        date_list = cache.get("_env_date_list", [])
+        if today_str not in date_list:
+            date_list.append(today_str)
+        # 只保留最近 MAX_HISTORY_DAYS 个日期（可选，为性能）
+        if len(date_list) > MAX_HISTORY_DAYS * 2:  # 防止无限膨胀
+            date_list = date_list[-MAX_HISTORY_DAYS * 2:]
+        cache["_env_date_list"] = date_list
+
+        if is_new_day:
+            self._sentiment_history.append(sentiment)
+            self._raw_sentiment_history.append(sentiment_raw)
+            if len(self._sentiment_history) > MAX_HISTORY_DAYS:
+                self._sentiment_history.pop(0)
+            if len(self._raw_sentiment_history) > MAX_HISTORY_DAYS:
+                self._raw_sentiment_history.pop(0)
 
         self._save_cache(cache)
 
@@ -191,12 +192,10 @@ class DataFetcher:
     def get_market_state(
         self, market_df: pd.DataFrame, ai_client: Optional["AIClient"] = None
     ) -> Tuple[str, float]:
-        # 优先从统一缓存读取
         cached = self.get_cached_environment()
         if cached:
             return cached["market_state"], cached["market_factor"]
 
-        # 尝试旧缓存
         cache = self._load_cache()
         cache_key = self._get_market_cache_key(market_df)
         if cache_key in cache and isinstance(cache[cache_key], dict):
@@ -204,7 +203,6 @@ class DataFetcher:
             if "state" in entry and "factor" in entry:
                 return entry["state"], entry["factor"]
 
-        # 计算新状态
         if ai_client:
             state, factor = ai_client.refine_market_state(market_df)
         else:
@@ -437,9 +435,6 @@ class DataFetcher:
 
     # ---------- 情绪因子合成 ----------
     def compute_sentiment_factor(self, indicators: dict) -> Tuple[float, float]:
-        """
-        计算综合情绪因子，返回 (平滑后情绪, 原始情绪)
-        """
         if not indicators:
             return 1.0, 1.0
 
@@ -480,22 +475,12 @@ class DataFetcher:
         raw_sentiment = sum(scores[k] * weights[k] for k in weights)
         raw_sentiment = max(0.6, min(1.5, raw_sentiment))
 
-        # EWMA 平滑
         if self._sentiment_history:
             smoothed = 0.7 * self._sentiment_history[-1] + 0.3 * raw_sentiment
         else:
             smoothed = raw_sentiment
 
-        # 非线性调整
-        def adjust(s):
-            x = s - 1.0
-            if x >= 0:
-                adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
-            else:
-                adj = 1.0 + 1.2 * math.tanh(3.0 * x)
-            return max(0.6, min(1.5, adj))
-
-        smoothed = adjust(smoothed)
+        smoothed = apply_sentiment_adjustment(smoothed)
         smoothed = max(SENTIMENT_LOWER_BOUND, smoothed)
         return smoothed, raw_sentiment
 
@@ -536,14 +521,6 @@ class DataFetcher:
         else:
             smoothed = raw_sentiment
 
-        def adjust(s):
-            x = s - 1.0
-            if x >= 0:
-                adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
-            else:
-                adj = 1.0 + 1.2 * math.tanh(3.0 * x)
-            return max(0.6, min(1.5, adj))
-
-        smoothed = adjust(smoothed)
+        smoothed = apply_sentiment_adjustment(smoothed)
         smoothed = max(SENTIMENT_LOWER_BOUND, smoothed)
         return smoothed, raw_sentiment
