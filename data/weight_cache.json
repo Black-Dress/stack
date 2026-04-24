@@ -23,21 +23,21 @@
       "rsi_oversold": 0.056547619047619034
     },
     "sell_weights": {
-      "price_below_ma20": 0.08130081300813007,
-      "bollinger_break_down": 0.04065040650406503,
-      "williams_overbought": 0.08130081300813007,
-      "rsi_overbought": 0.09146341463414631,
-      "underperform_market": 0.04065040650406503,
-      "stop_loss_ma_break": 0.20325203252032517,
-      "trailing_stop_clear": 0.20325203252032517,
-      "trailing_stop_half": 0.10162601626016259,
-      "weekly_below_ma20": 0.04065040650406503,
-      "downside_momentum": 0.09146341463414631,
-      "max_drawdown_stop": 0.02439024390243902
+      "price_below_ma20": 0.0813008130081301,
+      "bollinger_break_down": 0.04065040650406505,
+      "williams_overbought": 0.09349593495934959,
+      "rsi_overbought": 0.09146341463414634,
+      "underperform_market": 0.04065040650406505,
+      "stop_loss_ma_break": 0.2032520325203252,
+      "trailing_stop_clear": 0.2032520325203252,
+      "trailing_stop_half": 0.1016260162601626,
+      "weekly_below_ma20": 0.04065040650406505,
+      "downside_momentum": 0.09146341463414634,
+      "max_drawdown_stop": 0.012195121951219513
     },
     "sentiment": 0.7,
-    "sentiment_raw": 0.8378521928549931,
-    "timestamp": 1777009355.3174489
+    "sentiment_raw": 0.8788258383660168,
+    "timestamp": 1777014180.5699108
   },
   "_env_date_list": [
     "2026-04-24"

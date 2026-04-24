@@ -720,9 +720,9 @@ class DataAnalyzer:
         score_history: List[Dict],
         params: Dict,
         atr_pct: float = None,
-    ) -> str:
+    ) -> Tuple[str, str]:
         """
-        根据当前评分、历史评分序列和参数判断操作信号（BUY/SELL/PREP_BUY/PREP_SELL/HOLD）
+        根据当前评分、历史评分序列和参数，返回 (操作信号, 操作等级)
 
         Args:
             score: 当期评分
@@ -731,19 +731,28 @@ class DataAnalyzer:
             atr_pct: 当前波动率（用于动态调整）
 
         Returns:
-            操作信号字符串
+            (action, action_level) 元组
         """
         hist_scores = [s["score"] for s in score_history]
         buy_thresh = params["BUY_THRESHOLD"]
         sell_thresh = params["SELL_THRESHOLD"]
 
+        # 计算操作等级（原 get_action_level 逻辑）
+        def _get_level(s):
+            for th, level in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
+                if s >= th:
+                    return level
+            return "强烈卖出"
+
+        action_level = _get_level(score)
+
         if len(hist_scores) < 2:
             if score > buy_thresh:
-                return "BUY"
+                return "BUY", action_level
             elif score < sell_thresh:
-                return "SELL"
+                return "SELL", action_level
             else:
-                return "HOLD"
+                return "HOLD", action_level
 
         confirm_days = self._get_dynamic_confirm_days(atr_pct, params["CONFIRM_DAYS"])
         window = self.get_dynamic_history_days(atr_pct) if atr_pct else 12
@@ -761,20 +770,20 @@ class DataAnalyzer:
                 and slope > SIGNAL_SLOPE_BUY_THRESH
                 and avg > buy_thresh + SIGNAL_AVG_OFFSET
             ):
-                return "BUY"
+                return "BUY", action_level
             if (
                 len(hist_scores) >= confirm_days
                 and all(s > buy_thresh for s in hist_scores[-confirm_days:])
                 and slope >= 0
             ):
-                return "BUY"
+                return "BUY", action_level
             if (
                 down_days >= 2
                 and slope > SIGNAL_SLOPE_WEAK
                 and score > avg + SIGNAL_AVG_OFFSET
             ):
-                return "BUY"
-            return "PREP_BUY"
+                return "BUY", action_level
+            return "PREP_BUY", action_level
 
         # 卖出信号判断
         if score < sell_thresh:
@@ -783,20 +792,20 @@ class DataAnalyzer:
                 and slope < SIGNAL_SELL_SLOPE
                 and avg < sell_thresh - SIGNAL_AVG_OFFSET
             ):
-                return "SELL"
+                return "SELL", action_level
             if (
                 len(hist_scores) >= confirm_days
                 and all(s < sell_thresh for s in hist_scores[-confirm_days:])
                 and slope <= 0
             ):
-                return "SELL"
+                return "SELL", action_level
             if (
                 up_days >= 2
                 and slope < SIGNAL_SELL_WEAK_SLOPE
                 and score < avg - SIGNAL_AVG_OFFSET
             ):
-                return "SELL"
-            return "PREP_SELL"
+                return "SELL", action_level
+            return "PREP_SELL", action_level
 
         # 高波动下的额外规则
         if atr_pct and atr_pct > VOL_HIGH_CONFIRM:
@@ -805,27 +814,20 @@ class DataAnalyzer:
                 and slope > SIGNAL_HIGH_VOL_BUY_SLOPE
                 and up_days >= SIGNAL_HIGH_VOL_DAYS
             ):
-                return "BUY"
+                return "BUY", action_level
             if score < sell_thresh - 0.05 and slope < -0.08 and down_days >= 3:
-                return "SELL"
-            return "HOLD"
+                return "SELL", action_level
+            return "HOLD", action_level
         if atr_pct and atr_pct > VOL_MID_CONFIRM:
             if (
                 score > buy_thresh + 0.1
                 and slope > SIGNAL_MID_VOL_BUY_SLOPE
                 and up_days >= SIGNAL_MID_VOL_DAYS
             ):
-                return "BUY"
+                return "BUY", action_level
             if score < sell_thresh - 0.1 and slope < -0.08 and down_days >= 3:
-                return "SELL"
-        return "HOLD"
-
-    def get_action_level(self, score: float) -> str:
-        """将评分映射为操作等级文本（极度看好/强烈买入/.../卖出）"""
-        for th, level in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
-            if score >= th:
-                return level
-        return "强烈卖出"
+                return "SELL", action_level
+        return "HOLD", action_level
 
     def adjust_params_based_on_history(
         self,
@@ -1109,27 +1111,9 @@ class DataAnalyzer:
                 market["market_factor"],
             )
 
-        action = self.get_action(
+        action, action_level = self.get_action(
             final, state["score_history"], self.params, ctx.atr_pct
         )
-        action_level = self.get_action_level(final)
-
-        # 格式化操作显示（信号驱动，符号与文字统一）
-        def fmt_signal(action, level):
-            symbols = (
-                {
-                    "BUY": "🟢 ",
-                    "SELL": "🔴 ",
-                    "PREP_BUY": "🟡 ",
-                    "PREP_SELL": "🟠 ",
-                }
-                if USE_UNICODE
-                else {}
-            )
-            prefix = symbols.get(action, "")
-            return f"{prefix}{level}"
-
-        display_action = fmt_signal(action, action_level)
 
         # 风险提示
         risk_str = ""
@@ -1152,7 +1136,7 @@ class DataAnalyzer:
                 icon = "💡" if profit_pct < 0.12 else "🔔"
             else:
                 icon = "[TP]" if profit_pct < 0.12 else "[TP!!]"
-            tp_str = f"{icon} 止盈 +{profit_pct:.1%}"
+            tp_str = f"{icon} 止盈提醒 +{profit_pct:.1%}"
 
         price_str = f"{real_price:.3f}"
         change_str = f"{ctx.change_pct:+.2f}%"
@@ -1162,7 +1146,7 @@ class DataAnalyzer:
             f"{pad_display(price_str, 8, 'right')} "
             f"{pad_display(change_str, 8, 'right')} "
             f"{pad_display(final_str, 6, 'right')}  "
-            f"{pad_display(display_action, 16)}"
+            f"{pad_display(action_level, 16)}"
         )
         tips = "  ".join(filter(None, [risk_str, tp_str]))
         if tips:
@@ -1215,7 +1199,9 @@ class DataAnalyzer:
             return f"【{name} ({code})】{ctx.error}，无法分析。"
 
         final = ctx.final_score
-        action_level = self.get_action_level(final)
+        _, action_level = self.get_action(
+            final, state.get("score_history", []), self.params, ctx.atr_pct
+        )
 
         lines = [
             "=" * 70,
