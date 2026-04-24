@@ -1,33 +1,25 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-通用工具模块：显示宽度计算、字符串填充、离散化、权重验证、邮件发送、数学辅助函数。
+通用工具模块：显示宽度计算、字符串填充、离散化、权重验证、邮件发送、数学辅助函数，
+以及因子计算、动态窗口等可复用逻辑。
 """
 import unicodedata
 import logging
 import math
-from typing import List
+from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
 
+# ========================== 显示 & 辅助 ==========================
 def get_display_width(text):
     """计算字符串在等宽字体下的显示宽度（中文占2，英文占1）"""
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(text))
 
 
 def pad_display(text, width, align="left"):
-    """
-    将字符串补足到指定的显示宽度
-
-    Args:
-        text: 原始字符串
-        width: 目标显示宽度
-        align: 对齐方式（left/right/center）
-
-    Returns:
-        补足空格后的字符串
-    """
+    """将字符串补足到指定的显示宽度"""
     text = str(text)
     cur = get_display_width(text)
     if cur >= width:
@@ -42,16 +34,7 @@ def pad_display(text, width, align="left"):
 
 
 def discretize(value: float, bins: List[float]) -> int:
-    """
-    根据给定的区间边界将值离散化为索引
-
-    Args:
-        value: 待离散化的值
-        bins: 区间边界（递增）
-
-    Returns:
-        所属区间的索引
-    """
+    """根据给定的区间边界将值离散化为索引"""
     for i, thresh in enumerate(bins):
         if value < thresh:
             return i
@@ -59,17 +42,7 @@ def discretize(value: float, bins: List[float]) -> int:
 
 
 def validate_and_filter_weights(weights: dict, expected_keys: List[str], name: str):
-    """
-    验证并归一化权重字典：仅保留期望的键，补全缺失的键，归一化到总和为1
-
-    Args:
-        weights: 输入的权重字典
-        expected_keys: 允许的因子名列表
-        name: 用于日志的权重名称
-
-    Returns:
-        归一化后的权重字典，若输入无效则返回 None
-    """
+    """验证并归一化权重字典：仅保留期望的键，补全缺失的键，归一化到总和为1"""
     if not isinstance(weights, dict):
         return None
     filtered = {k: max(0.0, min(1.0, weights.get(k, 0.0))) for k in expected_keys}
@@ -81,7 +54,7 @@ def validate_and_filter_weights(weights: dict, expected_keys: List[str], name: s
     return filtered
 
 
-# ---------------------------- 数学辅助函数 ----------------------------
+# ========================== 数学工具 ==========================
 def sigmoid_normalize(x: float, center: float = 0.0, steepness: float = 5.0) -> float:
     """Sigmoid 归一化，将任意实数映射到 [0,1]"""
     return 1.0 / (1.0 + math.exp(-steepness * (x - center)))
@@ -92,22 +65,12 @@ def nonlinear_score_transform(
 ) -> float:
     """根据市场状态选择缩放因子，对原始净分进行 tanh 非线性变换"""
     status_lower = market_status.lower()
-    scale = (
-        bull_scale if ("牛" in status_lower or "熊" in status_lower) else range_scale
-    )
+    scale = bull_scale if ("牛" in status_lower or "熊" in status_lower) else range_scale
     return math.tanh(scale * raw)
 
 
 def apply_sentiment_adjustment(sentiment: float) -> float:
-    """
-    情绪因子非线性调整，增强极端区域区分度
-
-    Args:
-        sentiment: 原始情绪值（1.0为中性）
-
-    Returns:
-        调整后的情绪值
-    """
+    """情绪因子非线性调整，增强极端区域区分度"""
     x = sentiment - 1.0
     if x >= 0:
         adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
@@ -117,43 +80,173 @@ def apply_sentiment_adjustment(sentiment: float) -> float:
 
 
 def clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
-    """
-    环境因子非线性映射：将市场因子与情绪因子的乘积压缩到 [0.6, 1.3] 区间
-
-    Args:
-        market_factor: 市场因子
-        sentiment_factor: 情绪因子
-
-    Returns:
-        映射后的环境因子
-    """
+    """环境因子非线性映射：将市场因子与情绪因子的乘积压缩到 [0.6, 1.3] 区间"""
     raw = market_factor * sentiment_factor
     center = 1.0
-    scale = 2.0  # 控制陡峭程度，值越大越接近硬裁剪
-    # tanh 压缩到 (-0.35, 0.35) 加上基准0.95，得到约 (0.60, 1.30)
+    scale = 2.0
     mapped = 0.95 + 0.35 * math.tanh(scale * (raw - center))
-    # 最终保障边界
     return max(0.60, min(1.30, mapped))
 
 
-# ---------------------------- 邮件发送 ----------------------------
+def cap(x: float) -> float:
+    """将值限制在 [0, 1]"""
+    return max(0.0, min(1.0, x))
+
+
+def weighted_sum(factors: Dict[str, float], weights: Dict[str, float]) -> float:
+    """计算因子加权得分"""
+    return sum(weights.get(k, 0) * factors[k] for k in factors)
+
+
+# ========================== 动态窗口工具 ==========================
+def get_dynamic_history_days(volatility: float) -> int:
+    """根据波动率动态调整用于判断趋势的评分历史窗口天数"""
+    from .config import VOL_HIGH_CONFIRM, VOL_MID_CONFIRM
+    if volatility > VOL_HIGH_CONFIRM:
+        return 5
+    if volatility > VOL_MID_CONFIRM:
+        return 8
+    return 20 if volatility <= 0.015 else 12
+
+
+def get_dynamic_confirm_days(atr_pct: float, base_days: int) -> int:
+    """根据波动率动态调整确认信号的连续天数"""
+    from .config import VOL_HIGH_CONFIRM, VOL_MID_CONFIRM, MIN_CONFIRM_DAYS, MAX_CONFIRM_DAYS
+    if atr_pct is None:
+        return base_days
+    if atr_pct > VOL_HIGH_CONFIRM:
+        return max(MIN_CONFIRM_DAYS, base_days - 1)
+    elif atr_pct > VOL_MID_CONFIRM:
+        return base_days
+    else:
+        return min(MAX_CONFIRM_DAYS, base_days + 1)
+
+
+# ========================== 因子强度计算函数 ==========================
+# 以下函数均接受必要的标量参数，返回 [0, 1] 的因子强度
+
+def factor_buy_price_above_ma20(price: float, ma20: float) -> float:
+    from .config import PRICE_DEVIATION_MA_MULT
+    if price <= ma20 or ma20 <= 0:
+        return 0.0
+    deviation = (price - ma20) / (ma20 * PRICE_DEVIATION_MA_MULT)
+    return sigmoid_normalize(deviation, center=0.2)
+
+
+def factor_buy_volume_above_ma5(volume: float, vol_ma: float) -> float:
+    from .config import VOLUME_RATIO_CENTER, SIGMOID_STEEPNESS_VOLUME
+    if volume <= vol_ma or vol_ma <= 0:
+        return 0.0
+    ratio = volume / vol_ma - 1.0
+    return sigmoid_normalize(ratio, center=VOLUME_RATIO_CENTER, steepness=SIGMOID_STEEPNESS_VOLUME)
+
+
+def factor_buy_bollinger_break_up(price: float, boll_up: float) -> float:
+    if price <= boll_up:
+        return 0.0
+    return sigmoid_normalize((price - boll_up) / boll_up, center=0.01)
+
+
+def factor_buy_williams_oversold(williams_r: float) -> float:
+    from .config import WILLIAMS_OVERSOLD_THRESH, WILLIAMS_NORMALIZE_DIV
+    if williams_r < WILLIAMS_OVERSOLD_THRESH:
+        return 0.0
+    return sigmoid_normalize(
+        (WILLIAMS_OVERSOLD_THRESH - williams_r) / WILLIAMS_NORMALIZE_DIV, center=0.5
+    )
+
+
+def factor_buy_rsi_oversold(rsi: float) -> float:
+    from .config import RSI_OVERSOLD_THRESH
+    if rsi < RSI_OVERSOLD_THRESH:
+        return max(0.0, (RSI_OVERSOLD_THRESH - rsi) / RSI_OVERSOLD_THRESH)
+    return 0.0
+
+
+def factor_buy_outperform_market(ret_etf_5d: float, ret_market_5d: float) -> float:
+    from .config import OUTPERFORM_MARKET_DIV
+    if ret_etf_5d > ret_market_5d:
+        return sigmoid_normalize((ret_etf_5d - ret_market_5d) / OUTPERFORM_MARKET_DIV, center=0.2)
+    return 0.0
+
+
+def factor_sell_price_below_ma20(price: float, ma20: float) -> float:
+    from .config import PRICE_DEVIATION_MA_MULT
+    if price >= ma20 or ma20 <= 0:
+        return 0.0
+    deviation = (price - ma20) / (ma20 * PRICE_DEVIATION_MA_MULT)
+    return sigmoid_normalize(-deviation, center=0.2)
+
+
+def factor_sell_bollinger_break_down(price: float, boll_low: float) -> float:
+    if price >= boll_low:
+        return 0.0
+    return sigmoid_normalize((boll_low - price) / boll_low, center=0.01)
+
+
+def factor_sell_williams_overbought(williams_r: float) -> float:
+    from .config import WILLIAMS_OVERBOUGHT_THRESH, WILLIAMS_NORMALIZE_DIV
+    if williams_r >= WILLIAMS_OVERBOUGHT_THRESH:
+        return 0.0
+    return sigmoid_normalize(
+        (WILLIAMS_OVERBOUGHT_THRESH - williams_r) / WILLIAMS_NORMALIZE_DIV, center=0.5
+    )
+
+
+def factor_sell_rsi_overbought(rsi: float) -> float:
+    from .config import RSI_OVERBOUGHT_THRESH, RSI_OVERBOUGHT_DIV
+    if rsi > RSI_OVERBOUGHT_THRESH:
+        return sigmoid_normalize((rsi - RSI_OVERBOUGHT_THRESH) / RSI_OVERBOUGHT_DIV, center=0.2)
+    return 0.0
+
+
+def factor_sell_underperform_market(ret_etf_5d: float, ret_market_5d: float) -> float:
+    from .config import OUTPERFORM_MARKET_DIV
+    if ret_etf_5d < ret_market_5d:
+        return sigmoid_normalize((ret_market_5d - ret_etf_5d) / OUTPERFORM_MARKET_DIV, center=0.2)
+    return 0.0
+
+
+def factor_sell_stop_loss_ma_break(price: float, ma20: float) -> float:
+    from .config import HARD_STOP_MA_BREAK_PCT
+    if price < ma20 and ma20 > 0:
+        return cap((ma20 - price) / (ma20 * HARD_STOP_MA_BREAK_PCT))
+    return 0.0
+
+
+def factor_sell_trailing_stop_clear(price: float, recent_high: float, atr_pct: float) -> float:
+    from .config import ATR_STOP_MULT
+    if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct:
+        return cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
+    return 0.0
+
+
+def factor_sell_trailing_stop_half(price: float, recent_high: float, atr_pct: float) -> float:
+    from .config import ATR_TRAILING_MULT
+    if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct:
+        return cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
+    return 0.0
+
+
+def factor_sell_downside_momentum(downside: float) -> float:
+    return cap(downside)
+
+
+def factor_sell_max_drawdown_stop(max_drawdown_pct: float) -> float:
+    from .config import MAX_DRAWDOWN_STOP_DIV
+    if max_drawdown_pct >= MAX_DRAWDOWN_STOP_DIV:
+        return cap(max_drawdown_pct / MAX_DRAWDOWN_STOP_DIV)
+    return 0.0
+
+
+# ========================== 邮件发送 ==========================
 def send_email(subject: str, body: str) -> bool:
-    """
-    使用 SMTP 发送邮件通知
-
-    Args:
-        subject: 邮件主题
-        body: 邮件正文
-
-    Returns:
-        是否发送成功
-    """
+    """使用 SMTP 发送邮件通知"""
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     from email.header import Header
     from .config import get_email_config
-    import logging
     logger = logging.getLogger(__name__)
 
     email_cfg = get_email_config()
