@@ -10,7 +10,7 @@ import openai
 import pandas as pd
 from typing import Dict, Tuple, Optional
 
-from .config import DEFAULT_BUY_WEIGHTS, DEFAULT_SELL_WEIGHTS
+from .config import DEFAULT_BUY_WEIGHTS, DEFAULT_SELL_WEIGHTS, RSI_OVERSOLD_THRESH
 from .utils import validate_and_filter_weights
 
 logger = logging.getLogger(__name__)
@@ -58,14 +58,16 @@ class AIClient:
 - 成交额高于20日均额：{"是" if market_amount_above_ma20 else "否"}
 - 波动率(ATR/收盘价)：{volatility:.3f}
 
-买入因子说明：tmsv_score 是复合指标(0-100)，强度为 tmsv/100。
+买入因子说明：
+- tmsv_score 是复合指标(0-100)，强度为 tmsv/100。
+- 新增 rsi_oversold：当 RSI 低于 {RSI_OVERSOLD_THRESH} 时激活，强度为 (30 - RSI)/30，用于捕捉超卖反弹。在恐慌情绪或震荡市中可给予 0.08~0.15 的较高权重，但在强趋势牛市中应保持较低权重（≤ 0.06），避免逆势。
 卖出因子说明：downside_momentum（下跌动量）、max_drawdown_stop（最大回撤止损，通常权重应较低）。
 注意：策略已去除固定止盈因子，卖出权重应聚焦于风险控制和趋势反转。
 
 特别提示：以下指标存在较高相关性，请避免同时给予高权重以防止信号放大失真：
 1. 威廉指标、RSI、KDJ 均为超买超卖类指标，震荡市可侧重一个，趋势市建议全部降权。
 2. TMSV 复合指标已包含趋势、动量和量价信息，若给予 TMSV 较高权重（>0.15），应相应降低其子成分因子（如价格站上均线、MACD金叉等）的权重。
-3. 布林带突破信号通常与威廉/RSI极端值相伴，请考虑在趋势明确时侧重布林带，震荡时侧重超买超卖。
+3. 布林带突破信号通常与威廉/RSI极端值相伴，请考虑在趋势明确时侧重布林带，震荡时侧重超买超卖/超卖因子。
 
 严格约束：
 1. 任何因子的权重不得低于 0.02（除非该因子在当前市场状态下完全无效）。
@@ -74,9 +76,9 @@ class AIClient:
 4. 卖出因子中，止损类(stop_loss, trailing_stop)在震荡市应保持中等权重(0.05~0.15)，超买类(williams, rsi)在当前市场可适当提高至 0.12~0.18。
 5. 权重分布应体现分散化原则，单个因子权重上限为 0.40（熊市止损除外）。
 6. 新因子 downside_momentum 在下跌趋势明显时赋予较高权重（0.10~0.20），max_drawdown_stop 平时权重可接近0。
-
+7. 根据市场状态灵活调整 rsi_oversold 权重：恐慌/震荡时增大，强势牛市时减小。
 请输出买入权重和卖出权重，JSON格式：{{"buy":{{...}},"sell":{{...}}}}，每个部分总和为1。禁止添加未列出的键。严格JSON，无解释。"""
-
+    
     def generate_weights(self, macro_status: str, sentiment_factor: float,
                          market_above_ma20: bool, market_above_ma60: bool,
                          market_amount_above_ma20: bool, volatility: float) -> Tuple[Dict, Dict]:

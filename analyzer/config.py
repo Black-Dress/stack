@@ -32,11 +32,11 @@ RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
 
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
-    "price_above_ma20": 0.22,
+    "price_above_ma20": 0.18,           
     "volume_above_ma5": 0.14,
     "macd_golden_cross": 0.08,
     "kdj_golden_cross": 0.08,
-    "bollinger_break_up": 0.08,
+    "bollinger_break_up": 0.06,         
     "williams_oversold": 0.08,
     "market_above_ma20": 0.05,
     "market_above_ma60": 0.08,
@@ -44,6 +44,7 @@ DEFAULT_BUY_WEIGHTS = {
     "outperform_market": 0.10,
     "weekly_above_ma20": 0.10,
     "tmsv_score": 0.18,
+    "rsi_oversold": 0.06,               # 新增超卖因子
 }
 DEFAULT_SELL_WEIGHTS = {
     "price_below_ma20": 0.40,
@@ -71,6 +72,8 @@ DEFAULT_PARAMS = {
 USE_UNICODE = True  # 若终端不支持可改为 False
 
 # ---------------------------- 技术指标参数 ----------------------------
+# 新增 RSI 超卖阈值
+RSI_OVERSOLD_THRESH = 30                # RSI 低于此值视为超卖
 MACD_FAST = 12  # MACD 快线周期
 MACD_SLOW = 26  # MACD 慢线周期
 MACD_SIGNAL = 9  # MACD 信号线周期

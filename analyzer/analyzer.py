@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ETFContext:
     """单只 ETF 的完整分析上下文，承载所有中间计算结果。"""
-
     code: str
     name: str
     real_price: Optional[float]
@@ -66,6 +65,7 @@ class ETFContext:
     should_take_profit: bool = False
     effective_profit_threshold: float = TAKE_PROFIT_WARNING_THRESHOLD  # 动态阈值
     rsi: float = 50.0  # 当期 RSI
+    rsi_oversold_factor: float = 0.0    # 实际计算的超卖因子强度（便于显示）
 
 
 # ========================== 公共指标计算 ==========================
@@ -624,6 +624,12 @@ class DataAnalyzer:
             ),
             "weekly_above_ma20": 1 if weekly_above else 0,
             "tmsv_score": tmsv_strength,
+            # 新增 RSI 超卖因子：RSI < 30 时线性映射强度
+            "rsi_oversold": (
+                max(0.0, (RSI_OVERSOLD_THRESH - rsi) / RSI_OVERSOLD_THRESH)
+                if rsi < RSI_OVERSOLD_THRESH
+                else 0
+            ),
         }
 
         sell_factors = {
@@ -685,7 +691,7 @@ class DataAnalyzer:
             ),
         }
         return buy_factors, sell_factors
-
+    
     # ---------- 信号确认 ----------
     def get_dynamic_history_days(self, volatility: float) -> int:
         """根据波动率动态调整用于判断趋势的评分历史窗口天数"""
@@ -939,7 +945,8 @@ class DataAnalyzer:
         d = ctx.hist_df.iloc[-1]
         atr_pct = d["atr"] / ctx.real_price if ctx.real_price > 0 else 0
         ctx.atr_pct = atr_pct
-
+        ctx.rsi = d["rsi"]
+        
         weekly_above = weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
