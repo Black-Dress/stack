@@ -512,19 +512,7 @@ class DataAnalyzer:
         )
         buy_w = self.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
         sell_w = self.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
-        # 情绪过热时提升止盈类权重
-        if sentiment >= 1.25:
-            boost = 0.1
-            sell_w["profit_target_hit"] = min(
-                0.5, sell_w.get("profit_target_hit", 0) + boost
-            )
-            other_keys = [k for k in sell_w if k != "profit_target_hit"]
-            if other_keys:
-                reduce_each = boost / len(other_keys)
-                for k in other_keys:
-                    sell_w[k] = max(0.02, sell_w[k] - reduce_each)
-            total = sum(sell_w.values())
-            sell_w = {k: v / total for k, v in sell_w.items()}
+            
         return buy_w, sell_w
 
     # ---------- 因子计算 ----------
@@ -689,12 +677,7 @@ class DataAnalyzer:
                 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct
                 else 0
             ),
-            "profit_target_hit": (
-                cap((price - recent_low) / recent_low / PROFIT_TARGET_DIV)
-                if recent_low > 0
-                and (price - recent_low) / recent_low >= PROFIT_TARGET_DIV
-                else 0
-            ),
+
             "weekly_below_ma20": 1 if weekly_below else 0,
             "downside_momentum": cap(downside_momentum),
             "max_drawdown_stop": (
@@ -983,14 +966,13 @@ class DataAnalyzer:
         )
 
         # 计算近期低点并判断止盈信号
-        recent_low = d.get(
-            f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
-            ctx.hist_df["low"].rolling(ctx.params["RECENT_LOW_WINDOW"]).min().iloc[-1],
-        )
+        recent_low = d.get(f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
+                        ctx.hist_df["low"].rolling(ctx.params["RECENT_LOW_WINDOW"]).min().iloc[-1])
         ctx.recent_low_price = recent_low
         if recent_low > 0:
             ctx.profit_pct_from_low = (ctx.real_price - recent_low) / recent_low
-            if ctx.profit_pct_from_low >= PROFIT_TARGET:
+            # 使用独立的提示阈值，例如 0.10
+            if ctx.profit_pct_from_low >= TAKE_PROFIT_WARNING_THRESHOLD:   # 新配置项
                 ctx.should_take_profit = True
 
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
@@ -1147,7 +1129,14 @@ class DataAnalyzer:
         if risk_warning:
             output += f"  {risk_warning}"
         if ctx.should_take_profit:
-            output += f"  🔔 止盈: +{ctx.profit_pct_from_low:.1%}"
+            profit_pct = ctx.profit_pct_from_low
+            if profit_pct < 0.12:
+                tip = f"💡 止盈预警({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
+            elif profit_pct < 0.15:
+                tip = f"🔔 止盈提醒({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
+            else:
+                tip = f"🔔🔔 强烈止盈({ctx.params['RECENT_LOW_WINDOW']}日): +{profit_pct:.1%}"
+            output += f"  {tip}"
         signal = (
             {"action": action, "name": name, "code": code, "score": final}
             if action in ("BUY", "SELL")

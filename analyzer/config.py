@@ -54,7 +54,6 @@ DEFAULT_SELL_WEIGHTS = {
     "stop_loss_ma_break": 1.00,
     "trailing_stop_clear": 1.00,
     "trailing_stop_half": 0.50,
-    "profit_target_hit": 0.30,
     "weekly_below_ma20": 0.20,
     "downside_momentum": 0.15,
     "max_drawdown_stop": 0.00,
@@ -112,6 +111,7 @@ WILLIAMS_OVERBOUGHT_THRESH = -20  # 威廉超买阈值
 WILLIAMS_OVERSOLD_THRESH = -80  # 威廉超卖阈值
 RSI_OVERBOUGHT_THRESH = 70  # RSI 超买阈值
 RSI_OVERBOUGHT_DIV = 30  # RSI 超买归一化除数
+TAKE_PROFIT_WARNING_THRESHOLD = 0.10   # 止盈提示启动阈值
 PROFIT_TARGET_DIV = PROFIT_TARGET  # 止盈目标除数（引用前面）
 MAX_DRAWDOWN_STOP_DIV = 0.08  # 最大回撤止损触发除数
 WILLIAMS_NORMALIZE_DIV = 20  # 威廉指标归一化除数
