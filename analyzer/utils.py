@@ -319,10 +319,10 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
     final_str = f"{final_score:.2f}" if final_score is not None else "0.00"
 
     output = (f"{pad_display(name, 14)} {pad_display(code, 12)} "
-              f"{pad_display(price_str, 8, 'right')} "
-              f"{pad_display(change_str, 8, 'right')} "
-              f"{pad_display(final_str, 6, 'right')}  "
-              f"{pad_display(action_level, 16)}")
+              f"{pad_display(price_str, 10, 'right')} "
+              f"{pad_display(change_str, 10, 'right')} "
+              f"{pad_display(final_str, 16, 'right')}  "
+              f"{pad_display(action_level, 22)}")
 
     # 移动止盈提示
     tips = []
