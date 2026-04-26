@@ -30,11 +30,8 @@ WEEKLY_MA = 20  # 周线短期均线
 RISK_WARNING_DAYS = 3  # 连续风险提示天数阈值
 RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
 
-# ---------------------------- 最终输出是否使用 Unicode 符号 ----------------------------
-USE_UNICODE = True  # 若终端不支持可改为 False
 
 # ---------------------------- 止盈提示控制 ----------------------------
-TAKE_PROFIT_DISPLAY_LEVELS = True      # 是否在输出行中显示止盈提示
 PROFIT_LOW_WATCH_MULT = 0.7           # 低点涨幅关注级阈值乘数
 PROFIT_LOW_HALF_MULT = 1.0            # 低点涨幅半仓级阈值乘数
 PROFIT_LOW_CLEAR_MULT = 1.3           # 低点涨幅清仓级阈值乘数
