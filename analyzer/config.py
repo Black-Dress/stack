@@ -23,18 +23,21 @@ MACRO_MA_SHORT = 20  # 宏观指数短期均线
 MACRO_MA_LONG = 60  # 宏观指数长期均线
 RSI_PERIOD = 14  # RSI 周期
 ATR_PERIOD = 14  # ATR 周期
-ATR_STOP_MULT = 2.0  # 移动止损倍数
-ATR_TRAILING_MULT = 1.0  # 移动止盈倍数
+ATR_STOP_MULT = 3.0  # 移动止损倍数（已放宽至3倍ATR）
+ATR_TRAILING_MULT = 2.0  # 移动止盈倍数（已放宽至2倍ATR）
 PROFIT_TARGET = 0.15  # 止盈目标比例（已不再参与评分，仅作参考）
 WEEKLY_MA = 20  # 周线短期均线
 RISK_WARNING_DAYS = 3  # 连续风险提示天数阈值
 RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
 
+# ---------------------------- 最终输出是否使用 Unicode 符号 ----------------------------
+USE_UNICODE = True  # 若终端不支持可改为 False
 
 # ---------------------------- 止盈提示控制 ----------------------------
+TAKE_PROFIT_DISPLAY_LEVELS = True      # 是否在输出行中显示止盈提示
 PROFIT_LOW_WATCH_MULT = 0.7           # 低点涨幅关注级阈值乘数
 PROFIT_LOW_HALF_MULT = 1.0            # 低点涨幅半仓级阈值乘数
-PROFIT_LOW_CLEAR_MULT = 1.3           # 低点涨幅清仓级阈值乘数
+PROFIT_LOW_CLEAR_MULT = 1.6           # 低点涨幅清仓级阈值乘数（24%左右）
 
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
@@ -123,7 +126,7 @@ WILLIAMS_OVERSOLD_THRESH = -80
 RSI_OVERBOUGHT_THRESH = 70
 RSI_OVERBOUGHT_DIV = 30
 RSI_OVERSOLD_THRESH = 30
-TAKE_PROFIT_WARNING_THRESHOLD = 0.10
+TAKE_PROFIT_WARNING_THRESHOLD = 0.15  # 止盈预警基础阈值（15%）
 PROFIT_TARGET_DIV = PROFIT_TARGET
 MAX_DRAWDOWN_STOP_DIV = 0.08
 WILLIAMS_NORMALIZE_DIV = 20

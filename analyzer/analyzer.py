@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-核心分析模块：负责技术指标计算、评分、信号确认及批量分析入口。
+核心分析模块（中期持仓优化版）：
+- 新增 30 日均线趋势过滤（价格低于 30 日线时削弱买入评分）
+- 高波动环境下仅增加确认天数，不再大幅提高买入阈值，保留中期入场机会
+- 止盈参数由 config.py 中的 ATR_TRAILING_MULT / ATR_STOP_MULT 控制
 """
 import datetime
 import logging
@@ -74,6 +77,7 @@ class ETFContext:
     max_drawdown_pct: float = 0.0
     weekly_above: bool = False
     weekly_below: bool = False
+    above_ma30: bool = False          # 新增：是否站上30日均线
     buy_factors: Dict = field(default_factory=dict)
     sell_factors: Dict = field(default_factory=dict)
     buy_score: float = 0.0
@@ -114,7 +118,7 @@ def calc_macd(series, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
 
 # ========================== 核心分析类 ==========================
 class DataAnalyzer:
-    """主要分析引擎，包含技术指标计算、因子评分、信号判定、权重管理等功能。"""
+    """主要分析引擎，包含技术指标计算、因子评分、信号确认、权重管理等功能。"""
     def __init__(self, buy_weights=None, sell_weights=None, params=None):
         self.buy_weights = buy_weights or DEFAULT_BUY_WEIGHTS.copy()
         self.sell_weights = sell_weights or DEFAULT_SELL_WEIGHTS.copy()
@@ -195,6 +199,8 @@ class DataAnalyzer:
         df["vol_ma"] = df["volume"].rolling(window=ETF_VOL_MA).mean()
         if need_amount_ma:
             df["amount_ma"] = df["amount"].rolling(window=ETF_VOL_MA).mean()
+        # 新增30日均线（中期过滤）
+        df["ma30"] = df["close"].rolling(window=30).mean()
         df["macd_dif"], df["macd_dea"], _ = calc_macd(df["close"])
         low_n = df["low"].rolling(KDJ_N).min()
         high_n = df["high"].rolling(KDJ_N).max()
@@ -433,6 +439,7 @@ class DataAnalyzer:
         return "HOLD", action_level
 
     def adjust_params_based_on_history(self, params, score_history, volatility, market_factor):
+        """动态参数调整 - 中期优化：高波动时仅提高确认天数，买入阈值保持稳定"""
         if len(score_history) < 10:
             return params
         window = min(get_dynamic_history_days(volatility), len(score_history))
@@ -444,28 +451,31 @@ class DataAnalyzer:
         adjust_mult = ADJUST_MULT_BASE / market_factor
         adjusted = params.copy()
 
+        # 买入阈值微调（幅度控制在 ±0.02 以内，避免高波动时过度收紧）
         if slope > 0.02 and avg > 0.15 and short_slope > 0.03:
-            delta = min(ADJUST_BUY_DELTA_MAX, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
-            adjusted["BUY_THRESHOLD"] = max(0.35, params["BUY_THRESHOLD"] - delta)
+            delta = min(ADJUST_BUY_DELTA_MAX * 0.5, abs(avg - params["BUY_THRESHOLD"]) * 0.1) * adjust_mult
+            adjusted["BUY_THRESHOLD"] = max(0.45, params["BUY_THRESHOLD"] - delta)
         elif slope < -0.02 and avg < -0.15 and short_slope < -0.03:
-            delta = min(ADJUST_BUY_DELTA_MAX, abs(avg - params["BUY_THRESHOLD"]) * 0.15) * adjust_mult
-            adjusted["BUY_THRESHOLD"] = min(0.65, params["BUY_THRESHOLD"] + delta)
+            delta = min(ADJUST_BUY_DELTA_MAX * 0.5, abs(avg - params["BUY_THRESHOLD"]) * 0.1) * adjust_mult
+            adjusted["BUY_THRESHOLD"] = min(0.55, params["BUY_THRESHOLD"] + delta)
         else:
-            adjusted["BUY_THRESHOLD"] = params["BUY_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.1
+            adjusted["BUY_THRESHOLD"] = params["BUY_THRESHOLD"] * 0.95 + DEFAULT_PARAMS["BUY_THRESHOLD"] * 0.05
 
+        # 卖出阈值轻微调整
         if slope < -0.02 and avg < -0.15 and short_slope < -0.03:
-            delta = min(ADJUST_SELL_DELTA_MAX, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
-            adjusted["SELL_THRESHOLD"] = max(-0.45, params["SELL_THRESHOLD"] - delta)
+            delta = min(ADJUST_SELL_DELTA_MAX * 0.5, abs(avg - params["SELL_THRESHOLD"]) * 0.1) * adjust_mult
+            adjusted["SELL_THRESHOLD"] = max(-0.35, params["SELL_THRESHOLD"] - delta)
         elif slope > 0.02 and avg > 0.15 and short_slope > 0.03:
-            delta = min(ADJUST_SELL_DELTA_MAX, abs(avg - params["SELL_THRESHOLD"]) * 0.15) * adjust_mult
+            delta = min(ADJUST_SELL_DELTA_MAX * 0.5, abs(avg - params["SELL_THRESHOLD"]) * 0.1) * adjust_mult
             adjusted["SELL_THRESHOLD"] = min(-0.15, params["SELL_THRESHOLD"] + delta)
         else:
-            adjusted["SELL_THRESHOLD"] = params["SELL_THRESHOLD"] * 0.9 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.1
+            adjusted["SELL_THRESHOLD"] = params["SELL_THRESHOLD"] * 0.95 + DEFAULT_PARAMS["SELL_THRESHOLD"] * 0.05
 
+        # 确认天数：高波动时多确认，低波动时少确认
         if volatility > VOL_HIGH_CONFIRM:
-            adjusted["CONFIRM_DAYS"] = min(5, int(round(params["CONFIRM_DAYS"] * 1.1)))
+            adjusted["CONFIRM_DAYS"] = min(5, params["CONFIRM_DAYS"] + 1)
         elif volatility < 0.01:
-            adjusted["CONFIRM_DAYS"] = max(2, int(round(params["CONFIRM_DAYS"] * 0.9)))
+            adjusted["CONFIRM_DAYS"] = max(2, params["CONFIRM_DAYS"] - 1)
         else:
             adjusted["CONFIRM_DAYS"] = int(round(params["CONFIRM_DAYS"] * 0.95 + DEFAULT_PARAMS["CONFIRM_DAYS"] * 0.05))
         return adjusted
@@ -544,6 +554,9 @@ class DataAnalyzer:
         # 低位机会
         if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
             risk_parts.append("低位区间")
+        # 中期趋势过滤提示（若未站上30日线）
+        if not ctx.above_ma30:
+            risk_parts.append("弱于中期均线")
         return " ".join(risk_parts) if risk_parts else ""
 
     # ========== 操作等级调整（新函数）==========
@@ -587,6 +600,12 @@ class DataAnalyzer:
         ctx.atr_pct = atr_pct
         ctx.rsi = d["rsi"]
 
+        # 中期趋势判断（30日均线）
+        if "ma30" in d and not pd.isna(d["ma30"]):
+            ctx.above_ma30 = ctx.real_price > d["ma30"]
+        else:
+            ctx.above_ma30 = True  # 无数据时不惩罚
+
         weekly_above = weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
@@ -616,6 +635,10 @@ class DataAnalyzer:
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
         ctx.buy_score = weighted_sum(ctx.buy_factors, self.buy_weights)
         ctx.sell_score = weighted_sum(ctx.sell_factors, self.sell_weights)
+
+        # 中期均线过滤：若价格低于30日线，买入评分打9折
+        if not ctx.above_ma30:
+            ctx.buy_score *= 0.9
 
         if ctx.buy_factors.get("macd_golden_cross",0) == 0 and ctx.buy_factors.get("kdj_golden_cross",0) == 0:
             ctx.buy_score *= MOMENTUM_MISSING_PENALTY
@@ -735,7 +758,8 @@ class DataAnalyzer:
         if market.get("sentiment_risk_tip"): lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
         lines += [f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
                 f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
-                f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%", ""]
+                f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
+                f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}", ""]
 
         # 止盈观察区块
         if ctx.trailing_profit_level or ctx.profit_level:
@@ -765,7 +789,7 @@ class DataAnalyzer:
                             for k in ctx.buy_factors], key=lambda x: x[3], reverse=True)
         for name_f, s, w, contrib in buy_contribs:
             lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["买入总分", "", "", f"{ctx.buy_score:.3f}"]))
+        lines.append(row_line(["买入总分（含中期过滤）", "", "", f"{ctx.buy_score:.3f}"]))
         lines.append("")
 
         lines.append("【卖出因子详情】")
@@ -909,13 +933,14 @@ def run_batch_analysis(api_key=None, target_code=None):
     analyzer.set_market_info(market_info)
     analyzer.set_weights(buy_w, sell_w)
 
+    # 初始参数（高波动时仅微调确认天数，买入/卖出阈值基本维持默认）
     params = DEFAULT_PARAMS.copy()
     if volatility > 0.04:
-        params.update({"BUY_THRESHOLD": 0.65, "SELL_THRESHOLD": -0.35, "CONFIRM_DAYS": 5, "QUICK_BUY_THRESHOLD": 0.75})
+        params["CONFIRM_DAYS"] = min(5, params["CONFIRM_DAYS"] + 1)
     elif volatility > 0.02:
-        params.update({"BUY_THRESHOLD": 0.6, "SELL_THRESHOLD": -0.3, "CONFIRM_DAYS": 4, "QUICK_BUY_THRESHOLD": 0.7})
+        params["CONFIRM_DAYS"] = params["CONFIRM_DAYS"]  # 保持不变
     elif volatility < 0.01:
-        params.update({"BUY_THRESHOLD": 0.4, "SELL_THRESHOLD": -0.1, "CONFIRM_DAYS": 2, "QUICK_BUY_THRESHOLD": 0.5})
+        params["CONFIRM_DAYS"] = max(2, params["CONFIRM_DAYS"] - 1)
     analyzer.params = params
 
     state = fetcher.load_state()
