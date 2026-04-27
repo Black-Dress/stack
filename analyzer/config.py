@@ -1,43 +1,40 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-配置模块：存放所有固定参数、默认权重、默认参数及邮件配置。
+配置模块：存放全局固定参数、默认权重、默认参数及邮件配置。
+因子计算相关常量已主要迁移至 factors.py，此处保留少量跨模块引用常量。
 """
 import os
 
 # ---------------------------- 路径配置 ----------------------------
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# 数据目录
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")  # 持仓列表
-STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")  # 各 ETF 状态
-CACHE_FILE = os.path.join(DATA_DIR, "weight_cache.json")  # 环境缓存
+POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")
+STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")
+CACHE_FILE = os.path.join(DATA_DIR, "weight_cache.json")
 
 # ---------------------------- ETF 技术参数 ----------------------------
-ETF_MA = 20  # ETF 短期均线周期
-ETF_VOL_MA = 5  # ETF 成交量均线周期
-MACRO_INDEX = "sh.000300"  # 宏观指数（沪深300）
-MARKET_INDEX = "sh.000001"  # 大盘指数（上证综指）
-MACRO_MA_SHORT = 20  # 宏观指数短期均线
-MACRO_MA_LONG = 60  # 宏观指数长期均线
-RSI_PERIOD = 14  # RSI 周期
-ATR_PERIOD = 14  # ATR 周期
-ATR_STOP_MULT = 3.0  # 移动止损倍数（已放宽至3倍ATR）
-ATR_TRAILING_MULT = 2.0  # 移动止盈倍数（已放宽至2倍ATR）
-PROFIT_TARGET = 0.15  # 止盈目标比例（已不再参与评分，仅作参考）
-WEEKLY_MA = 20  # 周线短期均线
-RISK_WARNING_DAYS = 3  # 连续风险提示天数阈值
-RISK_WARNING_THRESHOLD = -0.1  # 风险提示评分阈值
+ETF_MA = 20
+ETF_VOL_MA = 5
+MACRO_INDEX = "sh.000300"
+MARKET_INDEX = "sh.000001"
+MACRO_MA_SHORT = 20
+MACRO_MA_LONG = 60
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+PROFIT_TARGET = 0.15
+WEEKLY_MA = 20
+RISK_WARNING_DAYS = 3
+RISK_WARNING_THRESHOLD = -0.1
 
 # ---------------------------- 最终输出是否使用 Unicode 符号 ----------------------------
-USE_UNICODE = True  # 若终端不支持可改为 False
+USE_UNICODE = True
 
 # ---------------------------- 止盈提示控制 ----------------------------
-TAKE_PROFIT_DISPLAY_LEVELS = True      # 是否在输出行中显示止盈提示
-PROFIT_LOW_WATCH_MULT = 0.7           # 低点涨幅关注级阈值乘数
-PROFIT_LOW_HALF_MULT = 1.0            # 低点涨幅半仓级阈值乘数
-PROFIT_LOW_CLEAR_MULT = 1.6           # 低点涨幅清仓级阈值乘数（24%左右）
+TAKE_PROFIT_DISPLAY_LEVELS = True
+PROFIT_LOW_WATCH_MULT = 0.7
+PROFIT_LOW_HALF_MULT = 1.0
+PROFIT_LOW_CLEAR_MULT = 1.6
 
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
@@ -77,7 +74,6 @@ DEFAULT_PARAMS = {
     "RECENT_LOW_WINDOW": 14,
 }
 
-# 因子名称列表（便于外部迭代）
 BUY_FACTOR_NAMES = list(DEFAULT_BUY_WEIGHTS.keys())
 SELL_FACTOR_NAMES = list(DEFAULT_SELL_WEIGHTS.keys())
 
@@ -104,32 +100,23 @@ NONLINEAR_SCALE_RANGE = 1.5
 
 # ---------------------------- Sigmoid 参数 ----------------------------
 SIGMOID_STEEPNESS_DEFAULT = 5.0
-SIGMOID_STEEPNESS_VOLUME = 3.0
 
 # ---------------------------- 硬止损阈值 ----------------------------
 HARD_STOP_DRAWDOWN = 0.08
-HARD_STOP_MA_BREAK_PCT = 0.05
 
 # ---------------------------- 情绪过热惩罚 ----------------------------
 SENTIMENT_OVERHEAT_THRESHOLD = 1.25
 SENTIMENT_PENALTY_FACTOR = 0.8
+SENTIMENT_LOWER_BOUND = 0.70
 
 # ---------------------------- 缓存有效期 ----------------------------
 CACHE_EXPIRE_SECONDS = 600
 
-# ---------------------------- 因子计算通用参数 ----------------------------
-PRICE_DEVIATION_MA_MULT = 0.1
-VOLUME_RATIO_CENTER = 0.2
-OUTPERFORM_MARKET_DIV = 0.05
-WILLIAMS_OVERBOUGHT_THRESH = -20
-WILLIAMS_OVERSOLD_THRESH = -80
-RSI_OVERBOUGHT_THRESH = 70
-RSI_OVERBOUGHT_DIV = 30
-RSI_OVERSOLD_THRESH = 30
+# ---------------------------- 跨模块保留的因子常量（兼顾 ai.py 等旧引用）---------------------------
+RSI_OVERSOLD_THRESH = 30  # RSI 超卖阈值
 TAKE_PROFIT_WARNING_THRESHOLD = 0.15  # 止盈预警基础阈值（15%）
-PROFIT_TARGET_DIV = PROFIT_TARGET
-MAX_DRAWDOWN_STOP_DIV = 0.08
-WILLIAMS_NORMALIZE_DIV = 20
+
+# 说明：其他因子常量已迁移至 factors.py，新代码请优先从 factors 导入
 
 # ---------------------------- TMSV 动态权重与参数 ----------------------------
 TMSV_HIGH_VOL_THRESH = 0.03
@@ -187,7 +174,7 @@ ADJUST_MULT_BASE = 1.2
 ADJUST_BUY_DELTA_MAX = 0.03
 ADJUST_SELL_DELTA_MAX = 0.03
 
-
+# ---------------------------- 邮件配置 ----------------------------
 def get_email_config():
     """获取邮件配置（从环境变量读取）"""
     return {

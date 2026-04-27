@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-通用工具模块：显示宽度计算、字符串填充、离散化、权重验证、邮件发送、数学辅助函数，
-以及因子计算、动态窗口等可复用逻辑。
+通用工具模块：显示宽度、字符串填充、数学辅助、邮件发送、动态窗口等。
 """
 import unicodedata
 import logging
 import math
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +70,14 @@ def nonlinear_score_transform(
 
 def apply_sentiment_adjustment(sentiment: float) -> float:
     """情绪因子非线性调整，增强极端区域区分度"""
+    from .config import SENTIMENT_LOWER_BOUND
+
     x = sentiment - 1.0
     if x >= 0:
         adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
     else:
         adj = 1.0 + 1.2 * math.tanh(3.0 * x)
-    return max(0.6, min(1.5, adj))
+    return max(SENTIMENT_LOWER_BOUND, min(1.5, adj))
 
 
 def clip_env_factor(market_factor: float, sentiment_factor: float) -> float:
@@ -122,121 +123,14 @@ def get_dynamic_confirm_days(atr_pct: float, base_days: int) -> int:
         return min(MAX_CONFIRM_DAYS, base_days + 1)
 
 
-# ========================== 因子强度计算函数 ==========================
-# 以下函数均接受必要的标量参数，返回 [0, 1] 的因子强度
-
-def factor_buy_price_above_ma20(price: float, ma20: float) -> float:
-    from .config import PRICE_DEVIATION_MA_MULT
-    if price <= ma20 or ma20 <= 0:
-        return 0.0
-    deviation = (price - ma20) / (ma20 * PRICE_DEVIATION_MA_MULT)
-    return sigmoid_normalize(deviation, center=0.2)
-
-
-def factor_buy_volume_above_ma5(volume: float, vol_ma: float) -> float:
-    from .config import VOLUME_RATIO_CENTER, SIGMOID_STEEPNESS_VOLUME
-    if volume <= vol_ma or vol_ma <= 0:
-        return 0.0
-    ratio = volume / vol_ma - 1.0
-    return sigmoid_normalize(ratio, center=VOLUME_RATIO_CENTER, steepness=SIGMOID_STEEPNESS_VOLUME)
-
-
-def factor_buy_bollinger_break_up(price: float, boll_up: float) -> float:
-    if price <= boll_up:
-        return 0.0
-    return sigmoid_normalize((price - boll_up) / boll_up, center=0.01)
-
-
-def factor_buy_williams_oversold(williams_r: float) -> float:
-    from .config import WILLIAMS_OVERSOLD_THRESH, WILLIAMS_NORMALIZE_DIV
-    if williams_r < WILLIAMS_OVERSOLD_THRESH:
-        return 0.0
-    return sigmoid_normalize(
-        (WILLIAMS_OVERSOLD_THRESH - williams_r) / WILLIAMS_NORMALIZE_DIV, center=0.5
-    )
-
-
-def factor_buy_rsi_oversold(rsi: float) -> float:
-    from .config import RSI_OVERSOLD_THRESH
-    if rsi < RSI_OVERSOLD_THRESH:
-        return max(0.0, (RSI_OVERSOLD_THRESH - rsi) / RSI_OVERSOLD_THRESH)
-    return 0.0
-
-
-def factor_buy_outperform_market(ret_etf_5d: float, ret_market_5d: float) -> float:
-    from .config import OUTPERFORM_MARKET_DIV
-    if ret_etf_5d > ret_market_5d:
-        return sigmoid_normalize((ret_etf_5d - ret_market_5d) / OUTPERFORM_MARKET_DIV, center=0.2)
-    return 0.0
-
-
-def factor_sell_price_below_ma20(price: float, ma20: float) -> float:
-    from .config import PRICE_DEVIATION_MA_MULT
-    if price >= ma20 or ma20 <= 0:
-        return 0.0
-    deviation = (price - ma20) / (ma20 * PRICE_DEVIATION_MA_MULT)
-    return sigmoid_normalize(-deviation, center=0.2)
-
-
-def factor_sell_bollinger_break_down(price: float, boll_low: float) -> float:
-    if price >= boll_low:
-        return 0.0
-    return sigmoid_normalize((boll_low - price) / boll_low, center=0.01)
-
-
-def factor_sell_williams_overbought(williams_r: float) -> float:
-    from .config import WILLIAMS_OVERBOUGHT_THRESH, WILLIAMS_NORMALIZE_DIV
-    if williams_r >= WILLIAMS_OVERBOUGHT_THRESH:
-        return 0.0
-    return sigmoid_normalize(
-        (WILLIAMS_OVERBOUGHT_THRESH - williams_r) / WILLIAMS_NORMALIZE_DIV, center=0.5
-    )
-
-
-def factor_sell_rsi_overbought(rsi: float) -> float:
-    from .config import RSI_OVERBOUGHT_THRESH, RSI_OVERBOUGHT_DIV
-    if rsi > RSI_OVERBOUGHT_THRESH:
-        return sigmoid_normalize((rsi - RSI_OVERBOUGHT_THRESH) / RSI_OVERBOUGHT_DIV, center=0.2)
-    return 0.0
-
-
-def factor_sell_underperform_market(ret_etf_5d: float, ret_market_5d: float) -> float:
-    from .config import OUTPERFORM_MARKET_DIV
-    if ret_etf_5d < ret_market_5d:
-        return sigmoid_normalize((ret_market_5d - ret_etf_5d) / OUTPERFORM_MARKET_DIV, center=0.2)
-    return 0.0
-
-
-def factor_sell_stop_loss_ma_break(price: float, ma20: float) -> float:
-    from .config import HARD_STOP_MA_BREAK_PCT
-    if price < ma20 and ma20 > 0:
-        return cap((ma20 - price) / (ma20 * HARD_STOP_MA_BREAK_PCT))
-    return 0.0
-
-
-def factor_sell_trailing_stop_clear(price: float, recent_high: float, atr_pct: float) -> float:
-    from .config import ATR_STOP_MULT
-    if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_STOP_MULT * atr_pct:
-        return cap((recent_high - price) / recent_high / (ATR_STOP_MULT * atr_pct))
-    return 0.0
-
-
-def factor_sell_trailing_stop_half(price: float, recent_high: float, atr_pct: float) -> float:
-    from .config import ATR_TRAILING_MULT
-    if recent_high > 0 and atr_pct > 0 and (recent_high - price) / recent_high >= ATR_TRAILING_MULT * atr_pct:
-        return cap((recent_high - price) / recent_high / (ATR_TRAILING_MULT * atr_pct))
-    return 0.0
-
-
-def factor_sell_downside_momentum(downside: float) -> float:
-    return cap(downside)
-
-
-def factor_sell_max_drawdown_stop(max_drawdown_pct: float) -> float:
-    from .config import MAX_DRAWDOWN_STOP_DIV
-    if max_drawdown_pct >= MAX_DRAWDOWN_STOP_DIV:
-        return cap(max_drawdown_pct / MAX_DRAWDOWN_STOP_DIV)
-    return 0.0
+# ========================== 市场状态回退规则 ==========================
+def fallback_market_state(above_ma20: bool, above_ma60: bool) -> Tuple[str, float]:
+    """简单的市场状态判断（无 AI 时使用）"""
+    if above_ma20 and above_ma60:
+        return "正常牛市", 1.2
+    if not above_ma20 and not above_ma60:
+        return "熊市下跌", 0.8
+    return "震荡偏弱", 1.0
 
 
 # ========================== 邮件发送 ==========================
@@ -273,21 +167,7 @@ def send_email(subject: str, body: str) -> bool:
         return False
 
 
-def get_trailing_profit_signals(
-    price: float, recent_high: float, atr_pct: float
-) -> Optional[str]:
-    """
-    返回移动止盈提醒级别：'clear'（建议清仓）、'half'（建议半仓止盈）或 None
-    """
-    clear_strength = factor_sell_trailing_stop_clear(price, recent_high, atr_pct)
-    half_strength = factor_sell_trailing_stop_half(price, recent_high, atr_pct)
-    if clear_strength > 0:
-        return "clear"
-    if half_strength > 0:
-        return "half"
-    return None
-
-
+# 输出格式化函数（保留）
 def format_etf_output_line(name, code, price, change_pct, final_score, action_level,
                            atr_pct=None, recent_high_price=None, risk_str="",
                            signal_action=None):

@@ -150,16 +150,21 @@
     "sell_weights": {
       "price_below_ma20": 0.11695906432748539,
       "bollinger_break_down": 0.058479532163742694,
-      "williams_overbought": 0.12854463202030234,
-      "rsi_overbought": 0.14316451506123798,
+      "williams_overbought": 0.11695906432748539,
+      "rsi_overbought": 0.13157894736842105,
       "underperform_market": 0.058479532163742694,
       "stop_loss_ma_break": 0.29239766081871343,
       "weekly_below_ma20": 0.058479532163742694,
-      "downside_momentum": 0.1266137040714995,
-      "max_drawdown_stop": 0.016881827209533268
+      "downside_momentum": 0.13157894736842105,
+      "max_drawdown_stop": 0.03508771929824561
     },
     "sentiment": 0.7,
-    "sentiment_raw": 0.8960188033069008,
-    "timestamp": 1777273214.6320927
+    "sentiment_raw": 0.9147857266296516,
+    "timestamp": 1777284876.3770938
+  },
+  "market_state_2026-04-27_9fe0bbd240a7db8e1cc70471699d1f61": {
+    "state": "强势牛市",
+    "factor": 1.35,
+    "timestamp": 1777283332.1427066
   }
 }
