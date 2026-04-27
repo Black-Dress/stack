@@ -309,7 +309,7 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
     if risk_str:
         parts.append(risk_str)
     if signal_action:
-        parts.append(f"【{signal_action}】")
+        parts.append(f"[{signal_action}]")
     if parts:
         output += "  " + " ".join(parts)
 

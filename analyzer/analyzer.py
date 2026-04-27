@@ -548,7 +548,7 @@ class DataAnalyzer:
                 fall = (ctx.recent_high_price - ctx.real_price) / ctx.recent_high_price
                 tp_detail.append(f"高点回落{fall:.1%}")
         if ctx.profit_level:
-            tp_detail.append(f"低点涨{ctx.profit_pct_from_low:.1%}")
+            tp_detail.append(f"低点涨{ctx.profit_pct_from_low:.1%} ")
         if tp_detail:
             risk_parts.append("止盈风险:" + "，".join(tp_detail))
         # 低位机会
