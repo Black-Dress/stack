@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 数据获取模块：负责所有数据获取（baostock、新浪、akshare情绪指标）、状态管理及缓存。
+深度融合后增加 extra_sentiment 传递和 ai_params_advice 缓存。
 """
 import os
 import json
@@ -87,7 +88,6 @@ class DataFetcher:
             self._logged_in = False
 
     def load_state(self) -> Dict:
-        """从文件加载 ETF 状态字典"""
         if not os.path.exists(STATE_FILE):
             return {}
         try:
@@ -98,12 +98,10 @@ class DataFetcher:
             return {}
 
     def save_state(self, state: Dict):
-        """保存 ETF 状态到文件"""
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     def _load_cache(self) -> Dict:
-        """加载缓存文件"""
         if not os.path.exists(CACHE_FILE):
             return {}
         try:
@@ -113,7 +111,6 @@ class DataFetcher:
             return {}
 
     def _save_cache(self, cache: Dict):
-        """保存缓存文件"""
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
@@ -121,13 +118,11 @@ class DataFetcher:
             logger.error(f"保存缓存失败: {e}")
 
     def _get_env_key(self, date_str: str = None) -> str:
-        """生成环境缓存的键（按日期）"""
         if date_str is None:
             date_str = datetime.date.today().strftime("%Y-%m-%d")
         return f"env_{date_str}"
 
     def get_cached_environment(self) -> Optional[Dict]:
-        """获取当天的环境缓存（若存在且未过期）"""
         cache = self._load_cache()
         key = self._get_env_key()
         if key not in cache:
@@ -142,8 +137,9 @@ class DataFetcher:
 
     def save_environment_cache(self, market_state: str, market_factor: float,
                                buy_weights: Dict, sell_weights: Dict,
-                               sentiment: float, sentiment_raw: float):
-        """保存当天的市场环境、权重和情绪到缓存，并更新情绪历史"""
+                               sentiment: float, sentiment_raw: float,
+                               ai_params_advice: Optional[Dict] = None):
+        """保存当天的市场环境、权重、情绪以及AI参数建议到缓存"""
         cache = self._load_cache()
         key = self._get_env_key()
         today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -156,7 +152,8 @@ class DataFetcher:
             "sell_weights": sell_weights,
             "sentiment": sentiment,
             "sentiment_raw": sentiment_raw,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "ai_params_advice": ai_params_advice,  # 新增
         }
 
         date_list = cache.get("_env_date_list", [])
@@ -177,7 +174,6 @@ class DataFetcher:
         self._save_cache(cache)
 
     def _get_market_cache_key(self, market_df: pd.DataFrame) -> str:
-        """根据最新的 20 根 K 线生成市场状态缓存键"""
         recent = market_df.tail(20)
         data_str = recent[["close", "volume", "macd_dif", "rsi"]].round(4).to_json()
         key = hashlib.md5(data_str.encode()).hexdigest()
@@ -185,9 +181,21 @@ class DataFetcher:
         return f"market_state_{today}_{key}"
 
     def get_market_state(
-        self, market_df: pd.DataFrame, ai_client: Optional["AIClient"] = None
+        self, market_df: pd.DataFrame, ai_client: Optional["AIClient"] = None,
+        extra_sentiment: Optional[Dict] = None
     ) -> Tuple[str, float]:
-        """获取市场状态和因子（优先使用环境缓存，其次调用 AI 或简单规则）"""
+        """获取市场状态和因子（可接受额外情绪指标）"""
+        # 如果提供了额外情绪指标，则直接向AI请求最新分析，不使用缓存
+        if extra_sentiment is not None:
+            if ai_client:
+                return ai_client.refine_market_state(market_df, extra_sentiment=extra_sentiment)
+            else:
+                last = market_df.iloc[-1]
+                above_ma20 = last["close"] > last["ma_short"]
+                above_ma60 = last["close"] > last.get("ma_long", last["ma_short"])
+                return fallback_market_state(above_ma20, above_ma60)
+
+        # 常规路线：先查环境缓存，再查独立缓存
         cached = self.get_cached_environment()
         if cached:
             return cached["market_state"], cached["market_factor"]
@@ -214,7 +222,6 @@ class DataFetcher:
     def get_daily_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
-        """从 baostock 获取日线数据"""
         rs = bs.query_history_k_data_plus(
             code,
             "date,code,open,high,low,close,volume,amount",
@@ -239,7 +246,6 @@ class DataFetcher:
     def get_weekly_data(
         self, code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
-        """获取周线数据（基于日线 resample），并计算周线 MA20"""
         from .config import WEEKLY_MA
         df = self.get_daily_data(code, start_date, end_date)
         if df is None:
@@ -249,7 +255,6 @@ class DataFetcher:
         return weekly
 
     def get_realtime_price(self, code: str) -> Optional[float]:
-        """从新浪接口获取实时价格"""
         try:
             for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
                 url = f"http://{domain}/list={code.replace('.','')}"
@@ -265,7 +270,6 @@ class DataFetcher:
             return None
 
     def load_positions(self) -> pd.DataFrame:
-        """加载持仓列表（CSV 文件，包含“代码”和“名称”列）"""
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
@@ -273,7 +277,6 @@ class DataFetcher:
         return df[["代码", "名称"]]
 
     def _get_latest_trade_date(self) -> str:
-        """获取最近的一个交易日（格式 YYYYMMDD）"""
         if self._last_trade_date:
             return self._last_trade_date
         today = datetime.date.today()
@@ -288,12 +291,10 @@ class DataFetcher:
 
     # ---------- 情绪指标获取 ----------
     def fetch_sentiment_indicators(self) -> dict:
-        """通过 akshare 获取情绪相关原始指标"""
         raw = {}
         if not AKSHARE_AVAILABLE:
             return raw
-        # ... (保持不变，限于篇幅，内部逻辑未改)
-        # 1. 北向资金
+
         try:
             df_north = ak.stock_hsgt_hist_em(symbol="北向资金")
             if not df_north.empty:
@@ -304,7 +305,6 @@ class DataFetcher:
         except Exception as e:
             logger.debug(f"北向资金获取失败: {e}")
 
-        # 2. 主力资金
         try:
             df_fund = ak.stock_market_fund_flow()
             if not df_fund.empty:
@@ -316,7 +316,6 @@ class DataFetcher:
         except Exception as e:
             logger.debug(f"主力资金流向获取失败: {e}")
 
-        # 3. 涨跌停比
         try:
             trade_date = self._get_latest_trade_date()
             zt_count = dt_count = 0
@@ -334,7 +333,6 @@ class DataFetcher:
         except Exception as e:
             logger.debug(f"涨跌停数据获取失败: {e}")
 
-        # 4. 上涨下跌家数比
         try:
             now = time.time()
             if self._breadth_cache and (now - self._breadth_cache[0]) < 300:
@@ -352,7 +350,6 @@ class DataFetcher:
         except Exception as e:
             logger.debug(f"上涨下跌家数获取失败: {e}")
 
-        # 5. 历史波动率
         try:
             df_300 = ak.stock_zh_index_daily(symbol="sh000300")
             if not df_300.empty:
@@ -367,7 +364,6 @@ class DataFetcher:
         except Exception as e:
             logger.debug(f"历史波动率获取失败: {e}")
 
-        # 6. 融资余额变化率
         try:
             start = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y%m%d")
             end = datetime.datetime.now().strftime("%Y%m%d")
@@ -429,7 +425,6 @@ class DataFetcher:
         return max(0.6, min(1.4, score))
 
     def compute_sentiment_factor(self, indicators: dict) -> Tuple[float, float]:
-        """综合各情绪指标，输出平滑后的情绪因子与原始值"""
         if not indicators:
             return 1.0, 1.0
 
@@ -480,7 +475,6 @@ class DataFetcher:
         return smoothed, raw_sentiment
 
     def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
-        """根据情绪因子和近期历史给出风险提示文本"""
         if len(self._raw_sentiment_history) >= 20:
             recent = sorted(self._raw_sentiment_history[-20:])
             overheat = recent[int(len(recent) * 0.8)]
@@ -500,7 +494,6 @@ class DataFetcher:
             return f"💡💡 市场情绪极度恐慌(<{panic:.2f})，左侧布局良机"
 
     def get_sentiment_factor_simple(self, macro_df: pd.DataFrame) -> Tuple[float, float]:
-        """当 akshare 不可用时，基于大盘 RSI 计算简化的情绪因子"""
         if len(macro_df) < RSI_PERIOD + 1:
             return 1.0, 1.0
         delta = macro_df["close"].diff()

@@ -174,36 +174,41 @@
     "timestamp": 1777340752.0869381
   },
   "env_2026-04-28": {
-    "market_state": "强势牛市",
-    "market_factor": 1.35,
+    "market_state": "震荡偏强",
+    "market_factor": 1.15,
     "buy_weights": {
-      "price_above_ma20": 0.1994047619047619,
-      "volume_above_ma5": 0.15178571428571425,
-      "macd_golden_cross": 0.03571428571428571,
-      "kdj_golden_cross": 0.03571428571428571,
-      "bollinger_break_up": 0.02678571428571428,
-      "williams_oversold": 0.06547619047619047,
-      "market_above_ma20": 0.022321428571428572,
-      "market_above_ma60": 0.03571428571428571,
-      "market_amount_above_ma20": 0.022321428571428572,
-      "outperform_market": 0.044642857142857144,
-      "weekly_above_ma20": 0.044642857142857144,
-      "tmsv_score": 0.2589285714285714,
-      "rsi_oversold": 0.056547619047619034
+      "price_above_ma20": 0.17835365853658533,
+      "volume_above_ma5": 0.14416376306620204,
+      "macd_golden_cross": 0.035714285714285705,
+      "kdj_golden_cross": 0.035714285714285705,
+      "bollinger_break_up": 0.026785714285714277,
+      "williams_oversold": 0.07382404181184667,
+      "market_above_ma20": 0.022321428571428565,
+      "market_above_ma60": 0.035714285714285705,
+      "market_amount_above_ma20": 0.022321428571428565,
+      "outperform_market": 0.04464285714285713,
+      "weekly_above_ma20": 0.04464285714285713,
+      "tmsv_score": 0.243684668989547,
+      "rsi_oversold": 0.09211672473867592
     },
     "sell_weights": {
-      "price_below_ma20": 0.11695906432748539,
-      "bollinger_break_down": 0.058479532163742694,
-      "williams_overbought": 0.12854463202030234,
-      "rsi_overbought": 0.14316451506123798,
-      "underperform_market": 0.058479532163742694,
-      "stop_loss_ma_break": 0.29239766081871343,
-      "weekly_below_ma20": 0.058479532163742694,
-      "downside_momentum": 0.1266137040714995,
-      "max_drawdown_stop": 0.016881827209533268
+      "price_below_ma20": 0.15995872033023734,
+      "bollinger_break_down": 0.05847953216374268,
+      "williams_overbought": 0.1066391468868249,
+      "rsi_overbought": 0.10835913312693496,
+      "underperform_market": 0.05847953216374268,
+      "stop_loss_ma_break": 0.2923976608187134,
+      "weekly_below_ma20": 0.05847953216374268,
+      "downside_momentum": 0.12985896112831094,
+      "max_drawdown_stop": 0.027347781217750253
     },
     "sentiment": 0.7,
-    "sentiment_raw": 0.8881537369659661,
-    "timestamp": 1777348695.4695547
+    "sentiment_raw": 0.8520086581858983,
+    "timestamp": 1777361354.473023,
+    "ai_params_advice": {
+      "buy_threshold_shift": 0.0,
+      "sell_threshold_shift": 0.0,
+      "confirm_days_shift": 0
+    }
   }
 }

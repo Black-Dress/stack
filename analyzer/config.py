@@ -174,6 +174,22 @@ ADJUST_MULT_BASE = 1.2
 ADJUST_BUY_DELTA_MAX = 0.03
 ADJUST_SELL_DELTA_MAX = 0.03
 
+# ==================== 新增：AI 深度融合控制常量 ====================
+# 是否启用个股权重微调
+AI_PER_ETF_WEIGHT_ADJUST = True
+# 个股权重微调的最大偏移幅度（相对于全局权重）
+AI_PER_ETF_WEIGHT_MAX_DELTA = 0.08
+# 是否启用 AI 参数建议（买卖阈值、确认天数）
+AI_PARAMS_ADVISE = True
+# AI 参数建议对现有参数的影响权重（0:只用规则，1:只用AI，建议0.3~0.5）
+AI_PARAMS_ADVISE_TRUST = 0.4
+# 批量生成 ETF 评论时每批数量
+AI_BATCH_COMMENT_SIZE = 6
+# 批量生成止盈建议时每批数量
+AI_BATCH_TAKE_PROFIT_SIZE = 6
+# AI 市场状态分析时是否传入情绪指标集
+AI_MARKET_STATE_WITH_SENTIMENT = True
+
 # ---------------------------- 邮件配置 ----------------------------
 def get_email_config():
     """获取邮件配置（从环境变量读取）"""
