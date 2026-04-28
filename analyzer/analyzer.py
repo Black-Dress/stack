@@ -2,33 +2,36 @@
 # -*- coding: utf-8 -*-
 """
 核心分析模块：深度融合AI，增加参数建议、个股权重微调、批量评论/止盈。
+（批处理入口已迁移至 main.py）
 """
 import datetime
 import logging
-import re
-import time
 import numpy as np
 import pandas as pd
 import math
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Tuple, Optional, Any
+import time
 from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Any
 
 from .config import *
 from .utils import (
+    calc_rsi,
+    calc_macd,
+    calculate_atr,
+    calculate_adx,
     pad_display,
     validate_and_filter_weights,
-    send_email,
     sigmoid_normalize,
     nonlinear_score_transform,
     clip_env_factor,
     cap,
     weighted_sum,
-    get_dynamic_history_days,
     get_dynamic_confirm_days,
+    get_dynamic_history_days,
     fallback_market_state,
     format_etf_output_line,
+    format_detailed_report,
 )
 from .factors import (
     factor_buy_price_above_ma20,
@@ -46,51 +49,24 @@ from .factors import (
     factor_sell_downside_momentum,
     factor_sell_max_drawdown_stop,
     get_trailing_profit_signals,
+    compute_tmsv,
 )
 from .ai import AIClient
-from .fetcher import DataFetcher, AKSHARE_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
-# 显示列宽
+# 显示列宽（可能由外部（main.py）使用，但保留在 analyzer 内无妨）
 DISPLAY_NAME_WIDTH = 14
 DISPLAY_CODE_WIDTH = 12
 DISPLAY_PRICE_WIDTH = 8
 DISPLAY_CHANGE_WIDTH = 8
 DISPLAY_SCORE_WIDTH = 6
 DISPLAY_ACTION_WIDTH = 16
+
 DETAIL_COL_NAME = 25
 DETAIL_COL_STRENGTH = 8
 DETAIL_COL_WEIGHT = 8
 DETAIL_COL_CONTRIB = 8
-
-# 中期过滤常数
-MA30_WINDOW = 30
-MA30_WEAKNESS_PENALTY = 0.9
-
-# TMSV 缩放常数
-TMSV_PRICE_DIVISOR = 0.1
-TMSV_SLOPE_SCALE = 10.0
-TMSV_RSI_SCALE = 3.33
-TMSV_MACD_DIFF_EPS = 0.001
-TMSV_MACD_CHANGE_SCALE = 100.0
-TMSV_VOL_RATIO_BASE = 0.8
-TMSV_VOL_RATIO_DIVISOR = 1.2
-TMSV_VOL_CONSIST_SCORE = 100.0
-
-# 风险提示阈值
-RISK_EXTREME_LOW = -0.5
-RISK_EXTREME_HIGH = 0.8
-RISK_HIGH_VOL_THRESH = 0.03
-
-# 止盈阈值调整系数
-TAKE_PROFIT_BULL_MULT = 1.10
-TAKE_PROFIT_BEAR_MULT = 0.90
-TAKE_PROFIT_HIGHVOL_MULT = 0.85
-
-# 批处理配置
-HISTORY_DAYS = 200
-MAX_WORKERS = 5
 
 
 @dataclass
@@ -132,22 +108,6 @@ class ETFContext:
     profit_level: Optional[str] = None
 
 
-def calc_rsi(series: pd.Series, period: int = RSI_WINDOW) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    return 100 - 100 / (1 + gain / loss)
-
-
-def calc_macd(series, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
-    exp_fast = series.ewm(span=fast, adjust=False).mean()
-    exp_slow = series.ewm(span=slow, adjust=False).mean()
-    dif = exp_fast - exp_slow
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    hist = dif - dea
-    return dif, dea, hist
-
-
 class DataAnalyzer:
     PROFIT_DOWNGRADE_CLEAR = {
         "极度看好": "谨慎买入(高估)",
@@ -170,7 +130,6 @@ class DataAnalyzer:
         self.params = params or DEFAULT_PARAMS.copy()
         self.market_info = {}
         self._indicator_cache = {}
-        # 新增：存储 AI 参数建议
         self.ai_params_advice = None
 
     def set_market_info(self, market_info):
@@ -181,28 +140,20 @@ class DataAnalyzer:
         self.sell_weights = sell_w
 
     def set_ai_params_advice(self, advice: dict):
-        """设置来自 AI 的参数建议"""
         self.ai_params_advice = advice
 
     def _apply_ai_params_advice(self, base_params: dict) -> dict:
-        """将 AI 参数建议融合到基础参数中"""
         if not self.ai_params_advice or not AI_PARAMS_ADVISE:
             return base_params
         try:
             trust = AI_PARAMS_ADVISE_TRUST
             params = base_params.copy()
-            # 买入阈值：AI 偏移融合
             buy_shift = self.ai_params_advice.get("buy_threshold_shift", 0)
-            params["BUY_THRESHOLD"] = max(0.35, min(0.65,
-                                                     params["BUY_THRESHOLD"] + buy_shift * trust))
-            # 卖出阈值融合
+            params["BUY_THRESHOLD"] = max(0.35, min(0.65, params["BUY_THRESHOLD"] + buy_shift * trust))
             sell_shift = self.ai_params_advice.get("sell_threshold_shift", 0)
-            params["SELL_THRESHOLD"] = max(-0.4, min(-0.1,
-                                                     params["SELL_THRESHOLD"] + sell_shift * trust))
-            # 确认天数融合
+            params["SELL_THRESHOLD"] = max(-0.4, min(-0.1, params["SELL_THRESHOLD"] + sell_shift * trust))
             days_shift = self.ai_params_advice.get("confirm_days_shift", 0)
-            params["CONFIRM_DAYS"] = int(max(MIN_CONFIRM_DAYS, min(MAX_CONFIRM_DAYS,
-                                                                    params["CONFIRM_DAYS"] + days_shift * trust)))
+            params["CONFIRM_DAYS"] = int(max(MIN_CONFIRM_DAYS, min(MAX_CONFIRM_DAYS, params["CONFIRM_DAYS"] + days_shift * trust)))
             return params
         except Exception:
             return base_params
@@ -210,18 +161,6 @@ class DataAnalyzer:
     @staticmethod
     def _nonlinear_score_transform(raw, market_status="震荡偏弱"):
         return nonlinear_score_transform(raw, market_status, NONLINEAR_SCALE_BULL, NONLINEAR_SCALE_RANGE)
-
-    def _get_tmsv_weights(self, market_status, volatility):
-        if "牛" in market_status:
-            w = {"trend": 0.40, "momentum": 0.25, "volume": 0.15}
-        elif "熊" in market_status:
-            w = {"trend": 0.20, "momentum": 0.30, "volume": 0.25}
-        else:
-            w = {"trend": 0.25, "momentum": 0.40, "volume": 0.15}
-        if volatility > TMSV_HIGH_VOL_THRESH:
-            w["trend"] = max(TMSV_MIN_TREND_WEIGHT, w["trend"] - TMSV_TREND_REDUCE)
-            w["momentum"] += TMSV_TREND_REDUCE
-        return w
 
     def calc_change_pct(self, real_price, hist_df, today):
         if real_price is None or hist_df is None or hist_df.empty:
@@ -232,26 +171,6 @@ class DataAnalyzer:
         else:
             base_close = hist_df.iloc[-1]["close"]
         return (real_price - base_close) / base_close * 100 if base_close > 0 else 0.0
-
-    def calculate_atr(self, df, period=14):
-        tr = pd.concat([df["high"] - df["low"],
-                         abs(df["high"] - df["close"].shift()),
-                         abs(df["low"] - df["close"].shift())], axis=1).max(1)
-        return tr.rolling(period).mean()
-
-    def calculate_adx(self, df, period=14):
-        high, low, close = df["high"], df["low"], df["close"]
-        up_move = high.diff()
-        down_move = -low.diff()
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        tr = self.calculate_atr(df, 1)
-        atr = tr.rolling(period).mean()
-        plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / atr
-        minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = dx.rolling(period).mean()
-        return pd.DataFrame({"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index)
 
     def _get_cache_key(self, code, start_date, end_date):
         today_str = datetime.date.today().strftime("%Y%m%d")
@@ -291,8 +210,8 @@ class DataAnalyzer:
         df["williams_r"] = (high_14 - df["close"]) / (high_14 - low_14) * -100
 
         df["rsi"] = calc_rsi(df["close"])
-        df["atr"] = self.calculate_atr(df, ATR_PERIOD)
-        adx_df = self.calculate_adx(df)
+        df["atr"] = calculate_atr(df, ATR_PERIOD)
+        adx_df = calculate_adx(df)
         df["plus_di"] = adx_df["plus_di"]
         df["minus_di"] = adx_df["minus_di"]
         df["adx"] = adx_df["adx"]
@@ -308,57 +227,15 @@ class DataAnalyzer:
             self._indicator_cache[cache_key] = (df.copy(), time.time())
         return df
 
-    def compute_tmsv(self, df, market_status="震荡偏弱", volatility=0.02):
-        if df is None or len(df) < 20:
-            return pd.Series([50.0] * max(1, len(df))) if len(df) > 0 else pd.Series([50.0])
-
-        df = df.copy()
-        if "ma20" not in df.columns: df["ma20"] = df["close"].rolling(TMSV_MA20_WINDOW).mean()
-        if "ma60" not in df.columns: df["ma60"] = df["close"].rolling(TMSV_MA60_WINDOW).mean()
-        if "rsi" not in df.columns: df["rsi"] = calc_rsi(df["close"])
-        if "macd_hist" not in df.columns: _, _, df["macd_hist"] = calc_macd(df["close"])
-        if "atr" not in df.columns: df["atr"] = self.calculate_atr(df, TMSV_ATR_WINDOW)
-        if "vol_ma" not in df.columns: df["vol_ma"] = df["volume"].rolling(TMSV_VOL_MA_WINDOW).mean()
-
-        price_above_ma20 = ((df["close"] - df["ma20"]) / (df["ma20"].replace(0, np.nan) * TMSV_PRICE_DIVISOR)).clip(0,1).fillna(0)
-        price_above_ma60 = ((df["close"] - df["ma60"]) / (df["ma60"].replace(0, np.nan) * TMSV_PRICE_DIVISOR)).clip(0,1).fillna(0)
-        ma20_slope = df["ma20"].diff(5) / df["ma20"].shift(5).replace(0, np.nan)
-        slope_score = (ma20_slope * TMSV_SLOPE_SCALE).clip(0,1).fillna(0)
-        trend_score = (price_above_ma20 * TMSV_TREND_MA20_WEIGHT +
-                       price_above_ma60 * TMSV_TREND_MA60_WEIGHT +
-                       slope_score * TMSV_TREND_SLOPE_WEIGHT) * 100
-
-        rsi_score = ((df["rsi"] - 50) * TMSV_RSI_SCALE).clip(0,100).fillna(50)
-        macd_change = df["macd_hist"].diff() / (df["macd_hist"].shift(1).abs() + TMSV_MACD_DIFF_EPS)
-        macd_score = (macd_change * TMSV_MACD_CHANGE_SCALE).clip(0,100).fillna(50)
-        mom_score = rsi_score * TMSV_MOM_RSI_WEIGHT + macd_score * TMSV_MOM_MACD_WEIGHT
-
-        vol_ratio = df["volume"] / df["vol_ma"].replace(0, np.nan)
-        vol_ratio_score = ((vol_ratio - TMSV_VOL_RATIO_BASE) / TMSV_VOL_RATIO_DIVISOR * 100).clip(0,100).fillna(50)
-        price_up = df["close"] > df["close"].shift(1)
-        vol_up = df["volume"] > df["vol_ma"]
-        consistency = np.where(price_up == vol_up, TMSV_VOL_CONSIST_SCORE, 0)
-        vol_score = vol_ratio_score * TMSV_VOL_RATIO_WEIGHT + consistency * TMSV_VOL_CONSIST_WEIGHT
-
-        atr_pct = df["atr"] / df["close"].replace(0, np.nan)
-        vol_factor = np.select(
-            [atr_pct < TMSV_VOL_LOW_THRESH, atr_pct > TMSV_VOL_HIGH_THRESH],
-            [TMSV_VOL_LOW_FACTOR, TMSV_VOL_HIGH_FACTOR],
-            default=TMSV_VOL_MID_FACTOR_BASE - (atr_pct - TMSV_VOL_LOW_THRESH) / TMSV_VOL_BAND_WIDTH * TMSV_VOL_MID_FACTOR_SLOPE)
-        vol_factor = np.nan_to_num(vol_factor, nan=1.0)
-
-        w = self._get_tmsv_weights(market_status, volatility)
-        tmsv = (trend_score * w['trend'] + mom_score * w['momentum'] + vol_score * w['volume']) * vol_factor
-        return tmsv.clip(0,100).fillna(50)
-
-    # ---------- 权重处理（保持原逻辑，新增个股微调接口） ----------
     def compute_dynamic_trust(self, ai_weights, default_weights):
         base_trust = 0.75
         zero_count = sum(1 for v in ai_weights.values() if v < 0.01)
-        if zero_count > len(ai_weights) * 0.3: base_trust = min(base_trust, 0.5)
+        if zero_count > len(ai_weights) * 0.3:
+            base_trust = min(base_trust, 0.5)
         max_w = max(ai_weights.values())
-        if max_w > 0.45: base_trust = min(base_trust, 0.6)
-        dot = sum(ai_weights.get(k,0) * default_weights.get(k,0) for k in default_weights)
+        if max_w > 0.45:
+            base_trust = min(base_trust, 0.6)
+        dot = sum(ai_weights.get(k, 0) * default_weights.get(k, 0) for k in default_weights)
         norm_ai = math.sqrt(sum(v**2 for v in ai_weights.values()))
         norm_def = math.sqrt(sum(v**2 for v in default_weights.values()))
         if norm_ai > 0 and norm_def > 0 and (similarity := dot / (norm_ai * norm_def)) < 0.6:
@@ -366,21 +243,22 @@ class DataAnalyzer:
         return base_trust
 
     def blend_weights(self, ai_w, def_w, trust):
-        blended = {k: ai_w.get(k,0) * trust + def_w[k] * (1 - trust) for k in def_w}
+        blended = {k: ai_w.get(k, 0) * trust + def_w[k] * (1 - trust) for k in def_w}
         total = sum(blended.values())
-        return {k: v/total for k, v in blended.items()} if total > 0 else blended
+        return {k: v / total for k, v in blended.items()} if total > 0 else blended
 
     def apply_correlation_penalty(self, weights, factor_names, corr_matrix, penalty_threshold=0.7):
         w = weights.copy()
         high_pairs = []
         for i, f1 in enumerate(factor_names):
             for f2 in factor_names[i+1:]:
-                if corr_matrix.loc[f1, f2] > penalty_threshold and w.get(f1,0) > 0.12 and w.get(f2,0) > 0.12:
+                if corr_matrix.loc[f1, f2] > penalty_threshold and w.get(f1, 0) > 0.12 and w.get(f2, 0) > 0.12:
                     high_pairs.append((f1, f2))
         for f1, f2 in high_pairs:
-            w[f1] *= 0.8; w[f2] *= 0.8
+            w[f1] *= 0.8
+            w[f2] *= 0.8
         total = sum(w.values())
-        return {k: v/total for k, v in w.items()} if total > 0 else w
+        return {k: v / total for k, v in w.items()} if total > 0 else w
 
     def compute_factor_correlation(self, df, factor_names):
         return pd.DataFrame(np.eye(len(factor_names)), index=factor_names, columns=factor_names)
@@ -400,9 +278,7 @@ class DataAnalyzer:
         sell_w = self.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
         return buy_w, sell_w
 
-    # ---------- 新增：调用 AI 微调个股权重 ----------
     def adjust_weights_for_etf(self, ai_client: AIClient, ctx: ETFContext) -> Tuple[Dict, Dict]:
-        """如果启用个股权重微调，返回微调后的权重，否则返回全局权重"""
         if not ai_client or not AI_PER_ETF_WEIGHT_ADJUST:
             return self.buy_weights, self.sell_weights
         features = {
@@ -641,7 +517,6 @@ class DataAnalyzer:
             return DataAnalyzer.PROFIT_DOWNGRADE_HALF.get(action_level, action_level)
         return action_level
 
-    # ---------- 核心分析（引入个股权重微调） ----------
     def _core_analysis(self, ctx, ai_client=None):
         if ctx.real_price is None:
             ctx.error = "实时价格获取失败"
@@ -656,13 +531,11 @@ class DataAnalyzer:
         ctx.atr_pct = atr_pct
         ctx.rsi = d["rsi"]
 
-        # 中期趋势
         if "ma30" in d and not pd.isna(d["ma30"]):
             ctx.above_ma30 = ctx.real_price > d["ma30"]
         else:
             ctx.above_ma30 = True
 
-        # 周线
         ctx.weekly_above = ctx.weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
@@ -670,10 +543,9 @@ class DataAnalyzer:
                 ctx.weekly_above = w["close"] > w["ma_short"]
                 ctx.weekly_below = w["close"] < w["ma_short"]
 
-        # TMSV
         market_status = ctx.market.get("macro_status", "震荡偏弱")
         try:
-            tmsv_series = self.compute_tmsv(ctx.hist_df, market_status, atr_pct)
+            tmsv_series = compute_tmsv(ctx.hist_df, market_status, atr_pct)
             tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
             tmsv = 50.0 if np.isnan(tmsv) else tmsv
         except Exception:
@@ -684,26 +556,20 @@ class DataAnalyzer:
 
         ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
 
-        # 止盈评估
         self._evaluate_take_profit(ctx)
 
-        # 个股权重微调（需在因子计算前，因为权重已确定）
         if ai_client:
             etf_buy_w, etf_sell_w = self.adjust_weights_for_etf(ai_client, ctx)
         else:
             etf_buy_w, etf_sell_w = self.buy_weights, self.sell_weights
 
-        # 因子评分（使用个股微调后的权重）
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
         ctx.buy_score = weighted_sum(ctx.buy_factors, etf_buy_w)
         ctx.sell_score = weighted_sum(ctx.sell_factors, etf_sell_w)
 
-        # 中期过滤
         self._apply_midterm_filter(ctx)
-        # 动量缺失惩罚
         self._apply_momentum_penalty(ctx)
 
-        # 强制卖出逻辑
         max_dd_active = ctx.sell_factors.get("max_drawdown_stop", 0) > 0
         ma_break_active = ctx.sell_factors.get("stop_loss_ma_break", 0) > 0
         ma20 = d.get("ma_short", 0)
@@ -712,10 +578,8 @@ class DataAnalyzer:
             ctx.raw_score = ctx.buy_score - ctx.sell_score
             return ctx
 
-        # 情绪过热惩罚
         self._apply_sentiment_penalty(ctx)
 
-        # 最终合成
         ctx.raw_score = ctx.buy_score - ctx.sell_score
         transformed_raw = self._nonlinear_score_transform(ctx.raw_score, market_status)
         env_factor = clip_env_factor(ctx.market["market_factor"], ctx.market["sentiment_factor"])
@@ -727,7 +591,7 @@ class DataAnalyzer:
             ctx.buy_score *= MA30_WEAKNESS_PENALTY
 
     def _apply_momentum_penalty(self, ctx):
-        if ctx.buy_factors.get("macd_golden_cross",0) == 0 and ctx.buy_factors.get("kdj_golden_cross",0) == 0:
+        if ctx.buy_factors.get("macd_golden_cross", 0) == 0 and ctx.buy_factors.get("kdj_golden_cross", 0) == 0:
             ctx.buy_score *= MOMENTUM_MISSING_PENALTY
 
     def _apply_sentiment_penalty(self, ctx):
@@ -735,7 +599,6 @@ class DataAnalyzer:
         if sentiment >= SENTIMENT_OVERHEAT_THRESHOLD:
             ctx.buy_score *= SENTIMENT_PENALTY_FACTOR
 
-    # ---------- 简要分析（不变） ----------
     def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
                         market, today, state, ai_client=None):
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy())
@@ -808,291 +671,32 @@ class DataAnalyzer:
         final = ctx.final_score
         _, action_level = self.get_action(final, state.get("score_history", []), self.params, ctx.atr_pct)
 
-        lines = ["=" * 70,
-                f"ETF详细分析报告 - {name} ({code})",
-                f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "=" * 70,
-                f"实时价格：{real_price:.3f}",
-                f"涨跌幅：{ctx.change_pct:+.2f}%",
-                f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"]
-        if market.get("sentiment_risk_tip"): lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
-        lines += [f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
-                f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
-                f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
-                f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}", ""]
-
-        if ctx.trailing_profit_level or ctx.profit_level:
-            lines.append("【止盈观察 (仅供参考)】")
-            if ctx.trailing_profit_level:
-                recent_high = ctx.recent_high_price
-                from_high_pct = (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
-                lines.append(f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}")
-                level_text = "清仓级" if ctx.trailing_profit_level == 'clear' else "半仓级"
-                lines.append(f"  移动止盈信号：{level_text}")
-            if ctx.profit_level:
-                lines.append(f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}")
-                level_map = {'clear': '清仓级', 'half': '半仓级', 'watch': '关注级'}
-                lines.append(f"  低点涨幅信号：{level_map.get(ctx.profit_level, '')}")
-            lines.append("  *以上提示不构成自动卖出指令，请结合其他因素决策。")
-            lines.append("")
-
-        def row_line(items):
-            return "".join([pad_display(items[0], DETAIL_COL_NAME),
-                            pad_display(items[1], DETAIL_COL_STRENGTH, "right"),
-                            pad_display(items[2], DETAIL_COL_WEIGHT, "right"),
-                            pad_display(items[3], DETAIL_COL_CONTRIB, "right")])
-
-        lines.append("【买入因子详情】")
-        lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
-        lines.append("-" * 50)
-        buy_contribs = sorted([(k, ctx.buy_factors[k], self.buy_weights.get(k,0), self.buy_weights.get(k,0)*ctx.buy_factors[k])
-                            for k in ctx.buy_factors], key=lambda x: x[3], reverse=True)
-        for name_f, s, w, contrib in buy_contribs:
-            lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["买入总分（含中期过滤）", "", "", f"{ctx.buy_score:.3f}"]))
-        lines.append("")
-
-        lines.append("【卖出因子详情】")
-        lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
-        lines.append("-" * 50)
-        sell_contribs = sorted([(k, ctx.sell_factors[k], self.sell_weights.get(k,0), self.sell_weights.get(k,0)*ctx.sell_factors[k])
-                                for k in ctx.sell_factors], key=lambda x: x[3], reverse=True)
-        for name_f, s, w, contrib in sell_contribs:
-            lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-        lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
-        lines.append("")
-
-        scale = NONLINEAR_SCALE_BULL if ("牛" in market["macro_status"] or "熊" in market["macro_status"]) else NONLINEAR_SCALE_RANGE
-        env_factor = clip_env_factor(market["market_factor"], market["sentiment_factor"])
-        lines += ["【评分合成】",
-                f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
-                f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
-                f"操作等级：{action_level}"]
-
-        # 使用批量结果或实时调用（向后兼容）
-        if ai_comment_override is not None:
-            lines += ["", "【AI 专业点评】"]
-            lines.append(ai_comment_override)
-        elif ai_client:
-            lines += ["", "【AI 专业点评】"]
-            ai_comment = ai_client.comment_on_etf(code, name, final, action_level,
-                                                market["macro_status"], market["market_factor"],
-                                                market["sentiment_factor"], self.buy_weights, self.sell_weights,
-                                                ctx.buy_factors, ctx.sell_factors, ctx.tmsv, ctx.atr_pct)
-            lines.append(ai_comment)
-        else:
-            lines += ["", "【AI 专业点评】未配置 API_KEY，无法生成。"]
-
-        if ai_tp_override is not None:
-            lines += ["", "【AI 止盈建议】"]
-            lines.append(ai_tp_override)
-        elif ai_client and (ctx.trailing_profit_level or ctx.profit_level):
-            lines += ["", "【AI 止盈建议】"]
+        # 获取 AI 评论（如果不为空）
+        ai_comment = ai_comment_override
+        if ai_comment is None and ai_client:
             try:
-                ai_tp_advice = ai_client.take_profit_advice(
+                ai_comment = ai_client.comment_on_etf(code, name, final, action_level,
+                                                    market["macro_status"], market["market_factor"],
+                                                    market["sentiment_factor"],
+                                                    self.buy_weights, self.sell_weights,
+                                                    ctx.buy_factors, ctx.sell_factors,
+                                                    ctx.tmsv, ctx.atr_pct)
+            except Exception as e:
+                logger.error(f"AI评论生成失败: {e}")
+                ai_comment = "（AI 评论生成失败）"
+
+        ai_tp = ai_tp_override
+        if ai_tp is None and ai_client and (ctx.trailing_profit_level or ctx.profit_level):
+            try:
+                ai_tp = ai_client.take_profit_advice(
                     code, name, ctx.profit_pct_from_low,
                     ctx.recent_low_price, real_price,
                     ctx.tmsv, ctx.rsi, ctx.atr_pct,
                     market["macro_status"], market["sentiment_factor"]
                 )
-                lines.append(ai_tp_advice)
             except Exception as e:
                 logger.error(f"AI止盈建议生成失败: {e}")
-                lines.append("（止盈建议生成失败）")
-        else:
-            lines += ["", "【AI 止盈建议】无需止盈建议。"]
+                ai_tp = "（止盈建议生成失败）"
 
-        lines.append("=" * 70)
-        return "\n".join(lines)
-
-
-# ---------- 批处理辅助函数 ----------
-def _prepare_etf_data(code, fetcher, analyzer, start, today_str, params):
-    cache_key_hist = analyzer._get_cache_key(code, start, today_str)
-    hist = fetcher.get_daily_data(code, start, today_str)
-    if hist is not None:
-        hist = analyzer.calculate_indicators(hist, need_amount_ma=False,
-                                            recent_high_window=params["RECENT_HIGH_WINDOW"],
-                                            recent_low_window=params["RECENT_LOW_WINDOW"],
-                                            use_cache=True, cache_key=cache_key_hist)
-    weekly = fetcher.get_weekly_data(code, start, today_str)
-    real_price = fetcher.get_realtime_price(code)
-    return hist, weekly, real_price
-
-
-def _get_or_create_environment(fetcher, analyzer, market_df, macro_df, volatility, market_info_basic, api_key):
-    cached_env = fetcher.get_cached_environment()
-    if cached_env:
-        ai_params = cached_env.get("ai_params_advice")
-        return (cached_env["market_state"], cached_env["market_factor"],
-                cached_env["sentiment"], cached_env["buy_weights"],
-                cached_env["sell_weights"],
-                fetcher.get_sentiment_risk_tip(cached_env["sentiment"]),
-                ai_params)
-
-    ai_client = AIClient(api_key) if api_key else None
-    # 获取情绪指标用于增强市场状态分析
-    extra_sentiment = None
-    if ai_client and AI_MARKET_STATE_WITH_SENTIMENT and AKSHARE_AVAILABLE:
-        try:
-            ind = fetcher.fetch_sentiment_indicators()
-            extra_sentiment = {k: ind[k] for k in ["north_net", "main_net_pct", "zt_dt_ratio", "up_down_ratio"] if k in ind}
-        except:
-            pass
-
-    if ai_client:
-        market_state, market_factor = fetcher.get_market_state(market_df, ai_client, extra_sentiment=extra_sentiment)
-    else:
-        state, factor = fallback_market_state(market_info_basic["market_above_ma20"],
-                                             market_info_basic["market_above_ma60"])
-        market_state, market_factor = state, factor
-
-    sentiment, sentiment_raw = 1.0, 1.0
-    if AKSHARE_AVAILABLE:
-        try:
-            ind = fetcher.fetch_sentiment_indicators()
-            sentiment, sentiment_raw = fetcher.compute_sentiment_factor(ind)
-        except Exception as e:
-            logger.warning(f"获取情绪失败，使用后备: {e}")
-            sentiment, sentiment_raw = fetcher.get_sentiment_factor_simple(macro_df)
-    else:
-        sentiment, sentiment_raw = fetcher.get_sentiment_factor_simple(macro_df)
-    sentiment_risk_tip = fetcher.get_sentiment_risk_tip(sentiment)
-
-    buy_w, sell_w = DEFAULT_BUY_WEIGHTS.copy(), DEFAULT_SELL_WEIGHTS.copy()
-    if api_key:
-        ai_temp = AIClient(api_key)
-        buy_w, sell_w = analyzer.generate_ai_weights(ai_temp, market_state, sentiment,
-                                                    market_info_basic["market_above_ma20"],
-                                                    market_info_basic["market_above_ma60"],
-                                                    market_info_basic["market_amount_above_ma20"], volatility)
-
-    # 尝试获取 AI 参数建议
-    ai_params_advice = None
-    if api_key and AI_PARAMS_ADVISE:
-        try:
-            ai_temp = AIClient(api_key)
-            # 近期评分斜率可用 0 代替
-            ai_params_advice = ai_temp.generate_params_advice(market_state, sentiment, volatility)
-        except Exception as e:
-            logger.warning(f"AI参数建议获取失败: {e}")
-
-    fetcher.save_environment_cache(market_state, market_factor, buy_w, sell_w, sentiment, sentiment_raw,
-                                   ai_params_advice=ai_params_advice)
-    return market_state, market_factor, sentiment, buy_w, sell_w, sentiment_risk_tip, ai_params_advice
-
-
-# ---------- 修改批量分析以支持批量评论和止盈 ----------
-def run_batch_analysis(api_key=None, target_code=None):
-    fetcher = DataFetcher()
-    analyzer = DataAnalyzer()
-    if not fetcher.login(): return
-    try:
-        etf_list = fetcher.load_positions()
-    except Exception as e:
-        print(f"请准备 positions.csv (代码,名称)，错误: {e}"); return
-
-    today = datetime.date.today()
-    start = (today - datetime.timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
-    today_str = today.strftime("%Y-%m-%d")
-
-    market_df = fetcher.get_daily_data(MARKET_INDEX, start, today_str)
-    macro_df = fetcher.get_daily_data(MACRO_INDEX, start, today_str)
-    if market_df is None or macro_df is None:
-        print("获取宏观数据失败"); return
-
-    macro_df = analyzer.calculate_indicators(macro_df, need_amount_ma=False)
-    macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
-    market_df = analyzer.calculate_indicators(market_df, need_amount_ma=True)
-    market_df["atr"] = analyzer.calculate_atr(market_df, ATR_PERIOD)
-    volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
-
-    mkt = market_df.iloc[-1]
-    market_info_basic = {
-        "market_above_ma20": mkt["close"] > mkt["ma_short"],
-        "market_above_ma60": mkt["close"] > mkt.get("ma_long", mkt["ma_short"]),
-        "market_amount_above_ma20": mkt["amount"] > mkt["amount_ma"],
-        "ret_market_5d": (mkt["close"] / market_df.iloc[-5]["close"] - 1) if len(market_df) >= 5 else 0,
-    }
-
-    market_state, market_factor, sentiment, buy_w, sell_w, risk_tip, ai_params_advice = \
-        _get_or_create_environment(fetcher, analyzer, market_df, macro_df, volatility, market_info_basic, api_key)
-
-    market_info = {"macro_status": market_state, "market_factor": market_factor,
-                   "sentiment_factor": sentiment, "sentiment_risk_tip": risk_tip, **market_info_basic}
-    analyzer.set_market_info(market_info)
-    analyzer.set_weights(buy_w, sell_w)
-    analyzer.set_ai_params_advice(ai_params_advice or {})
-
-    params = DEFAULT_PARAMS.copy()
-    params["CONFIRM_DAYS"] = get_dynamic_confirm_days(volatility, params["CONFIRM_DAYS"])
-    # 应用 AI 参数建议
-    params = analyzer._apply_ai_params_advice(params)
-    analyzer.params = params
-
-    state = fetcher.load_state()
-    ai_client = AIClient(api_key) if api_key else None
-
-    if target_code:
-        target = etf_list[etf_list["代码"] == target_code]
-        if target.empty:
-            print(f"未找到代码 {target_code}"); fetcher.logout(); return
-        code, name = target.iloc[0]["代码"], target.iloc[0]["名称"]
-        hist, weekly, real_price = _prepare_etf_data(code, fetcher, analyzer, start, today_str, params)
-        etf_state = state.get(code, {})
-        report = analyzer.detailed_analysis(code, name, real_price, hist, weekly, market_info, today, etf_state, ai_client)
-        print(report)
-        fetcher.logout()
-        return
-
-    print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ETF 分析报告")
-    print(f"市场状态: {market_state}, 市场因子: {market_factor:.2f}")
-    if risk_tip: print(f"情绪因子: {sentiment:.3f} - {risk_tip}")
-    else: print(f"情绪因子: {sentiment:.3f}")
-
-    print(pad_display("名称", DISPLAY_NAME_WIDTH), pad_display("代码", DISPLAY_CODE_WIDTH), pad_display("价格", 10, "right"),
-          pad_display("涨跌", 10, "right"), pad_display("评分", 16, "right"), " " + pad_display("操作", 22), " 信号/提示")
-    print("-" * 95)
-
-    output_lines, results = [], []
-    # 存储每个 ETF 的上下文用于后续批量请求
-    contexts = {}
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = []
-        for _, row in etf_list.iterrows():
-            code, name = row["代码"], row["名称"]
-            hist, weekly, real_price = _prepare_etf_data(code, fetcher, analyzer, start, today_str, params)
-            s = state.get(code, {})
-            # 由于 analyze_single_etf 内部创建 ctx，我们需要 ctx 用于批量请求，
-            # 但当前函数只返回 out,signal,state,score，无法直接获取 ctx。
-            # 为简化，先获取每个 ETF 的分析结果，然后在详细分析阶段收集需要 AI 调用的信息。
-            futures.append(ex.submit(analyzer.analyze_single_etf, code, name, real_price, hist, weekly, market_info, today, s, ai_client))
-        for f in futures:
-            out, signal, new_state, score = f.result()
-            results.append((out, score))
-            m = re.search(r"【.*?\((.*?)\)】", out)
-            if m:
-                state[m.group(1)] = new_state
-
-    results.sort(key=lambda x: x[1], reverse=True)
-    for out, _ in results:
-        print(out); output_lines.append(out)
-
-    # 对于批量评论和止盈，仅当 ai_client 存在且需要时才执行
-    if ai_client:
-        # 收集所有需要详评的 ETF 信息（例如所有，或仅部分）
-        comment_list = []
-        tp_list = []
-        # 重新遍历，构建评论和止盈请求列表，需基于已完成的 context 数据（但当前丢失了 ctx）。 
-        # 这里简化：直接再跑一次轻量分析收集信息（或复用 future 但没有 ctx）。 
-        # 为了演示，我们仅限于为用户目标输出修改，此处可忽略批量评论的实际替换。
-        # 实际集成时，建议修改 analyze_single_etf 返回 ctx 或增加一个收集阶段。
-        pass  # 本实现保留原样，批量调用方法已就绪，可按需调用。
-
-    fetcher.save_state(state)
-    fetcher.logout()
-
-    email_cfg = get_email_config()
-    if email_cfg["send_email"]:
-        send_email(f"ETF分析报告 - {today_str}", "\n".join(output_lines))
+        # 使用 utils 中的格式化函数生成最终报告
+        return format_detailed_report(ctx, market, self.params, ai_comment, ai_tp)

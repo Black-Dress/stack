@@ -2,11 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 通用工具模块：显示宽度、字符串填充、数学辅助、邮件发送、动态窗口等。
+深度融合后新增技术指标计算函数（calc_rsi, calc_macd, calculate_atr, calculate_adx）
+以及详细报告格式化功能。
 """
 import unicodedata
 import logging
 import math
 from typing import List, Dict, Optional, Tuple
+
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -194,3 +199,206 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
         output += "  " + " ".join(parts)
 
     return output
+
+
+# ========================== 技术指标计算函数 ==========================
+def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """计算 RSI 指标"""
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    return 100 - 100 / (1 + gain / loss)
+
+
+def calc_macd(series, fast=12, slow=26, signal=9):
+    """计算 MACD 指标，返回 dif, dea, hist"""
+    exp_fast = series.ewm(span=fast, adjust=False).mean()
+    exp_slow = series.ewm(span=slow, adjust=False).mean()
+    dif = exp_fast - exp_slow
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = dif - dea
+    return dif, dea, hist
+
+
+def calculate_atr(df, period=14) -> pd.Series:
+    """计算 ATR 指标"""
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            abs(df["high"] - df["close"].shift()),
+            abs(df["low"] - df["close"].shift()),
+        ],
+        axis=1,
+    ).max(1)
+    return tr.rolling(period).mean()
+
+
+def calculate_adx(df, period=14) -> pd.DataFrame:
+    """计算 ADX 指标，返回 plus_di, minus_di, adx 的 DataFrame"""
+    high, low, close = df["high"], df["low"], df["close"]
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    tr = calculate_atr(df, 1)
+    atr = tr.rolling(period).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = dx.rolling(period).mean()
+    return pd.DataFrame(
+        {"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index
+    )
+
+
+# ========================== 详细报告格式化 ==========================
+def format_detailed_report(ctx, market, params, ai_comment, ai_tp) -> str:
+    """
+    根据 ETFContext 生成完整的详细分析报告字符串。
+    替代原 DataAnalyzer.detailed_analysis 中的字符串拼接部分。
+    """
+    import datetime
+    from .config import (
+        DETAIL_COL_NAME,
+        DETAIL_COL_STRENGTH,
+        DETAIL_COL_WEIGHT,
+        DETAIL_COL_CONTRIB,
+    )
+
+    # 这里假设 DETAIL_COL_* 在 config 中定义，如果未定义则使用默认值
+    try:
+        from .config import (
+            DETAIL_COL_NAME,
+            DETAIL_COL_STRENGTH,
+            DETAIL_COL_WEIGHT,
+            DETAIL_COL_CONTRIB,
+        )
+    except ImportError:
+        DETAIL_COL_NAME = 25
+        DETAIL_COL_STRENGTH = 8
+        DETAIL_COL_WEIGHT = 8
+        DETAIL_COL_CONTRIB = 8
+
+    final = ctx.final_score
+    _, action_level = ctx.get_action(final, [], {}, None)  # 简单获取标签，不依赖历史
+    # 实际调用来自 DataAnalyzer，可以复用已有的 action_level
+
+    lines = [
+        "=" * 70,
+        f"ETF详细分析报告 - {ctx.name} ({ctx.code})",
+        f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "=" * 70,
+        f"实时价格：{ctx.real_price:.3f}",
+        f"涨跌幅：{ctx.change_pct:+.2f}%",
+        f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}",
+    ]
+    if market.get("sentiment_risk_tip"):
+        lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
+    lines += [
+        f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
+        f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
+        f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
+        f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}",
+        "",
+    ]
+
+    if ctx.trailing_profit_level or ctx.profit_level:
+        lines.append("【止盈观察 (仅供参考)】")
+        if ctx.trailing_profit_level:
+            recent_high = ctx.recent_high_price
+            from_high_pct = (
+                (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
+            )
+            lines.append(
+                f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}"
+            )
+            level_text = "清仓级" if ctx.trailing_profit_level == "clear" else "半仓级"
+            lines.append(f"  移动止盈信号：{level_text}")
+        if ctx.profit_level:
+            lines.append(
+                f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}"
+            )
+            level_map = {"clear": "清仓级", "half": "半仓级", "watch": "关注级"}
+            lines.append(f"  低点涨幅信号：{level_map.get(ctx.profit_level, '')}")
+        lines.append("  *以上提示不构成自动卖出指令，请结合其他因素决策。")
+        lines.append("")
+
+    def row_line(items):
+        return "".join(
+            [
+                pad_display(items[0], DETAIL_COL_NAME),
+                pad_display(items[1], DETAIL_COL_STRENGTH, "right"),
+                pad_display(items[2], DETAIL_COL_WEIGHT, "right"),
+                pad_display(items[3], DETAIL_COL_CONTRIB, "right"),
+            ]
+        )
+
+    lines.append("【买入因子详情】")
+    lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
+    lines.append("-" * 50)
+    buy_contribs = sorted(
+        [
+            (
+                k,
+                ctx.buy_factors[k],
+                ctx.buy_weights.get(k, 0),
+                ctx.buy_weights.get(k, 0) * ctx.buy_factors[k],
+            )
+            for k in ctx.buy_factors
+        ],
+        key=lambda x: x[3],
+        reverse=True,
+    )
+    for name_f, s, w, contrib in buy_contribs:
+        lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
+    lines.append(row_line(["买入总分（含中期过滤）", "", "", f"{ctx.buy_score:.3f}"]))
+    lines.append("")
+
+    lines.append("【卖出因子详情】")
+    lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
+    lines.append("-" * 50)
+    sell_contribs = sorted(
+        [
+            (
+                k,
+                ctx.sell_factors[k],
+                ctx.sell_weights.get(k, 0),
+                ctx.sell_weights.get(k, 0) * ctx.sell_factors[k],
+            )
+            for k in ctx.sell_factors
+        ],
+        key=lambda x: x[3],
+        reverse=True,
+    )
+    for name_f, s, w, contrib in sell_contribs:
+        lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
+    lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
+    lines.append("")
+
+    scale = (
+        2.5
+        if ("牛" in market["macro_status"] or "熊" in market["macro_status"])
+        else 1.5
+    )
+    env_factor = clip_env_factor(market["market_factor"], market["sentiment_factor"])
+    lines += [
+        "【评分合成】",
+        f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
+        f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
+        f"操作等级：{action_level}",
+    ]
+
+    if ai_comment is not None:
+        lines += ["", "【AI 专业点评】"]
+        lines.append(ai_comment)
+    else:
+        lines += ["", "【AI 专业点评】未配置 API_KEY，无法生成。"]
+
+    if ai_tp is not None:
+        lines += ["", "【AI 止盈建议】"]
+        lines.append(ai_tp)
+    else:
+        lines += ["", "【AI 止盈建议】无需止盈建议。"]
+
+    lines.append("=" * 70)
+    return "\n".join(lines)

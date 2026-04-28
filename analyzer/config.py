@@ -201,3 +201,27 @@ def get_email_config():
         "receiver_email": os.getenv("RECEIVER_EMAIL", ""),
         "send_email": os.getenv("SEND_EMAIL", "false").lower() == "true",
     }
+
+# ---------------------------- 新增：原 analyzer.py 顶部的常量 ----------------------------
+MA30_WINDOW = 30
+MA30_WEAKNESS_PENALTY = 0.9
+
+TMSV_PRICE_DIVISOR = 0.1
+TMSV_SLOPE_SCALE = 10.0
+TMSV_RSI_SCALE = 3.33
+TMSV_MACD_DIFF_EPS = 0.001
+TMSV_MACD_CHANGE_SCALE = 100.0
+TMSV_VOL_RATIO_BASE = 0.8
+TMSV_VOL_RATIO_DIVISOR = 1.2
+TMSV_VOL_CONSIST_SCORE = 100.0
+
+RISK_EXTREME_LOW = -0.5
+RISK_EXTREME_HIGH = 0.8
+RISK_HIGH_VOL_THRESH = 0.03
+
+TAKE_PROFIT_BULL_MULT = 1.10
+TAKE_PROFIT_BEAR_MULT = 0.90
+TAKE_PROFIT_HIGHVOL_MULT = 0.85
+
+HISTORY_DAYS = 200
+MAX_WORKERS = 5
