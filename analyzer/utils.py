@@ -9,7 +9,7 @@ import unicodedata
 import logging
 import math
 from typing import List, Dict, Optional, Tuple
-
+from .config import *
 import pandas as pd
 import numpy as np
 
@@ -184,11 +184,11 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
     change_str = f"{change_pct:+.2f}%" if change_pct is not None else "0.00%"
     final_str = f"{final_score:.2f}" if final_score is not None else "0.00"
 
-    output = (f"{pad_display(name, 14)} {pad_display(code, 12)} "
-              f"{pad_display(price_str, 10, 'right')} "
-              f"{pad_display(change_str, 10, 'right')} "
-              f"{pad_display(final_str, 16, 'right')}  "
-              f"{pad_display(action_level, 22)}")
+    output = (f"{pad_display(name, DISPLAY_NAME_WIDTH)} {pad_display(code, DISPLAY_CODE_WIDTH)} "
+              f"{pad_display(price_str, DISPLAY_PRICE_WIDTH, 'right')} "
+              f"{pad_display(change_str, DISPLAY_CHANGE_WIDTH, 'right')} "
+              f"{pad_display(final_str, DISPLAY_SCORE_WIDTH, 'right')}  "
+              f"{pad_display(action_level, DISPLAY_ACTION_WIDTH)}")
 
     parts = []
     if risk_str:

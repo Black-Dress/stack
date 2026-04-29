@@ -57,17 +57,8 @@ from .ai import AIClient
 logger = logging.getLogger(__name__)
 
 # 显示列宽（可能由外部（main.py）使用，但保留在 analyzer 内无妨）
-DISPLAY_NAME_WIDTH = 14
-DISPLAY_CODE_WIDTH = 12
-DISPLAY_PRICE_WIDTH = 8
-DISPLAY_CHANGE_WIDTH = 8
-DISPLAY_SCORE_WIDTH = 6
-DISPLAY_ACTION_WIDTH = 16
 
-DETAIL_COL_NAME = 25
-DETAIL_COL_STRENGTH = 8
-DETAIL_COL_WEIGHT = 8
-DETAIL_COL_CONTRIB = 8
+
 
 
 @dataclass

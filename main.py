@@ -36,6 +36,12 @@ from analyzer.config import (
     AI_PARAMS_ADVISE,
     AI_MARKET_STATE_WITH_SENTIMENT,
     get_email_config,
+    DISPLAY_ACTION_WIDTH,
+    DISPLAY_CHANGE_WIDTH,
+    DISPLAY_CODE_WIDTH,
+    DISPLAY_NAME_WIDTH,
+    DISPLAY_PRICE_WIDTH,
+    DISPLAY_SCORE_WIDTH,
 )
 from analyzer.fetcher import DataFetcher, AKSHARE_AVAILABLE
 from analyzer.utils import (
@@ -49,13 +55,6 @@ from analyzer.utils import (
 
 logger = logging.getLogger(__name__)
 
-# 显示列宽（与 analyzer 保持一致，移到这里独立使用）
-DISPLAY_NAME_WIDTH = 14
-DISPLAY_CODE_WIDTH = 12
-DISPLAY_PRICE_WIDTH = 8
-DISPLAY_CHANGE_WIDTH = 8
-DISPLAY_SCORE_WIDTH = 6
-DISPLAY_ACTION_WIDTH = 16
 
 # ----------------------------------------------------------------------
 # 内部辅助函数（原在 analyzer.py 底部）
@@ -267,13 +266,13 @@ def run_batch_analysis(api_key=None, target_code=None):
     print(
         pad_display("名称", DISPLAY_NAME_WIDTH),
         pad_display("代码", DISPLAY_CODE_WIDTH),
-        pad_display("价格", 10, "right"),
-        pad_display("涨跌", 10, "right"),
-        pad_display("评分", 16, "right"),
-        " " + pad_display("操作", 22),
+        pad_display("价格", DISPLAY_PRICE_WIDTH, "right"),
+        pad_display("涨跌", DISPLAY_CHANGE_WIDTH, "right"),
+        pad_display("评分", DISPLAY_SCORE_WIDTH, "right"),
+        " " + pad_display("操作", DISPLAY_ACTION_WIDTH),
         " 信号/提示",
     )
-    print("-" * 95)
+    print("-" * 120)
 
     output_lines, results = [], []
     contexts = {}
