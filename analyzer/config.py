@@ -224,9 +224,12 @@ TAKE_PROFIT_HIGHVOL_MULT = 0.85
 
 HISTORY_DAYS = 200
 MAX_WORKERS = 5
+AI_PER_ETF_WEIGHT_MIN = 0.02
 
 # ---------------------------- 详细报告列宽 ----------------------------
 DETAIL_COL_NAME = 25
 DETAIL_COL_STRENGTH = 8
 DETAIL_COL_WEIGHT = 8
 DETAIL_COL_CONTRIB = 8
+
+

@@ -32,6 +32,7 @@ from .utils import (
     fallback_market_state,
     format_etf_output_line,
     format_detailed_report,
+    post_process_weights,
 )
 from .factors import (
     factor_buy_price_above_ma20,
@@ -106,6 +107,9 @@ class ETFContext:
     recent_high_price: float = 0.0
     trailing_profit_level: Optional[str] = None
     profit_level: Optional[str] = None
+    
+    buy_weights_used: Dict[str, float] = field(default_factory=dict)
+    sell_weights_used: Dict[str, float] = field(default_factory=dict)
 
 
 class DataAnalyzer:
@@ -276,6 +280,10 @@ class DataAnalyzer:
         ai_sell = self.apply_correlation_penalty(ai_sell, SELL_FACTOR_NAMES, corr_sell)
         buy_w = self.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
         sell_w = self.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
+        
+        buy_w = post_process_weights(buy_w, DEFAULT_BUY_WEIGHTS)
+        sell_w = post_process_weights(sell_w, DEFAULT_SELL_WEIGHTS)
+
         return buy_w, sell_w
 
     def adjust_weights_for_etf(self, ai_client: AIClient, ctx: ETFContext) -> Tuple[Dict, Dict]:
@@ -290,6 +298,8 @@ class DataAnalyzer:
         }
         try:
             new_buy, new_sell = ai_client.adjust_weights_per_etf(self.buy_weights, self.sell_weights, features)
+            new_buy = post_process_weights(new_buy, self.buy_weights)
+            new_sell = post_process_weights(new_sell, self.sell_weights)
             return new_buy, new_sell
         except Exception as e:
             logger.warning(f"个股权重微调失败，使用全局权重: {e}")
@@ -558,11 +568,17 @@ class DataAnalyzer:
 
         self._evaluate_take_profit(ctx)
 
+        # 个股权重微调（需在因子计算前，因为权重已确定）
         if ai_client:
             etf_buy_w, etf_sell_w = self.adjust_weights_for_etf(ai_client, ctx)
         else:
             etf_buy_w, etf_sell_w = self.buy_weights, self.sell_weights
 
+        # ★ 存储实际使用的权重到 ctx
+        ctx.buy_weights_used = etf_buy_w.copy()
+        ctx.sell_weights_used = etf_sell_w.copy()
+
+        # 因子评分（使用个股微调后的权重）
         ctx.buy_factors, ctx.sell_factors = self._compute_factors(ctx, d)
         ctx.buy_score = weighted_sum(ctx.buy_factors, etf_buy_w)
         ctx.sell_score = weighted_sum(ctx.sell_factors, etf_sell_w)
@@ -671,6 +687,7 @@ class DataAnalyzer:
         final = ctx.final_score
         _, action_level = self.get_action(final, state.get("score_history", []), self.params, ctx.atr_pct)
 
+        # AI 评论
         ai_comment = ai_comment_override
         if ai_comment is None and ai_client:
             try:
@@ -684,6 +701,7 @@ class DataAnalyzer:
                 logger.error(f"AI评论生成失败: {e}")
                 ai_comment = "（AI 评论生成失败）"
 
+        # AI 止盈建议
         ai_tp = ai_tp_override
         if ai_tp is None and ai_client and (ctx.trailing_profit_level or ctx.profit_level):
             try:
@@ -697,7 +715,5 @@ class DataAnalyzer:
                 logger.error(f"AI止盈建议生成失败: {e}")
                 ai_tp = "（止盈建议生成失败）"
 
-        # 调用格式化函数，传入所有权重和 action_level
-        return format_detailed_report(ctx, market, self.params,
-                                      self.buy_weights, self.sell_weights,
-                                      action_level, ai_comment, ai_tp)
+        # 调用新的格式化函数
+        return format_detailed_report(ctx, market, self.params, action_level, ai_comment, ai_tp)

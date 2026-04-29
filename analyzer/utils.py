@@ -252,90 +252,153 @@ def calculate_adx(df, period=14) -> pd.DataFrame:
 
 
 # ========================== 详细报告格式化 ==========================
-def format_detailed_report(ctx, market, params, buy_weights, sell_weights,
-                           action_level, ai_comment, ai_tp) -> str:
+def format_detailed_report(ctx, market, params, action_level, ai_comment, ai_tp) -> str:
     """
-    根据 ETFContext 生成完整的详细分析报告字符串。
+    生成结构紧凑、对齐美观的 ETF 详细分析报告。
+    移除全局 vs 微调权重对比，因子表格只显示非零贡献项，整体高度精简。
     """
     import datetime
-    from .config import DETAIL_COL_NAME, DETAIL_COL_STRENGTH, DETAIL_COL_WEIGHT, DETAIL_COL_CONTRIB
-    from .utils import clip_env_factor, pad_display, get_display_width  # 避免循环引用
+    from .utils import clip_env_factor, pad_display
 
-    final = ctx.final_score
+    # ---------- 基础行情（一行式）----------
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"  {ctx.name} ({ctx.code})  分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("-" * 70)
+    lines.append(
+        f"  价格 {ctx.real_price:>6.3f}  |  涨跌 {ctx.change_pct:>+6.2f}%  |  "
+        f"ATR {ctx.atr_pct*100:>4.2f}%  |  RSI {ctx.rsi:>5.1f}  |  "
+        f"TMSV {ctx.tmsv:>5.1f} (强度{ctx.tmsv_strength:.2f})  |  "
+        f"中期均线(30日): {'站上' if ctx.above_ma30 else '跌破'}"
+    )
+    lines.append("")
 
-    lines = ["=" * 70,
-             f"ETF详细分析报告 - {ctx.name} ({ctx.code})",
-             f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-             "=" * 70,
-             f"实时价格：{ctx.real_price:.3f}",
-             f"涨跌幅：{ctx.change_pct:+.2f}%",
-             f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"]
+    # ---------- 市场环境 ----------
+    lines.append(f"  市场状态：{market['macro_status']}，市场因子 {market['market_factor']:.2f}，情绪因子 {market['sentiment_factor']:.2f}")
     if market.get("sentiment_risk_tip"):
-        lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
-    lines += [f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
-              f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
-              f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
-              f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}", ""]
+        lines.append(f"  情绪提示：{market['sentiment_risk_tip']}")
+    lines.append("")
 
+    # ---------- 止盈观察（仅触发时显示）----------
     if ctx.trailing_profit_level or ctx.profit_level:
-        lines.append("【止盈观察 (仅供参考)】")
+        parts = []
         if ctx.trailing_profit_level:
-            recent_high = ctx.recent_high_price
-            from_high_pct = (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
-            lines.append(f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}")
-            level_text = "清仓级" if ctx.trailing_profit_level == 'clear' else "半仓级"
-            lines.append(f"  移动止盈信号：{level_text}")
+            fall = (ctx.recent_high_price - ctx.real_price) / ctx.recent_high_price if ctx.recent_high_price > 0 else 0
+            parts.append(f"高点回落{fall:.1%} ({'清仓级' if ctx.trailing_profit_level == 'clear' else '半仓级'})")
         if ctx.profit_level:
-            lines.append(f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}")
-            level_map = {'clear': '清仓级', 'half': '半仓级', 'watch': '关注级'}
-            lines.append(f"  低点涨幅信号：{level_map.get(ctx.profit_level, '')}")
-        lines.append("  *以上提示不构成自动卖出指令，请结合其他因素决策。")
+            level_map = {'clear':'清仓级','half':'半仓级','watch':'关注级'}
+            parts.append(f"低点涨{ctx.profit_pct_from_low:.1%} ({level_map.get(ctx.profit_level, '')})")
+        lines.append("  ⚠ 止盈提示：" + " | ".join(parts))
         lines.append("")
 
-    def row_line(items):
-        return "".join([pad_display(items[0], DETAIL_COL_NAME),
-                        pad_display(items[1], DETAIL_COL_STRENGTH, "right"),
-                        pad_display(items[2], DETAIL_COL_WEIGHT, "right"),
-                        pad_display(items[3], DETAIL_COL_CONTRIB, "right")])
+    # ---------- 因子表格辅助函数 ----------
+    def _render_factor_table(title, factors_dict, weights_dict, score, extra_note="", hide_zero_contrib=True):
+        local = []
+        local.append(f"  {title}")
+        # 表头
+        local.append(f"   {'因子名称':<24s} {'强度':>6s} {'权重':>6s} {'贡献':>7s}")
+        local.append("   " + "-" * 46)
+        items = []
+        for k, strength in factors_dict.items():
+            w = weights_dict.get(k, 0.0)
+            contrib = strength * w
+            # 如果隐藏零贡献，且贡献绝对值 < 0.001，跳过（但保留强度为0但权重非零？我们跳过零贡献）
+            if hide_zero_contrib and abs(contrib) < 0.001:
+                continue
+            items.append((k, strength, w, contrib))
+        # 按贡献降序
+        items.sort(key=lambda x: abs(x[3]), reverse=True)
+        for name, s, w, c in items:
+            local.append(f"   {name:<24s} {s:>5.3f} {w:>6.3f} {c:>7.3f}")
+        local.append("   " + "-" * 46)
+        local.append(f"   {'总分（含过滤）':<24s} {'':>6} {'':>6} {score:>7.3f}")
+        if extra_note:
+            local.append(f"   ※ {extra_note}")
+        local.append("")
+        return local
 
-    lines.append("【买入因子详情】")
-    lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
-    lines.append("-" * 50)
-    buy_contribs = sorted([(k, ctx.buy_factors[k], buy_weights.get(k, 0), buy_weights.get(k, 0) * ctx.buy_factors[k])
-                           for k in ctx.buy_factors], key=lambda x: x[3], reverse=True)
-    for name_f, s, w, contrib in buy_contribs:
-        lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-    lines.append(row_line(["买入总分（含中期过滤）", "", "", f"{ctx.buy_score:.3f}"]))
+    # 买入因子
+    buy_note = ""
+    if ctx.buy_factors.get("macd_golden_cross",0)==0 and ctx.buy_factors.get("kdj_golden_cross",0)==0:
+        buy_note = "动量缺失惩罚已应用"
+    lines.extend(_render_factor_table("【买入因子】", ctx.buy_factors, ctx.buy_weights_used, ctx.buy_score, buy_note))
+
+    # 卖出因子
+    lines.extend(_render_factor_table("【卖出因子】", ctx.sell_factors, ctx.sell_weights_used, ctx.sell_score))
+
+    # ---------- 评分合成 ----------
+    env = clip_env_factor(market["market_factor"], market["sentiment_factor"])
+    lines.append(f"  【评分合成】")
+    lines.append(f"  净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}")
+    lines.append(f"  非线性变换 × 环境因子({env:.3f}) → 最终得分 {ctx.final_score:.3f} → 操作等级：{action_level}")
     lines.append("")
 
-    lines.append("【卖出因子详情】")
-    lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
-    lines.append("-" * 50)
-    sell_contribs = sorted([(k, ctx.sell_factors[k], sell_weights.get(k, 0), sell_weights.get(k, 0) * ctx.sell_factors[k])
-                            for k in ctx.sell_factors], key=lambda x: x[3], reverse=True)
-    for name_f, s, w, contrib in sell_contribs:
-        lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
-    lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
-    lines.append("")
-
-    # 评分合成
-    env_factor = clip_env_factor(market["market_factor"], market["sentiment_factor"])
-    lines += ["【评分合成】",
-              f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
-              f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
-              f"操作等级：{action_level}"]
-
-    if ai_comment is not None:
-        lines += ["", "【AI 专业点评】"]
-        lines.append(ai_comment)
-    else:
-        lines += ["", "【AI 专业点评】未配置 API_KEY，无法生成。"]
-
-    if ai_tp is not None:
-        lines += ["", "【AI 止盈建议】"]
-        lines.append(ai_tp)
-    else:
-        lines += ["", "【AI 止盈建议】无需止盈建议。"]
-
+    # ---------- AI 评论 / 建议 ----------
+    if ai_comment:
+        lines.append(f"  【AI 专业点评】")
+        lines.append(f"  {ai_comment.strip()}")
+        lines.append("")
+    if ai_tp:
+        lines.append(f"  【AI 止盈建议】")
+        lines.append(f"  {ai_tp.strip()}")
+        lines.append("")
     lines.append("=" * 70)
     return "\n".join(lines)
+
+
+
+
+def post_process_weights(ai_weights: Dict[str, float],
+                         global_weights: Dict[str, float],
+                         min_weight: float = 0.02,
+                         max_weight: float = 0.40,
+                         min_active_factors: int = 5) -> Dict[str, float]:
+    """
+    后期融合优化权重：
+    1. 将负值置 0
+    2. 对全局权重中 ≥ min_weight 的因子，若 AI 权重 < min_weight，则强制设置回 min_weight
+    3. 单个权重不超过 max_weight
+    4. 归一化
+    5. 若非零因子数少于 min_active_factors，则从全局权重中补充
+    返回优化后的权重字典（非负，总和 1.0）
+    """
+    weights = {k: max(0.0, ai_weights.get(k, 0.0)) for k in global_weights}
+    
+    # 保留核心分散：原本在全局中不低于 min_weight 的因子，AI 不能完全清零
+    for k, gw in global_weights.items():
+        if gw >= min_weight and weights[k] < min_weight:
+            weights[k] = min_weight
+    
+    # 上限约束
+    for k in weights:
+        if weights[k] > max_weight:
+            weights[k] = max_weight
+    
+    # 归一化
+    total = sum(weights.values())
+    if total > 0:
+        weights = {k: v / total for k, v in weights.items()}
+    else:
+        weights = global_weights.copy()
+        total = sum(weights.values())
+        weights = {k: v / total for k, v in weights.items()}
+    
+    # 确保足够多的活跃因子
+    active = [k for k, v in weights.items() if v > 0.001]
+    if len(active) < min_active_factors:
+        # 从全局权重中选取原权重最大的因子补足（排除已存在的）
+        sorted_g = sorted(global_weights.items(), key=lambda x: x[1], reverse=True)
+        added = 0
+        for k, _ in sorted_g:
+            if k not in active and weights.get(k, 0) < 0.001:
+                weights[k] = min_weight
+                active.append(k)
+                added += 1
+                if len(active) >= min_active_factors:
+                    break
+        # 重新归一化
+        total = sum(weights.values())
+        if total > 0:
+            weights = {k: v / total for k, v in weights.items()}
+    
+    return weights

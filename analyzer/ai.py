@@ -262,38 +262,39 @@ class AIClient:
                 data = self._extract_json(resp.choices[0].message.content)
                 buy_deltas = data.get("buy_deltas", {})
                 sell_deltas = data.get("sell_deltas", {})
-                # 应用调整，限定范围
+
+                # 应用调整
                 adj_buy = {}
                 for k in global_buy:
                     delta = float(buy_deltas.get(k, 0))
-                    delta = max(
-                        -AI_PER_ETF_WEIGHT_MAX_DELTA,
-                        min(AI_PER_ETF_WEIGHT_MAX_DELTA, delta),
-                    )
-                    adj_buy[k] = global_buy[k] + delta
+                    delta = max(-AI_PER_ETF_WEIGHT_MAX_DELTA, min(AI_PER_ETF_WEIGHT_MAX_DELTA, delta))
+                    adj_buy[k] = max(0.0, global_buy[k] + delta)  # ★ 关键：保证非负
+
                 adj_sell = {}
                 for k in global_sell:
                     delta = float(sell_deltas.get(k, 0))
-                    delta = max(
-                        -AI_PER_ETF_WEIGHT_MAX_DELTA,
-                        min(AI_PER_ETF_WEIGHT_MAX_DELTA, delta),
-                    )
-                    adj_sell[k] = global_sell[k] + delta
+                    delta = max(-AI_PER_ETF_WEIGHT_MAX_DELTA, min(AI_PER_ETF_WEIGHT_MAX_DELTA, delta))
+                    adj_sell[k] = max(0.0, global_sell[k] + delta)
+
                 # 归一化
                 buy_sum = sum(adj_buy.values())
                 if buy_sum > 0:
                     adj_buy = {k: v / buy_sum for k, v in adj_buy.items()}
+                else:
+                    adj_buy = global_buy.copy()  # 回退
+
                 sell_sum = sum(adj_sell.values())
                 if sell_sum > 0:
                     adj_sell = {k: v / sell_sum for k, v in adj_sell.items()}
+                else:
+                    adj_sell = global_sell.copy()
+
                 return adj_buy, adj_sell
             except Exception as e:
                 logger.warning(f"个股权重微调失败(尝试{attempt+1}): {e}")
                 import time
-
                 time.sleep(1)
         return global_buy, global_sell
-
     # ---------- 市场状态分析（增强输入） ----------
     def refine_market_state(
         self, market_df: pd.DataFrame, extra_sentiment: Optional[Dict] = None
