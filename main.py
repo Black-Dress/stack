@@ -14,8 +14,6 @@ import re
 import time
 import numpy as np
 import pandas as pd
-import math
-import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple, Optional, Any
 
@@ -164,6 +162,47 @@ def _get_or_create_environment(fetcher, analyzer, market_df, macro_df, volatilit
     return market_state, market_factor, sentiment, buy_w, sell_w, sentiment_risk_tip, ai_params_advice
 
 
+def select_unlaunched_etfs(results, max_count=3,
+                           min_score=0.5,
+                           max_profit_pct=10.0,
+                           require_uptrend=True) -> list:
+    """
+    筛选未启动板块（低点涨幅小、评级不差、无清仓级风险）。
+    参数:
+        results: (output_str, score) 列表
+        max_count: 最多推荐个数
+        min_score: 最低评分，低于此值视为动能不足
+        max_profit_pct: 最大低点涨幅，超过则视为已启动
+        require_uptrend: 是否要求站上中期均线（避免下跌趋势的板块）
+    返回: 推荐行字符串列表（不超过 max_count 个）
+    """
+    candidates = []
+    for out, score in results:
+        # 硬性排除：强烈卖出、连续低评分、清仓止盈
+        if "强烈卖出" in out or "连续3日低评分" in out:
+            continue
+        if "清仓级" in out:
+            continue
+        # 评分过滤器
+        if score < min_score:
+            continue
+        # 中期趋势过滤器（若要求趋势向上）
+        if require_uptrend and "弱于中期均线" in out:
+            continue
+        # 低点涨幅过滤器（仅处理明确显示涨幅的行）
+        low_match = re.search(r"低点涨(\d+\.?\d*)%", out)
+        if low_match:
+            low_pct = float(low_match.group(1))
+            if low_pct > max_profit_pct:
+                continue
+        # 符合条件
+        candidates.append((score, out))
+
+    # 按评分降序，取前 max_count 个
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [out for _, out in candidates[:max_count]]
+
+
 # ----------------------------------------------------------------------
 # 批量分析主流程
 # ----------------------------------------------------------------------
@@ -191,7 +230,6 @@ def run_batch_analysis(api_key=None, target_code=None):
     macro_df = analyzer.calculate_indicators(macro_df, need_amount_ma=False)
     macro_df["ma_long"] = macro_df["close"].rolling(MACRO_MA_LONG).mean()
     market_df = analyzer.calculate_indicators(market_df, need_amount_ma=True)
-    # ★ 修正：使用 utils.calculate_atr
     market_df["atr"] = calculate_atr(market_df, ATR_PERIOD)
     volatility = (market_df["atr"] / market_df["close"]).iloc[-20:].mean()
 
@@ -311,8 +349,20 @@ def run_batch_analysis(api_key=None, target_code=None):
         print(out)
         output_lines.append(out)
 
-    # 批量评论和止盈（可在这里按需调用 AI 批量接口，代码略）
-    # 如需使用批量功能，可在此处根据收集到的 contexts 调用 ai_client.batch_comment_on_etfs 等
+    # ---------- 每日精选推荐（≤3个）----------
+    unlaunched = select_unlaunched_etfs(
+        results,
+        max_count=3,
+        min_score=0.5,
+        max_profit_pct=12.0,     # 涨幅 >12% 视为已启动
+        require_uptrend=True     # 避开弱势板块
+    )
+    if unlaunched:
+        print("\n" + "★" * 51)
+        print("★★ 今日未启动潜力板块（评级较好、涨幅小、趋势稳）★★")
+        print("★" * 51)
+        for line in unlaunched:
+            print(line)
 
     fetcher.save_state(state)
     fetcher.logout()
@@ -320,6 +370,8 @@ def run_batch_analysis(api_key=None, target_code=None):
     email_cfg = get_email_config()
     if email_cfg["send_email"]:
         send_email(f"ETF分析报告 - {today_str}", "\n".join(output_lines))
+
+
 
 
 # ----------------------------------------------------------------------

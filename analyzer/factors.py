@@ -269,3 +269,41 @@ def compute_tmsv(df, market_status="震荡偏弱", volatility=0.02):
         trend_score * w["trend"] + mom_score * w["momentum"] + vol_score * w["volume"]
     ) * vol_factor
     return tmsv.clip(0, 100).fillna(50)
+
+
+def factor_buy_reversal_potential(
+    price: float,
+    recent_low_20: float,
+    rsi: float,
+    rsi_prev: float,
+    boll_width: float,
+    boll_width_ma20: float,
+    volume: float,
+    vol_ma5: float,
+    close_open_ratio: float
+) -> float:
+    """
+    反转潜力因子：捕捉低位企稳、动能修复、布林收窄、放量上涨的板块。
+    返回 0~1，值越高代表潜在反转可能性越大。
+    """
+    score = 0.0
+
+    # 1. 距20日低点涨幅 ≤ 8%（越接近低点分越高）
+    if recent_low_20 > 0:
+        rise = (price - recent_low_20) / recent_low_20
+        if rise <= 0.08:
+            score += 0.35 * (1 - rise / 0.08)
+
+    # 2. RSI 在 40~60 之间且回升 > 2
+    if 40 <= rsi <= 60 and rsi - rsi_prev > 2:
+        score += 0.30
+
+    # 3. 布林带收窄（宽度低于20日均值的80%）
+    if boll_width_ma20 > 0 and boll_width < boll_width_ma20 * 0.8:
+        score += 0.25
+
+    # 4. 放量（大于5日均量的1.3倍）且收阳（涨幅 > 1%）
+    if volume > vol_ma5 * 1.3 and close_open_ratio > 1.01:
+        score += 0.20
+
+    return min(1.0, score)

@@ -51,6 +51,7 @@ from .factors import (
     factor_sell_max_drawdown_stop,
     get_trailing_profit_signals,
     compute_tmsv,
+    factor_buy_reversal_potential,
 )
 from .ai import AIClient
 
@@ -218,6 +219,17 @@ class DataAnalyzer:
         df[f"recent_high_{recent_high_window}"] = df["high"].rolling(recent_high_window).max()
         df[f"recent_low_{recent_low_window}"] = df["low"].rolling(recent_low_window).min()
 
+        # 布林带宽度
+        df["boll_width"] = df["boll_std"] / df["boll_mid"]
+        # 布林带宽度的20日均值
+        df["boll_width_ma20"] = df["boll_width"].rolling(window=20).mean()
+        # 20日最低收盘价
+        df["low_close_20"] = df["close"].rolling(window=20).min()
+        # 前一日RSI（用shift）
+        df["rsi_prev"] = df["rsi"].shift(1)
+        # 当日涨跌幅（用于判断收阳）
+        df["close_open_ratio"] = df["close"] / df["open"]
+
         if use_cache and cache_key:
             self._indicator_cache[cache_key] = (df.copy(), time.time())
         return df
@@ -333,6 +345,17 @@ class DataAnalyzer:
             "tmsv_score":            ctx.tmsv_strength,
             "rsi_oversold":          factor_buy_rsi_oversold(rsi),
         }
+        recent_low_20 = d.get("low_close_20", price)  # 若缺失则用当前价，避免除零
+        boll_width = d.get("boll_width", 0.0)
+        boll_width_ma20 = d.get("boll_width_ma20", 0.0)
+        rsi_prev = d.get("rsi_prev", rsi)
+        close_open_ratio = d.get("close_open_ratio", 1.0)
+        vol_ma5 = d.get("vol_ma", volume)  # vol_ma 已为5日均量
+
+        buy_factors["reversal_potential"] = factor_buy_reversal_potential(
+            price, recent_low_20, rsi, rsi_prev,
+            boll_width, boll_width_ma20, volume, vol_ma5, close_open_ratio
+        )
 
         sell_factors = {
             "price_below_ma20":      factor_sell_price_below_ma20(price, ma20),
@@ -591,6 +614,15 @@ class DataAnalyzer:
         transformed_raw = self._nonlinear_score_transform(ctx.raw_score, market_status)
         env_factor = clip_env_factor(ctx.market["market_factor"], ctx.market["sentiment_factor"])
         ctx.final_score = max(-1.0, min(1.0, transformed_raw * env_factor))
+
+        # 过热惩罚：涨幅过大或RSI极高时适当降分
+        if ctx.profit_pct_from_low > 0.12:
+            ctx.final_score *= 0.92
+        if ctx.rsi > 75:
+            ctx.final_score *= 0.95
+        # 限制最终得分范围
+        ctx.final_score = max(-1.0, min(1.0, ctx.final_score))
+        
         return ctx
 
     def _apply_midterm_filter(self, ctx):

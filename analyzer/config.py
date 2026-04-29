@@ -39,7 +39,7 @@ PROFIT_LOW_CLEAR_MULT = 1.6
 # ---------------------------- 默认权重 ----------------------------
 DEFAULT_BUY_WEIGHTS = {
     "price_above_ma20": 0.18,
-    "volume_above_ma5": 0.14,
+    "volume_above_ma5": 0.12,
     "macd_golden_cross": 0.08,
     "kdj_golden_cross": 0.08,
     "bollinger_break_up": 0.06,
@@ -47,10 +47,11 @@ DEFAULT_BUY_WEIGHTS = {
     "market_above_ma20": 0.05,
     "market_above_ma60": 0.08,
     "market_amount_above_ma20": 0.05,
-    "outperform_market": 0.10,
+    "outperform_market": 0.05,      # 降半
     "weekly_above_ma20": 0.10,
-    "tmsv_score": 0.18,
+    "tmsv_score": 0.15,             # 略降
     "rsi_oversold": 0.06,
+    "reversal_potential": 0.10,     # 新增反转因子
 }
 
 DEFAULT_SELL_WEIGHTS = {
