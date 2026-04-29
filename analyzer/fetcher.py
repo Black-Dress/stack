@@ -303,7 +303,7 @@ class DataFetcher:
                     raw["north_net"] = float(north_series.iloc[-1])
                     raw["north_net_20d_avg"] = float(north_series.tail(20).mean())
         except Exception as e:
-            logger.debug(f"北向资金获取失败: {e}")
+            logger.error(f"北向资金获取失败: {e}")
 
         try:
             df_fund = ak.stock_market_fund_flow()
@@ -314,7 +314,7 @@ class DataFetcher:
                         raw["main_net_pct"] = float(latest[col])
                         break
         except Exception as e:
-            logger.debug(f"主力资金流向获取失败: {e}")
+            logger.error(f"主力资金流向获取失败: {e}")
 
         try:
             trade_date = self._get_latest_trade_date()
@@ -331,7 +331,7 @@ class DataFetcher:
             raw["dt_count"] = dt_count
             raw["zt_dt_ratio"] = zt_count / max(dt_count, 1)
         except Exception as e:
-            logger.debug(f"涨跌停数据获取失败: {e}")
+            logger.error(f"涨跌停数据获取失败: {e}")
 
         try:
             now = time.time()
@@ -348,7 +348,7 @@ class DataFetcher:
             raw["down_count"] = down_count
             raw["up_down_ratio"] = up_count / max(down_count, 1)
         except Exception as e:
-            logger.debug(f"上涨下跌家数获取失败: {e}")
+            logger.error(f"上涨下跌家数获取失败: {e}")
 
         try:
             df_300 = ak.stock_zh_index_daily(symbol="sh000300")
@@ -362,7 +362,7 @@ class DataFetcher:
                 raw["hv"] = float(latest_hv)
                 raw["hv_ma20"] = float(hv.tail(20).mean()) if len(hv) >= 20 else raw["hv"]
         except Exception as e:
-            logger.debug(f"历史波动率获取失败: {e}")
+            logger.error(f"历史波动率获取失败: {e}")
 
         try:
             start = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime("%Y%m%d")
@@ -377,7 +377,7 @@ class DataFetcher:
                         change = (recent.iloc[-1] / recent.mean() - 1.0) * 100
                         raw["margin_change"] = change
         except Exception as e:
-            logger.debug(f"融资余额获取失败: {e}")
+            logger.error(f"融资余额获取失败: {e}")
 
         return raw
 

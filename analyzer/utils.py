@@ -81,7 +81,7 @@ def apply_sentiment_adjustment(sentiment: float) -> float:
     if x >= 0:
         adj = 1.0 + 1.2 * math.tanh(3.0 * x) * math.exp(-0.8 * x)
     else:
-        adj = 1.0 + 1.2 * math.tanh(3.0 * x)
+        adj = 1.0 + 0.8 * math.tanh(2.5 * x)  
     return max(SENTIMENT_LOWER_BOUND, min(1.5, adj))
 
 
