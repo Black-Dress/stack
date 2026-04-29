@@ -1,36 +1,36 @@
 {
   "env_2026-04-29": {
     "market_state": "强势牛市",
-    "market_factor": 1.25,
+    "market_factor": 1.35,
     "buy_weights": {
-      "price_above_ma20": 0.19940476190476192,
-      "volume_above_ma5": 0.15178571428571427,
+      "price_above_ma20": 0.19515306122448983,
+      "volume_above_ma5": 0.15816326530612246,
       "macd_golden_cross": 0.03571428571428572,
       "kdj_golden_cross": 0.03571428571428572,
-      "bollinger_break_up": 0.026785714285714284,
-      "williams_oversold": 0.06547619047619048,
+      "bollinger_break_up": 0.026785714285714288,
+      "williams_oversold": 0.06760204081632654,
       "market_above_ma20": 0.022321428571428575,
       "market_above_ma60": 0.03571428571428572,
       "market_amount_above_ma20": 0.022321428571428575,
       "outperform_market": 0.04464285714285715,
       "weekly_above_ma20": 0.04464285714285715,
       "tmsv_score": 0.25892857142857145,
-      "rsi_oversold": 0.05654761904761904
+      "rsi_oversold": 0.05229591836734694
     },
     "sell_weights": {
-      "price_below_ma20": 0.11695906432748537,
-      "bollinger_break_down": 0.05847953216374269,
-      "williams_overbought": 0.12322472848788639,
-      "rsi_overbought": 0.13784461152882205,
-      "underperform_market": 0.05847953216374269,
-      "stop_loss_ma_break": 0.29239766081871343,
-      "weekly_below_ma20": 0.05847953216374269,
-      "downside_momentum": 0.12218045112781956,
-      "max_drawdown_stop": 0.03195488721804512
+      "price_below_ma20": 0.16496526025695765,
+      "bollinger_break_down": 0.05822303303186741,
+      "williams_overbought": 0.11644606606373482,
+      "rsi_overbought": 0.11644606606373481,
+      "underperform_market": 0.05822303303186741,
+      "stop_loss_ma_break": 0.291115165159337,
+      "weekly_below_ma20": 0.05822303303186741,
+      "downside_momentum": 0.11644606606373481,
+      "max_drawdown_stop": 0.019912277296898654
     },
-    "sentiment": 0.7,
+    "sentiment": 0.9521610886735605,
     "sentiment_raw": 0.9760519719965655,
-    "timestamp": 1777454097.845428,
+    "timestamp": 1777454569.8825912,
     "ai_params_advice": {
       "buy_threshold_shift": 0.02,
       "sell_threshold_shift": 0.04,
