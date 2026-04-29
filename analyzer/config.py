@@ -202,7 +202,6 @@ def get_email_config():
         "send_email": os.getenv("SEND_EMAIL", "false").lower() == "true",
     }
 
-# ---------------------------- 新增：原 analyzer.py 顶部的常量 ----------------------------
 MA30_WINDOW = 30
 MA30_WEAKNESS_PENALTY = 0.9
 
@@ -225,3 +224,9 @@ TAKE_PROFIT_HIGHVOL_MULT = 0.85
 
 HISTORY_DAYS = 200
 MAX_WORKERS = 5
+
+# ---------------------------- 详细报告列宽 ----------------------------
+DETAIL_COL_NAME = 25
+DETAIL_COL_STRENGTH = 8
+DETAIL_COL_WEIGHT = 8
+DETAIL_COL_CONTRIB = 8

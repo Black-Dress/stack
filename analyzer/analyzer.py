@@ -671,7 +671,6 @@ class DataAnalyzer:
         final = ctx.final_score
         _, action_level = self.get_action(final, state.get("score_history", []), self.params, ctx.atr_pct)
 
-        # 获取 AI 评论（如果不为空）
         ai_comment = ai_comment_override
         if ai_comment is None and ai_client:
             try:
@@ -698,5 +697,7 @@ class DataAnalyzer:
                 logger.error(f"AI止盈建议生成失败: {e}")
                 ai_tp = "（止盈建议生成失败）"
 
-        # 使用 utils 中的格式化函数生成最终报告
-        return format_detailed_report(ctx, market, self.params, ai_comment, ai_tp)
+        # 调用格式化函数，传入所有权重和 action_level
+        return format_detailed_report(ctx, market, self.params,
+                                      self.buy_weights, self.sell_weights,
+                                      action_level, ai_comment, ai_tp)

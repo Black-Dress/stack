@@ -252,103 +252,57 @@ def calculate_adx(df, period=14) -> pd.DataFrame:
 
 
 # ========================== 详细报告格式化 ==========================
-def format_detailed_report(ctx, market, params, ai_comment, ai_tp) -> str:
+def format_detailed_report(ctx, market, params, buy_weights, sell_weights,
+                           action_level, ai_comment, ai_tp) -> str:
     """
     根据 ETFContext 生成完整的详细分析报告字符串。
-    替代原 DataAnalyzer.detailed_analysis 中的字符串拼接部分。
     """
     import datetime
-    from .config import (
-        DETAIL_COL_NAME,
-        DETAIL_COL_STRENGTH,
-        DETAIL_COL_WEIGHT,
-        DETAIL_COL_CONTRIB,
-    )
-
-    # 这里假设 DETAIL_COL_* 在 config 中定义，如果未定义则使用默认值
-    try:
-        from .config import (
-            DETAIL_COL_NAME,
-            DETAIL_COL_STRENGTH,
-            DETAIL_COL_WEIGHT,
-            DETAIL_COL_CONTRIB,
-        )
-    except ImportError:
-        DETAIL_COL_NAME = 25
-        DETAIL_COL_STRENGTH = 8
-        DETAIL_COL_WEIGHT = 8
-        DETAIL_COL_CONTRIB = 8
+    from .config import DETAIL_COL_NAME, DETAIL_COL_STRENGTH, DETAIL_COL_WEIGHT, DETAIL_COL_CONTRIB
+    from .utils import clip_env_factor, pad_display, get_display_width  # 避免循环引用
 
     final = ctx.final_score
-    _, action_level = ctx.get_action(final, [], {}, None)  # 简单获取标签，不依赖历史
-    # 实际调用来自 DataAnalyzer，可以复用已有的 action_level
 
-    lines = [
-        "=" * 70,
-        f"ETF详细分析报告 - {ctx.name} ({ctx.code})",
-        f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "=" * 70,
-        f"实时价格：{ctx.real_price:.3f}",
-        f"涨跌幅：{ctx.change_pct:+.2f}%",
-        f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}",
-    ]
+    lines = ["=" * 70,
+             f"ETF详细分析报告 - {ctx.name} ({ctx.code})",
+             f"分析时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             "=" * 70,
+             f"实时价格：{ctx.real_price:.3f}",
+             f"涨跌幅：{ctx.change_pct:+.2f}%",
+             f"市场状态：{market['macro_status']}，市场因子：{market['market_factor']:.2f}，情绪因子：{market['sentiment_factor']:.2f}"]
     if market.get("sentiment_risk_tip"):
         lines.append(f"情绪风险提示：{market['sentiment_risk_tip']}")
-    lines += [
-        f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
-        f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
-        f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
-        f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}",
-        "",
-    ]
+    lines += [f"波动率(ATR%)：{ctx.atr_pct*100:.2f}%",
+              f"TMSV复合强度：{ctx.tmsv:.1f} (强度系数 {ctx.tmsv_strength:.3f})",
+              f"最大回撤：{ctx.max_drawdown_pct*100:.2f}%",
+              f"中期均线（30日）：{'站上' if ctx.above_ma30 else '跌破'}", ""]
 
     if ctx.trailing_profit_level or ctx.profit_level:
         lines.append("【止盈观察 (仅供参考)】")
         if ctx.trailing_profit_level:
             recent_high = ctx.recent_high_price
-            from_high_pct = (
-                (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
-            )
-            lines.append(
-                f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}"
-            )
-            level_text = "清仓级" if ctx.trailing_profit_level == "clear" else "半仓级"
+            from_high_pct = (recent_high - ctx.real_price) / recent_high if recent_high > 0 else 0
+            lines.append(f"  从{ctx.params['RECENT_HIGH_WINDOW']}日高点 {recent_high:.3f} 回落 {from_high_pct:.1%}")
+            level_text = "清仓级" if ctx.trailing_profit_level == 'clear' else "半仓级"
             lines.append(f"  移动止盈信号：{level_text}")
         if ctx.profit_level:
-            lines.append(
-                f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}"
-            )
-            level_map = {"clear": "清仓级", "half": "半仓级", "watch": "关注级"}
+            lines.append(f"  距{ctx.params['RECENT_LOW_WINDOW']}日低点 {ctx.recent_low_price:.3f} 涨幅 {ctx.profit_pct_from_low:.1%}")
+            level_map = {'clear': '清仓级', 'half': '半仓级', 'watch': '关注级'}
             lines.append(f"  低点涨幅信号：{level_map.get(ctx.profit_level, '')}")
         lines.append("  *以上提示不构成自动卖出指令，请结合其他因素决策。")
         lines.append("")
 
     def row_line(items):
-        return "".join(
-            [
-                pad_display(items[0], DETAIL_COL_NAME),
-                pad_display(items[1], DETAIL_COL_STRENGTH, "right"),
-                pad_display(items[2], DETAIL_COL_WEIGHT, "right"),
-                pad_display(items[3], DETAIL_COL_CONTRIB, "right"),
-            ]
-        )
+        return "".join([pad_display(items[0], DETAIL_COL_NAME),
+                        pad_display(items[1], DETAIL_COL_STRENGTH, "right"),
+                        pad_display(items[2], DETAIL_COL_WEIGHT, "right"),
+                        pad_display(items[3], DETAIL_COL_CONTRIB, "right")])
 
     lines.append("【买入因子详情】")
     lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
     lines.append("-" * 50)
-    buy_contribs = sorted(
-        [
-            (
-                k,
-                ctx.buy_factors[k],
-                ctx.buy_weights.get(k, 0),
-                ctx.buy_weights.get(k, 0) * ctx.buy_factors[k],
-            )
-            for k in ctx.buy_factors
-        ],
-        key=lambda x: x[3],
-        reverse=True,
-    )
+    buy_contribs = sorted([(k, ctx.buy_factors[k], buy_weights.get(k, 0), buy_weights.get(k, 0) * ctx.buy_factors[k])
+                           for k in ctx.buy_factors], key=lambda x: x[3], reverse=True)
     for name_f, s, w, contrib in buy_contribs:
         lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
     lines.append(row_line(["买入总分（含中期过滤）", "", "", f"{ctx.buy_score:.3f}"]))
@@ -357,36 +311,19 @@ def format_detailed_report(ctx, market, params, ai_comment, ai_tp) -> str:
     lines.append("【卖出因子详情】")
     lines.append(row_line(["因子名称", "强度", "权重", "贡献"]))
     lines.append("-" * 50)
-    sell_contribs = sorted(
-        [
-            (
-                k,
-                ctx.sell_factors[k],
-                ctx.sell_weights.get(k, 0),
-                ctx.sell_weights.get(k, 0) * ctx.sell_factors[k],
-            )
-            for k in ctx.sell_factors
-        ],
-        key=lambda x: x[3],
-        reverse=True,
-    )
+    sell_contribs = sorted([(k, ctx.sell_factors[k], sell_weights.get(k, 0), sell_weights.get(k, 0) * ctx.sell_factors[k])
+                            for k in ctx.sell_factors], key=lambda x: x[3], reverse=True)
     for name_f, s, w, contrib in sell_contribs:
         lines.append(row_line([name_f, f"{s:.3f}", f"{w:.3f}", f"{contrib:.3f}"]))
     lines.append(row_line(["卖出总分", "", "", f"{ctx.sell_score:.3f}"]))
     lines.append("")
 
-    scale = (
-        2.5
-        if ("牛" in market["macro_status"] or "熊" in market["macro_status"])
-        else 1.5
-    )
+    # 评分合成
     env_factor = clip_env_factor(market["market_factor"], market["sentiment_factor"])
-    lines += [
-        "【评分合成】",
-        f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
-        f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
-        f"操作等级：{action_level}",
-    ]
+    lines += ["【评分合成】",
+              f"原始净分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {ctx.raw_score:.3f}",
+              f"非线性变换 × 环境因子 ({env_factor:.2f}) → {final:.3f}",
+              f"操作等级：{action_level}"]
 
     if ai_comment is not None:
         lines += ["", "【AI 专业点评】"]
