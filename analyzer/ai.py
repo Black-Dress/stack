@@ -39,8 +39,10 @@ class AIClient:
 
     # ---------- 通用 JSON 提取 ----------
     @staticmethod
-    def _extract_json(content: str) -> dict:
+    def _extract_json(content: Optional[str]) -> dict:
         """从响应内容中提取 JSON 对象"""
+        if content is None :
+            raise ValueError("content is None")
         json_match = re.search(r"\{.*\}", content, re.DOTALL)
         if not json_match:
             raise ValueError("未找到JSON")
@@ -120,15 +122,16 @@ class AIClient:
                     timeout=15,
                 )
                 content = resp.choices[0].message.content
+                if content is None: raise ValueError("AI return None")
                 data = self._extract_json(content)
                 if "buy" not in data or "sell" not in data:
                     raise ValueError("缺少buy/sell字段")
                 # 验证并归一化权重
                 ai_buy = validate_and_filter_weights(
-                    data["buy"], DEFAULT_BUY_WEIGHTS.keys(), "AI买入权重"
+                    data["buy"], list(DEFAULT_BUY_WEIGHTS.keys()), "AI买入权重"
                 )
                 ai_sell = validate_and_filter_weights(
-                    data["sell"], DEFAULT_SELL_WEIGHTS.keys(), "AI卖出权重"
+                    data["sell"], list(DEFAULT_SELL_WEIGHTS.keys()), "AI卖出权重"
                 )
                 if ai_buy and ai_sell:
                     return ai_buy, ai_sell
@@ -186,6 +189,7 @@ class AIClient:
                     temperature=0.0,
                     timeout=8,
                 )
+                if resp.choices[0].message.content is None: raise ValueError("AI return None");
                 data = self._extract_json(resp.choices[0].message.content)
                 # 类型检查和边界限制
                 buy_s = max(-0.08, min(0.08, float(data.get("buy_threshold_shift", 0))))
@@ -396,7 +400,9 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
                 temperature=0.3,
                 timeout=10,
             )
-            return resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content
+            if content is None: raise ValueError("AI return None")
+            return content.strip()
         except Exception as e:
             logger.error(f"AI评论生成失败: {e}")
             return "（AI 评论生成失败）"
@@ -418,7 +424,7 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
             return []
 
         # 分批处理
-        results = [None] * len(etf_list)
+        results = [""] * len(etf_list)
         for i in range(0, len(etf_list), AI_BATCH_COMMENT_SIZE):
             batch = etf_list[i : i + AI_BATCH_COMMENT_SIZE]
             prompts = []
@@ -451,8 +457,8 @@ ETF {idx}: {etf['name']}({etf['code']})
             except Exception as e:
                 logger.error(f"批量评论生成失败(批次{i}): {e}")
                 for j in range(len(batch)):
-                    if results[i + j] is None:
-                        results[i + j] = "（批量评论生成失败）"
+                    comment = data.get(str(j), "（批量评论缺失）")
+                    results[i + j] = comment.strip() if comment else "（空评）"
         return results
 
     # ---------- 止盈建议（保留原接口） ----------
@@ -487,7 +493,9 @@ ETF {idx}: {etf['name']}({etf['code']})
                 temperature=0.3,
                 timeout=10,
             )
-            return resp.choices[0].message.content.strip()
+            content = resp.choices[0].message.content
+            if content is None: raise ValueError("AI return None")
+            return content.strip()
         except Exception as e:
             logger.error(f"AI止盈建议生成失败: {e}")
             return ""
@@ -506,7 +514,7 @@ ETF {idx}: {etf['name']}({etf['code']})
         """
         if not tp_list:
             return []
-        results = [None] * len(tp_list)
+        results = [""] * len(tp_list)
         for i in range(0, len(tp_list), AI_BATCH_TAKE_PROFIT_SIZE):
             batch = tp_list[i : i + AI_BATCH_TAKE_PROFIT_SIZE]
             prompts = []
@@ -536,6 +544,6 @@ TMSV:{etf['tmsv']:.1f} RSI:{etf['rsi']:.1f} ATR:{etf['atr_pct']*100:.2f}% 市场
             except Exception as e:
                 logger.error(f"批量止盈建议生成失败(批次{i}): {e}")
                 for j in range(len(batch)):
-                    if results[i + j] is None:
-                        results[i + j] = "（止盈建议生成失败）"
+                    advice = data.get(str(j), "（批量止盈建议缺失）")
+                    results[i + j] = advice.strip() if advice else "（缺失）"
         return results

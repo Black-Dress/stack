@@ -115,7 +115,7 @@ def get_dynamic_history_days(volatility: float) -> int:
     return 20 if volatility <= 0.015 else 12
 
 
-def get_dynamic_confirm_days(atr_pct: float, base_days: int) -> int:
+def get_dynamic_confirm_days(atr_pct: Optional[float], base_days: int) -> int:
     """根据波动率动态调整确认信号的连续天数"""
     from .config import VOL_HIGH_CONFIRM, VOL_MID_CONFIRM, MIN_CONFIRM_DAYS, MAX_CONFIRM_DAYS
     if atr_pct is None:
