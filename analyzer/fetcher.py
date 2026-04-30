@@ -466,12 +466,21 @@ class DataFetcher:
         raw_sentiment = max(0.6, min(1.5, raw_sentiment))
 
         if self._sentiment_history:
-            smoothed = 0.7 * self._sentiment_history[-1] + 0.3 * raw_sentiment
+            last = self._sentiment_history[-1]
+            # 如果历史值异常低（如被前期压制的0.7），且今日原始情绪显著更健康，则大幅提升今日权重
+            if last <= 0.73 and raw_sentiment > 0.88:
+                # 脏历史快速遗忘：今日权重 0.85
+                smoothed = 0.15 * last + 0.85 * raw_sentiment
+            elif last <= 0.73:
+                # 历史偏低但今日也并不乐观，保持略微保守
+                smoothed = 0.5 * last + 0.5 * raw_sentiment
+            else:
+                # 正常情况
+                smoothed = 0.7 * last + 0.3 * raw_sentiment
         else:
             smoothed = raw_sentiment
 
-        smoothed = apply_sentiment_adjustment(smoothed)
-        smoothed = max(SENTIMENT_LOWER_BOUND, smoothed)
+        smoothed = max(SENTIMENT_LOWER_BOUND, apply_sentiment_adjustment(smoothed))
         return smoothed, raw_sentiment
 
     def get_sentiment_risk_tip(self, sentiment_factor: float) -> str:
