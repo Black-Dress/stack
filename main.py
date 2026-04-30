@@ -162,7 +162,7 @@ def _get_or_create_environment(fetcher, analyzer, market_df, macro_df, volatilit
     return market_state, market_factor, sentiment, buy_w, sell_w, sentiment_risk_tip, ai_params_advice
 
 
-def _extract_pct(out: str, pattern: str) -> float:
+def _extract_pct(out: str, pattern: str) -> Optional[float]:
     """从输出行中按指定正则提取第一个百分比数字，失败返回 None"""
     m = re.search(pattern, out)
     if m:
@@ -405,26 +405,18 @@ def run_batch_analysis(api_key=None, target_code=None):
                 code, fetcher, analyzer, start, today_str, params
             )
             s = state.get(code, {})
-            futures.append(
+            futures.append((
+                code,
                 ex.submit(
                     analyzer.analyze_single_etf,
-                    code,
-                    name,
-                    real_price,
-                    hist,
-                    weekly,
-                    market_info,
-                    today,
-                    s,
-                    ai_client,
+                    code, name, real_price, hist, weekly,
+                    market_info, today, s, ai_client,
                 )
-            )
-        for f in futures:
+            ))
+        for code, f in futures:
             out, signal, new_state, score = f.result()
             results.append((out, score))
-            m = re.search(r"【.*?\((.*?)\)】", out)
-            if m:
-                state[m.group(1)] = new_state
+            state[code] = new_state
 
     results.sort(key=lambda x: x[1], reverse=True)
     for out, _ in results:
