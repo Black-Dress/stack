@@ -1,94 +1,122 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""独立趋势扫描模块：基于价格形态识别，不依赖评分或权重。输出标签为 [趋势扫描]"""
-import re
-from typing import List, Tuple, Optional
+"""独立趋势扫描模块：基于结构化数据识别形态，不依赖评分或权重"""
+from typing import List, Dict
 
 
-def _extract_pct(out: str, pattern: str) -> Optional[float]:
-    m = re.search(pattern, out)
-    return float(m.group(1)) if m else None
-
-
-def select_trend_buy(results, max_count=3, low_profit_min=5.0, low_profit_max=15.0,
-                     max_pullback=5.0, daily_gain_min=0.5, daily_gain_max=6.0,
-                     prefer_signal=True) -> List[str]:
+def select_trend_buy(
+    scan_list: List[Dict],
+    max_count: int = 3,
+    low_profit_min: float = 0.05,
+    low_profit_max: float = 0.25,   
+    max_pullback: float = 0.05,
+    daily_gain_min: float = 0.005,
+    daily_gain_max: float = 0.06,
+    prefer_signal: bool = True,
+) -> List[int]:
     candidates = []
-    for out, _ in results:
-        if any(x in out for x in ["弱于中期均线", "强烈卖出", "连续3日低评分", "清仓级"]):
+    for idx, s in enumerate(scan_list):
+        # 排除明显风险项
+        if s.get("has_strong_sell_text") or s.get("has_clear_stop_text"):
             continue
-        low_pct = _extract_pct(out, r"低点涨(\d+\.?\d*)%")
+        if s.get("has_sell_signal"):
+            continue
+
+        low_pct = s.get("profit_pct_from_low")
         if low_pct is None or low_pct < low_profit_min or low_pct > low_profit_max:
             continue
-        pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
+
+        pullback = s.get("max_drawdown_pct")
+        # 容许负值（创新高），仅当正回落超标时排除
         if pullback is not None and pullback > max_pullback:
             continue
-        change_pct = _extract_pct(out, r"([+-]\d+\.?\d*)%")
-        if change_pct is None or change_pct < daily_gain_min or change_pct > daily_gain_max:
+
+        change_pct = s.get("change_pct")
+        if change_pct is None:
             continue
-        has_buy = "[BUY]" in out
-        profit_score = 1.0 - abs(low_pct - 10) / 10
+        # 价格无变动（停牌或数据缺失）也排除
+        if abs(change_pct) < 1e-6:
+            continue
+        if change_pct < daily_gain_min or change_pct > daily_gain_max:
+            continue
+
+        has_buy = s.get("has_buy_signal", False)
+        profit_score = 1.0 - abs(low_pct - 0.10) / 0.10
         sort_key = (not has_buy, -(10.0 if has_buy else 0.0) - profit_score)
-        candidates.append((sort_key, out))
+        candidates.append((sort_key, idx))
+
     candidates.sort(key=lambda x: x[0])
-    return [out for _, out in candidates[:max_count]]
+    return [idx for _, idx in candidates[:max_count]]
 
 
-def select_trend_sell(results, max_count=3, min_daily_loss=-3.0, min_pullback=6.0,
-                      min_low_profit=18.0, include_weak_ma=True, include_clear_stop=True) -> List[str]:
-    def risk_score(out):
+
+
+
+def select_trend_sell(
+    scan_list: List[Dict],
+    max_count: int = 3,
+    min_daily_loss: float = -0.03,
+    min_pullback: float = 0.06,
+    min_low_profit: float = 0.18,
+    include_weak_ma: bool = True,
+    include_clear_stop: bool = True,
+) -> List[int]:
+    """
+    返回应被警示的 ETF 索引列表。
+    """
+    def risk_score(s: Dict) -> int:
         risk = 0
-        if "[SELL]" in out and "连续3日低评分" in out:
+        if s.get("has_sell_signal") and s.get("has_strong_sell_text"):
             risk = 100
-        elif "[SELL]" in out:
+        elif s.get("has_sell_signal"):
             risk = 90
-        elif "清仓级" in out:
+        elif s.get("has_clear_stop_text"):
             risk = 80
-        elif "弱于中期均线" in out:
-            pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
-            change = _extract_pct(out, r"([+-]\d+\.?\d*)%")
-            if (pullback and pullback > 8) or (change and change < -2):
+        elif s.get("has_weak_ma_text"):
+            pullback = s.get("max_drawdown_pct")
+            change = s.get("change_pct")
+            if (pullback and pullback > 0.08) or (change and change < -0.02):
                 risk = 75
             else:
                 risk = 60
-        elif "强烈卖出" in out:
+        elif s.get("has_strong_sell_text"):
             risk = 50
         else:
-            pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
-            change = _extract_pct(out, r"([+-]\d+\.?\d*)%")
-            if pullback and pullback > 10:
+            pullback = s.get("max_drawdown_pct")
+            change = s.get("change_pct")
+            if pullback and pullback > 0.10:
                 risk = 70
-            elif change and change < -3:
+            elif change and change < -0.03:
                 risk = 65
-            elif pullback and pullback > 6:
+            elif pullback and pullback > 0.06:
                 risk = 40
-            elif change and change < -1:
+            elif change and change < -0.01:
                 risk = 30
             else:
                 risk = 10
         return risk
 
     candidates = []
-    for out, _ in results:
+    for idx, s in enumerate(scan_list):
         cond = False
-        change = _extract_pct(out, r"([+-]\d+\.?\d*)%")
+        change = s.get("change_pct")
         if change is not None and change < min_daily_loss:
             cond = True
-        pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
+        pullback = s.get("max_drawdown_pct")
         if pullback is not None and pullback > min_pullback:
             cond = True
-        low_pct = _extract_pct(out, r"低点涨(\d+\.?\d*)%")
-        if low_pct is not None and low_pct > min_low_profit and pullback is not None and pullback > 5:
+        low_pct = s.get("profit_pct_from_low")
+        if low_pct is not None and low_pct > min_low_profit and pullback is not None and pullback > 0.05:
             cond = True
-        if include_weak_ma and "弱于中期均线" in out:
+        if include_weak_ma and s.get("has_weak_ma_text"):
             cond = True
-        if include_clear_stop and "清仓级" in out:
+        if include_clear_stop and s.get("has_clear_stop_text"):
             cond = True
-        if "强烈卖出" in out or "连续3日低评分" in out:
+        if s.get("has_strong_sell_text"):
             cond = True
-        if "[SELL]" in out:
+        if s.get("has_sell_signal"):
             cond = True
         if cond:
-            candidates.append((out, risk_score(out)))
+            candidates.append((idx, risk_score(s)))
     candidates.sort(key=lambda x: x[1], reverse=True)
-    return [out for out, _ in candidates[:max_count]]
+    return [idx for idx, _ in candidates[:max_count]]

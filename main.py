@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ETF 智能分析系统（重构版）
+ETF 智能分析系统
 用法：
     python main.py                # 批量分析所有 ETF
     python main.py --code sh.512800  # 详细分析单只 ETF
@@ -17,7 +17,6 @@ from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer
 from analyzer.ai import AIClient
 from analyzer.trend_scanner import select_trend_buy, select_trend_sell
-from analyzer.risk_watch import generate_risk_alerts
 from analyzer.config import (
     HISTORY_DAYS,
     MAX_WORKERS,
@@ -54,7 +53,6 @@ def run_batch_analysis(api_key=None, target_code=None):
 
     analyzer = DataAnalyzer()
 
-    # 加载 ETF 列表
     try:
         etf_list = dl.load_positions()
     except Exception as e:
@@ -123,7 +121,9 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     print("-" * 90)
 
-    results = []
+    raw_outputs = []          # (out_str, score) 按提交顺序
+    scan_info_list = []       # 趋势扫描数据（与 raw_outputs 顺序一致）
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -135,72 +135,63 @@ def run_batch_analysis(api_key=None, target_code=None):
             real_price = dl.get_realtime_price(code)
             s = state.get(code, {})
             futures.append(
-                (code, ex.submit(analyzer.analyze_single_etf,
+                (code, name, ex.submit(analyzer.analyze_single_etf,
                                  code, name, real_price, hist, weekly, env, today, s))
             )
-        for code, f in futures:
-            out, signal, new_state, score = f.result()
-            results.append((out, score))
+        for code, name, f in futures:
+            out, signal, new_state, score, risk_data, scan_info = f.result()
+            raw_outputs.append((out, score))
             state[code] = new_state
+            if scan_info:
+                scan_info_list.append(scan_info)
 
-    results.sort(key=lambda x: x[1], reverse=True)
-    for out, _ in results:
+    # 按评分排序输出
+    sorted_results = sorted(raw_outputs, key=lambda x: x[1], reverse=True)
+    for out, _ in sorted_results:
         print(out)
 
-    # ---------- 趋势扫描（独立模块） ----------
-    trend_buys = select_trend_buy(
-        results,
+    # 趋势扫描（参数转换为小数）
+    scan_to_out = [out for out, _ in raw_outputs]
+
+    buy_indices = select_trend_buy(
+        scan_info_list,
         max_count=TREND_BUY_MAX_COUNT,
-        low_profit_min=TREND_BUY_LOW_PROFIT_MIN,
-        low_profit_max=TREND_BUY_LOW_PROFIT_MAX,
-        max_pullback=TREND_BUY_MAX_PULLBACK,
-        daily_gain_min=TREND_BUY_DAILY_GAIN_MIN,
-        daily_gain_max=TREND_BUY_DAILY_GAIN_MAX,
-        prefer_signal=TREND_BUY_PREFER_SIGNAL
+        low_profit_min=TREND_BUY_LOW_PROFIT_MIN / 100.0,
+        low_profit_max=TREND_BUY_LOW_PROFIT_MAX / 100.0,
+        max_pullback=TREND_BUY_MAX_PULLBACK / 100.0,
+        daily_gain_min=TREND_BUY_DAILY_GAIN_MIN / 100.0,
+        daily_gain_max=TREND_BUY_DAILY_GAIN_MAX / 100.0,
+        prefer_signal=TREND_BUY_PREFER_SIGNAL,
     )
-    if trend_buys:
+    if buy_indices:
         print("\n📈 [趋势扫描] 上涨中继/回调再启动形态：")
         print("-" * 60)
-        for line in trend_buys:
-            print(line)
+        for idx in buy_indices:
+            print(scan_to_out[idx])
 
-    trend_sells = select_trend_sell(
-        results,
+    sell_indices = select_trend_sell(
+        scan_info_list,
         max_count=TREND_SELL_MAX_COUNT,
-        min_daily_loss=TREND_SELL_MIN_DAILY_LOSS,
-        min_pullback=TREND_SELL_MIN_PULLBACK,
-        min_low_profit=TREND_SELL_MIN_LOW_PROFIT,
+        min_daily_loss=TREND_SELL_MIN_DAILY_LOSS / 100.0,
+        min_pullback=TREND_SELL_MIN_PULLBACK / 100.0,
+        min_low_profit=TREND_SELL_MIN_LOW_PROFIT / 100.0,
         include_weak_ma=TREND_SELL_INCLUDE_WEAK_MA,
-        include_clear_stop=TREND_SELL_INCLUDE_CLEAR_STOP
+        include_clear_stop=TREND_SELL_INCLUDE_CLEAR_STOP,
     )
-    if trend_sells:
+    if sell_indices:
         print("\n📉 [趋势扫描] 趋势转弱/风险累积形态：")
         print("-" * 60)
-        for line in trend_sells:
-            print(line)
+        for idx in sell_indices:
+            print(scan_to_out[idx])
 
-    # ---------- 风险观察（前5只） ----------
-    print("\n🛡️ [风险观察] 动态止盈/止损参考（前5只）：")
-    for out, score in results[:5]:
-        # 简单解析代码和价格（实际可从原始数据获取，这里略作示意）
-        parts = out.split()
-        if len(parts) >= 4:
-            code = parts[1]
-            price_str = parts[2]
-            try:
-                price = float(price_str)
-            except:
-                continue
-            # 这里缺少 hist 和 atr 数据，实际使用时需从分析结果中传入更多信息
-            # 暂时用占位提示
-            print(f"  {code} : 动态止损/止盈计算需完整行情数据，请在详细报告中查看。")
+    # 不再需要单独的风险观察区块
 
     dl.save_state(state)
     dl.logout()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ETF智能分析系统（重构版）")
+    parser = argparse.ArgumentParser(description="ETF智能分析系统")
     parser.add_argument("--code", type=str, help="指定分析某个ETF代码")
     args = parser.parse_args()
 

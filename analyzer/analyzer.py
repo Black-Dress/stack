@@ -8,6 +8,8 @@ import pandas as pd
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any
 
+from analyzer.risk_watch import generate_risk_alerts
+
 from .config import *
 from .utils import (
     weighted_sum,
@@ -293,28 +295,53 @@ class DataAnalyzer:
         return ctx
 
     def _build_risk_str(self, ctx: ETFContext, state: dict) -> str:
-        risk_parts = []
-        final = ctx.final_score
+        labels = []
+
+        # ----- 1. 止盈 / 回撤（仅低点涨幅 ≥ 12% 才提示）-----
+        if ctx.profit_pct_from_low >= 0.12:
+            if ctx.profit_level == 'clear':
+                labels.append("⛔ 清仓止盈")
+            elif ctx.profit_level == 'half':
+                labels.append("⚠️  半仓止盈")
+            else:
+                labels.append("止盈关注")
+
+        if ctx.trailing_profit_level == 'clear':
+            labels.append("⛔ 移动止盈")
+        elif ctx.trailing_profit_level == 'half':
+            labels.append("⚠️  移动止盈")
+
+        # ----- 2. 动态止盈 / 止损（基于 ATR）-----
+        if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
+            atr_abs = ctx.atr_pct * ctx.real_price
+            alerts = generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
+            alert_text = alerts.get("alert")
+            # 确保 alert_text 是字符串再判断
+            if isinstance(alert_text, str):
+                if "止损" in alert_text:
+                    labels.append("🔴 动态止损")
+                elif "止盈" in alert_text:
+                    labels.append("🟢 动态止盈")
+                else:
+                    labels.append(alert_text)
+
+        # ----- 3. 位置特征 -----
+        if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
+            labels.append("📉 低位")
+        if not ctx.above_ma30:
+            labels.append("⬇️  弱于均线")
+
+        # ----- 4. 连续低评分 -----
         if len(state.get("score_history", [])) >= RISK_WARNING_DAYS:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
-                risk_parts.append(f"连续{RISK_WARNING_DAYS}日低评分")
-            elif final < -50 or final > 80:
-                risk_parts.append(f"极端评分 {final:.1f}")
-        tp_detail = []
-        if ctx.trailing_profit_level:
-            if ctx.recent_high_price > 0 and ctx.real_price:
-                fall = (ctx.recent_high_price - ctx.real_price) / ctx.recent_high_price
-                tp_detail.append(f"高点回落{fall:.1%}")
-        if ctx.profit_level:
-            tp_detail.append(f"低点涨{ctx.profit_pct_from_low:.1%}")
-        if tp_detail:
-            risk_parts.append("止盈风险:" + "，".join(tp_detail))
-        if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
-            risk_parts.append("低位区间")
-        if not ctx.above_ma30:
-            risk_parts.append("弱于中期均线")
-        return " ".join(risk_parts) if risk_parts else ""
+                labels.append("🛑 连续低分")
+
+        return " ".join(labels)
+    
+
+
+
 
     def get_action(self, score: float, score_history: List[dict]) -> Tuple[str, str]:
         hist_scores = [s["score"] for s in score_history]
@@ -358,13 +385,17 @@ class DataAnalyzer:
 
     # ---------- 公开接口 ----------
     def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
-                           market, today, state) -> Tuple[str, Optional[dict], dict, float]:
+                           market, today, state) -> Tuple[str, Optional[dict], dict, float, Optional[dict], Optional[dict]]:
+        """
+        返回：
+            output_line, signal, state, score, risk_data, scan_info
+        """
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy())
         ctx = self._core_analysis(ctx)
 
         if ctx.error:
             out = format_etf_output_line(name, code, real_price, 0.0, 0, "数据不足")
-            return out, None, state, -100.0
+            return out, None, state, -100.0, None, None
 
         final = ctx.final_score
         today_str = today.strftime("%Y-%m-%d")
@@ -395,9 +426,35 @@ class DataAnalyzer:
             risk_str=risk_str,
             signal_action=action if action in ("BUY", "SELL") else None,
         )
-        signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY", "SELL") else None
-        return output, signal, state, final
+        signal = {
+            "action": action, "name": name, "code": code, "score": final
+        } if action in ("BUY", "SELL") else None
 
+        risk_data = {
+            "price": ctx.real_price,
+            "recent_high": ctx.recent_high_price,
+            "recent_low": ctx.recent_low_price,
+            "atr": ctx.atr_pct * ctx.real_price if ctx.atr_pct and ctx.real_price else 0.0,
+        }
+
+        # 趋势扫描所需数据
+        scan_info = {
+            "profit_pct_from_low": ctx.profit_pct_from_low if ctx.profit_pct_from_low is not None else 0.0,
+            "max_drawdown_pct": ctx.max_drawdown_pct if ctx.max_drawdown_pct is not None else 0.0,
+            "change_pct": (ctx.change_pct / 100.0) if ctx.change_pct is not None else 0.0, 
+            "has_weak_ma_text": "⬇️ 弱于均线" in risk_str,
+            "has_clear_stop_text": "清仓止盈" in risk_str or "清仓级" in (ctx.trailing_profit_level or ''),
+            "has_strong_sell_text": "强烈卖出" in adjusted_level or "连续低分" in risk_str,
+            "has_buy_signal": action == "BUY",
+            "has_sell_signal": action == "SELL",
+        }
+
+        return output, signal, state, final, risk_data, scan_info
+    
+    
+    
+    
+    
     def detailed_analysis(self, code, name, real_price, hist_df, weekly_df,
                           market, today, state, ai_comment=None) -> str:
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy())
