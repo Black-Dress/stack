@@ -254,21 +254,50 @@ class DataAnalyzer:
         total = sum(blended.values())
         return {k: v / total for k, v in blended.items()} if total > 0 else blended
 
-    def apply_correlation_penalty(self, weights, factor_names, corr_matrix, penalty_threshold=0.7):
+    def apply_correlation_penalty(self, weights, factor_names, penalty_threshold=0.7):
+        """
+        基于预定义的相关性组实施惩罚。
+        如果同一组内的因子权重都超过一定阈值，则等比例降低。
+        """
+        # 预定义高相关性因子组（买入方向）
+        high_corr_groups = {
+            "buy": [
+                {"williams_oversold", "rsi_oversold", "kdj_golden_cross"},   # 超卖/金叉类
+                {"tmsv_score", "price_above_ma20"},                           # 趋势类
+                {"bollinger_break_up", "price_above_ma20"},                   # 突破类
+            ],
+            "sell": [
+                {"williams_overbought", "rsi_overbought"},                    # 超买类
+                {"price_below_ma20", "stop_loss_ma_break", "bollinger_break_down"},  # 破位类
+                {"downside_momentum", "underperform_market"}                  # 下跌动能类
+            ]
+        }
+        
         w = weights.copy()
-        high_pairs = []
-        for i, f1 in enumerate(factor_names):
-            for f2 in factor_names[i+1:]:
-                if corr_matrix.loc[f1, f2] > penalty_threshold and w.get(f1, 0) > 0.12 and w.get(f2, 0) > 0.12:
-                    high_pairs.append((f1, f2))
-        for f1, f2 in high_pairs:
-            w[f1] *= 0.8
-            w[f2] *= 0.8
+        # 根据因子名称判断属于买入还是卖出方向（简单启发：看是否有 '_sell_' 属于卖出）
+        # 我们通过传入的 factor_names 的前缀或已知集合来判断
+        if any("williams_oversold" in fn for fn in factor_names):
+            groups = high_corr_groups["buy"]
+        else:
+            groups = high_corr_groups["sell"]
+        
+        for group in groups:
+            # 提取本组内实际存在的因子
+            present = [f for f in group if f in w and f in factor_names]
+            if len(present) < 2:
+                continue
+            # 如果组内所有因子权重均大于阈值（如 0.12），则每个降低 20%
+            if all(w[f] > 0.12 for f in present):
+                for f in present:
+                    w[f] *= 0.8
+        
+        # 重新归一化
         total = sum(w.values())
-        return {k: v / total for k, v in w.items()} if total > 0 else w
+        if total > 0:
+            return {k: v / total for k, v in w.items()}
+        return w
 
-    def compute_factor_correlation(self, df, factor_names):
-        return pd.DataFrame(np.eye(len(factor_names)), index=factor_names, columns=factor_names)
+
 
     def generate_ai_weights(self, ai_client, market_state, sentiment,
                             market_above_ma20, market_above_ma60, market_amount_above_ma20, volatility):
@@ -277,10 +306,10 @@ class DataAnalyzer:
                                                      market_amount_above_ma20, volatility)
         trust = min(self.compute_dynamic_trust(ai_buy, DEFAULT_BUY_WEIGHTS),
                     self.compute_dynamic_trust(ai_sell, DEFAULT_SELL_WEIGHTS))
-        corr_buy = self.compute_factor_correlation(None, BUY_FACTOR_NAMES)
-        corr_sell = self.compute_factor_correlation(None, SELL_FACTOR_NAMES)
-        ai_buy = self.apply_correlation_penalty(ai_buy, BUY_FACTOR_NAMES, corr_buy)
-        ai_sell = self.apply_correlation_penalty(ai_sell, SELL_FACTOR_NAMES, corr_sell)
+        
+        ai_buy = self.apply_correlation_penalty(ai_buy, BUY_FACTOR_NAMES)
+        ai_sell = self.apply_correlation_penalty(ai_sell, SELL_FACTOR_NAMES)
+        
         buy_w = self.blend_weights(ai_buy, DEFAULT_BUY_WEIGHTS, trust)
         sell_w = self.blend_weights(ai_sell, DEFAULT_SELL_WEIGHTS, trust)
         
@@ -568,8 +597,10 @@ class DataAnalyzer:
                 ctx.weekly_below = w["close"] < w["ma_short"]
 
         market_status = ctx.market.get("macro_status", "震荡偏弱")
+        # 从 market 中获取市场波动率（若无则使用个股波动率作为后备）
+        market_volatility = ctx.market.get("market_volatility", ctx.atr_pct)
         try:
-            tmsv_series = compute_tmsv(ctx.hist_df, market_status, atr_pct)
+            tmsv_series = compute_tmsv(ctx.hist_df, market_status, market_volatility)
             tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
             tmsv = 50.0 if np.isnan(tmsv) else tmsv
         except Exception:

@@ -342,6 +342,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         "market_factor": market_factor,
         "sentiment_factor": sentiment,
         "sentiment_risk_tip": risk_tip,
+        "market_volatility": volatility, 
         **market_info_basic,
     }
     analyzer.set_market_info(market_info)
