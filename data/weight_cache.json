@@ -36,48 +36,88 @@
       "sell_threshold_shift": 0.04,
       "confirm_days_shift": -1
     }
-},
+  },
   "env_2026-04-30": {
     "market_state": "强势牛市",
     "market_factor": 1.35,
     "buy_weights": {
-	"price_above_ma20": 0.19515306122448983,
-	"volume_above_ma5": 0.1556122448979592,
+      "price_above_ma20": 0.19940476190476192,
+      "volume_above_ma5": 0.14285714285714285,
       "macd_golden_cross": 0.03571428571428572,
       "kdj_golden_cross": 0.03571428571428572,
-	"bollinger_break_up": 0.026785714285714288,
-	"williams_oversold": 0.061224489795918366,
+      "bollinger_break_up": 0.026785714285714284,
+      "williams_oversold": 0.06547619047619048,
       "market_above_ma20": 0.022321428571428575,
       "market_above_ma60": 0.03571428571428572,
       "market_amount_above_ma20": 0.022321428571428575,
       "outperform_market": 0.022321428571428575,
       "weekly_above_ma20": 0.04464285714285715,
-	"tmsv_score": 0.2455357142857143,
-	"rsi_oversold": 0.05229591836734694,
+      "tmsv_score": 0.24553571428571427,
+      "rsi_oversold": 0.05654761904761904,
       "reversal_potential": 0.04464285714285715
     },
     "sell_weights": {
-	"price_below_ma20": 0.16496526025695765,
-	"bollinger_break_down": 0.05822303303186741,
-	"williams_overbought": 0.11644606606373482,
-	"rsi_overbought": 0.11644606606373481,
-	"underperform_market": 0.05822303303186741,
-	"stop_loss_ma_break": 0.291115165159337,
-	"weekly_below_ma20": 0.05822303303186741,
-	"downside_momentum": 0.11644606606373481,
-	"max_drawdown_stop": 0.019912277296898654
+      "price_below_ma20": 0.16569200779727097,
+      "bollinger_break_down": 0.058479532163742694,
+      "williams_overbought": 0.1023391812865497,
+      "rsi_overbought": 0.11695906432748537,
+      "underperform_market": 0.058479532163742694,
+      "stop_loss_ma_break": 0.2923976608187135,
+      "weekly_below_ma20": 0.058479532163742694,
+      "downside_momentum": 0.11695906432748537,
+      "max_drawdown_stop": 0.030214424951267062
     },
-	"sentiment": 0.8873801178388792,
-	"sentiment_raw": 0.9226694502584227,
-	"timestamp": 1777533142.4029398,
+    "sentiment": 0.8186695657563394,
+    "sentiment_raw": 0.9552211075457685,
+    "timestamp": 1777543539.7070346,
     "ai_params_advice": {
       "buy_threshold_shift": 0.02,
       "sell_threshold_shift": 0.04,
       "confirm_days_shift": -1
     }
-},
-"_env_date_list": [
-	"2026-04-29",
-	"2026-04-30"
-]
+  },
+  "_env_date_list": [
+    "2026-04-29",
+    "2026-04-30",
+    "2026-05-06"
+  ],
+  "env_2026-05-06": {
+    "market_state": "强势牛市",
+    "market_factor": 1.35,
+    "buy_weights": {
+      "price_above_ma20": 0.19940476190476192,
+      "volume_above_ma5": 0.14285714285714285,
+      "macd_golden_cross": 0.03571428571428572,
+      "kdj_golden_cross": 0.03571428571428572,
+      "bollinger_break_up": 0.026785714285714284,
+      "williams_oversold": 0.06547619047619048,
+      "market_above_ma20": 0.022321428571428575,
+      "market_above_ma60": 0.03571428571428572,
+      "market_amount_above_ma20": 0.022321428571428575,
+      "outperform_market": 0.022321428571428575,
+      "weekly_above_ma20": 0.04464285714285715,
+      "tmsv_score": 0.24553571428571427,
+      "rsi_oversold": 0.05654761904761904,
+      "reversal_potential": 0.04464285714285715
+    },
+    "sell_weights": {
+      "price_below_ma20": 0.11659549941372263,
+      "bollinger_break_down": 0.058297749706861315,
+      "williams_overbought": 0.128145053600931,
+      "rsi_overbought": 0.1427194910276463,
+      "underperform_market": 0.058297749706861315,
+      "stop_loss_ma_break": 0.29148874853430656,
+      "weekly_below_ma20": 0.058297749706861315,
+      "downside_momentum": 0.12622012790306292,
+      "max_drawdown_stop": 0.01993783039974657
+    },
+    "sentiment": 0.8894570579628853,
+    "sentiment_raw": 0.9730663089635023,
+    "timestamp": 1778033589.5202577,
+    "ai_params_advice": {
+      "buy_threshold_shift": 0.02,
+      "sell_threshold_shift": 0.04,
+      "confirm_days_shift": -1
+    }
+  }
 }
