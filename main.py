@@ -54,7 +54,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     analyzer = DataAnalyzer()
 
     try:
-        etf_list = dl.load_positions()
+        etf_list = dl.load_positions()   # 包含“买入成本”
     except Exception as e:
         print(f"加载持仓文件失败: {e}")
         dl.logout()
@@ -85,7 +85,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             print(f"未找到代码 {target_code}")
             dl.logout()
             return
-        code, name = row.iloc[0]["代码"], row.iloc[0]["名称"]
+        code, name, cost = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["买入成本"]
         hist = dl.get_daily_data(code, start, today_str)
         if hist is not None:
             hist = dl.calculate_indicators(hist, need_amount_ma=False)
@@ -98,7 +98,8 @@ def run_batch_analysis(api_key=None, target_code=None):
                 ai_client.comment_on_etf(
                     code, name, 0, "详细", env["state"], env["factor"], 50, 0.02
                 ) if ai_client else None
-            )
+            ),
+            cost_price=cost if pd.notna(cost) else None
         )
         print(report)
         dl.logout()
@@ -121,13 +122,14 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     print("-" * 90)
 
-    raw_outputs = []          # (out_str, score) 按提交顺序
-    scan_info_list = []       # 趋势扫描数据（与 raw_outputs 顺序一致）
+    raw_outputs = []
+    scan_info_list = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
         for _, row in etf_list.iterrows():
             code, name = row["代码"], row["名称"]
+            cost = row["买入成本"] if pd.notna(row["买入成本"]) else None
             hist = dl.get_daily_data(code, start, today_str)
             if hist is not None:
                 hist = dl.calculate_indicators(hist, need_amount_ma=False)
@@ -136,7 +138,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             s = state.get(code, {})
             futures.append(
                 (code, name, ex.submit(analyzer.analyze_single_etf,
-                                 code, name, real_price, hist, weekly, env, today, s))
+                                 code, name, real_price, hist, weekly, env, today, s, cost_price=cost))
             )
         for code, name, f in futures:
             out, signal, new_state, score, risk_data, scan_info = f.result()
@@ -145,12 +147,10 @@ def run_batch_analysis(api_key=None, target_code=None):
             if scan_info:
                 scan_info_list.append(scan_info)
 
-    # 按评分排序输出
     sorted_results = sorted(raw_outputs, key=lambda x: x[1], reverse=True)
     for out, _ in sorted_results:
         print(out)
 
-    # 趋势扫描（参数转换为小数）
     scan_to_out = [out for out, _ in raw_outputs]
 
     buy_indices = select_trend_buy(
@@ -183,8 +183,6 @@ def run_batch_analysis(api_key=None, target_code=None):
         print("-" * 60)
         for idx in sell_indices:
             print(scan_to_out[idx])
-
-    # 不再需要单独的风险观察区块
 
     dl.save_state(state)
     dl.logout()

@@ -48,13 +48,19 @@ ACTION_LEVEL_NAMES = [
 
 # ---------------------------- 风险提示参数 ----------------------------
 RISK_WARNING_DAYS = 3
-RISK_WARNING_THRESHOLD = -10        # 百分制
+RISK_WARNING_THRESHOLD = 30         # 已修正，百分制低分阈值
 MA30_WEAKNESS_PENALTY = 0.9
 
 # ---------------------------- 动态风险（ATR 倍数） ----------------------------
 ATR_STOP_MULT = 2.0                 # 硬止损
 ATR_TRAILING_PROFIT_MULT = 1.5      # 移动止盈
 RISK_ALERT_DISTANCE_ATR = 0.5       # 提醒距离
+
+# ---------------------------- 基于成本的止盈止损（硬规则） ----------------------------
+COST_TAKE_PROFIT_CLEAR = 0.20       # 浮动盈利≥20% 且移动止盈触发 → 清仓卖出
+COST_TAKE_PROFIT_HALF = 0.15        # 浮动盈利≥15% 且移动止盈触发 → 半仓卖出（目前仍为提醒）
+COST_STOP_LOSS_PCT = -0.08          # 浮动亏损≤-8% → 无条件止损卖出
+USE_COST_BASED_OVERRIDE = True      # 是否启用成本价覆盖规则
 
 # ---------------------------- 显示宽度 ----------------------------
 DISPLAY_NAME_WIDTH = 16
