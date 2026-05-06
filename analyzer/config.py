@@ -58,9 +58,10 @@ RISK_ALERT_DISTANCE_ATR = 0.5       # 提醒距离
 
 # ---------------------------- 基于成本的止盈止损（硬规则） ----------------------------
 COST_TAKE_PROFIT_CLEAR = 0.20       # 浮动盈利≥20% 且移动止盈触发 → 清仓卖出
-COST_TAKE_PROFIT_HALF = 0.15        # 浮动盈利≥15% 且移动止盈触发 → 半仓卖出（目前仍为提醒）
+COST_TAKE_PROFIT_HALF = 0.15        # 浮动盈利≥15% 且移动止盈触发 → 半仓卖出（可配置）
 COST_STOP_LOSS_PCT = -0.08          # 浮动亏损≤-8% → 无条件止损卖出
 USE_COST_BASED_OVERRIDE = True      # 是否启用成本价覆盖规则
+COST_HALF_PROFIT_ACTION = "HOLD"    # 半仓止盈时的动作："SELL" 或 "HOLD"
 
 # ---------------------------- 显示宽度 ----------------------------
 DISPLAY_NAME_WIDTH = 16

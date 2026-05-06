@@ -9,6 +9,7 @@ from .config import (
     COST_TAKE_PROFIT_CLEAR,
     COST_TAKE_PROFIT_HALF,
     COST_STOP_LOSS_PCT,
+    COST_HALF_PROFIT_ACTION,
 )
 
 
@@ -22,7 +23,7 @@ def generate_risk_alerts(
     返回：
         stop_loss: 动态止损价 (float or None)
         trail_profit: 移动止盈价 (float or None)
-        alert: 提醒文本 (str or None)
+        alert: 提醒文本 (str or None)，已包含价位
     """
     if atr <= 0:
         return {"stop_loss": None, "trail_profit": None, "alert": None}
@@ -32,11 +33,11 @@ def generate_risk_alerts(
     alert: Optional[str] = None
 
     if price <= stop_price:
-        alert = f"🔴 已触发动态止损（{stop_price:.3f}）"
+        alert = f"🔴 动态止损({stop_price:.3f})"
     elif price - stop_price < RISK_ALERT_DISTANCE_ATR * atr:
-        alert = f"🟡 接近动态止损线 {stop_price:.3f}（距 {price - stop_price:.3f}）"
+        alert = f"🟡 近止损({stop_price:.3f})"
     elif trail_price and price - trail_price < RISK_ALERT_DISTANCE_ATR * atr:
-        alert = f"🟢 接近动态止盈线 {trail_price:.3f}（距 {price - trail_price:.3f}）"
+        alert = f"🟢 近止盈({trail_price:.3f})"
 
     return {"stop_loss": stop_price, "trail_profit": trail_price, "alert": alert}
 
@@ -67,8 +68,12 @@ def evaluate_cost_based_stop_profit(
     if profit_pct >= COST_TAKE_PROFIT_CLEAR and trailing_profit_level == "clear":
         return {"action_override": "SELL", "level_override": "清仓止盈"}
 
-    # 半仓止盈提醒：盈利中等且移动止盈 half
+    # 半仓止盈：盈利中等且移动止盈触发
     if profit_pct >= COST_TAKE_PROFIT_HALF and trailing_profit_level in ("half", "clear"):
-        return {"action_override": None, "level_override": "半仓止盈"}
+        # 根据配置决定是否卖出
+        if COST_HALF_PROFIT_ACTION == "SELL":
+            return {"action_override": "SELL", "level_override": "半仓止盈"}
+        else:
+            return {"action_override": None, "level_override": "半仓止盈"}
 
     return {"action_override": None, "level_override": None}

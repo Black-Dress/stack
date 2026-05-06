@@ -54,7 +54,7 @@ class ETFContext:
     today: datetime.date
     market: Dict
     params: Dict
-    cost_price: Optional[float] = None       # 新增：持仓成本价
+    cost_price: Optional[float] = None       # 持仓成本价
 
     change_pct: float = 0.0
     atr_pct: float = 0.0
@@ -88,6 +88,7 @@ class ETFContext:
 
 
 class DataAnalyzer:
+    # 这些降级映射现在已经不再用于成本覆盖的ETF，保留供无成本的ETF使用（但无成本时也不做降级，因此实际上可以废弃，但保留向后兼容）
     PROFIT_DOWNGRADE_CLEAR = {
         "极度看好": "谨慎买入(高估)",
         "强烈买入": "谨慎买入(高估)",
@@ -300,58 +301,56 @@ class DataAnalyzer:
         ctx.final_score = max(1.0, min(99.0, ctx.final_score))
         return ctx
 
-    def _build_risk_str(self, ctx: ETFContext, state: dict) -> str:
+    def _build_risk_str(self, ctx: ETFContext, state: dict, final_level: str = "") -> str:
         labels = []
 
-        # 基于成本的浮盈标签
-        if ctx.cost_profit_pct is not None:
-            pct = ctx.cost_profit_pct * 100
-            if pct >= COST_TAKE_PROFIT_CLEAR * 100:
-                labels.append(f"💰浮盈 {pct:.1f}%")
-            elif pct <= COST_STOP_LOSS_PCT * 100:
-                labels.append(f"🔻浮亏 {pct:.1f}%")
+        # 有持仓成本的才添加止盈止损相关标签
+        if ctx.cost_price is not None:
+            # 浮动盈亏标签
+            if ctx.cost_profit_pct is not None:
+                pct = ctx.cost_profit_pct * 100
+                if pct >= COST_TAKE_PROFIT_CLEAR * 100:
+                    labels.append(f"💰浮盈 {pct:.1f}%")
+                elif pct <= COST_STOP_LOSS_PCT * 100:
+                    labels.append(f"🔻浮亏 {pct:.1f}%")
 
-        # 原有止盈/回撤提示
-        if ctx.profit_pct_from_low >= 0.12:
-            if ctx.profit_level == 'clear':
-                labels.append("⛔ 清仓止盈")
-            elif ctx.profit_level == 'half':
-                labels.append("⚠️  半仓止盈")
-            else:
-                labels.append("止盈关注")
-
-        if ctx.trailing_profit_level == 'clear':
-            labels.append("⛔ 移动止盈")
-        elif ctx.trailing_profit_level == 'half':
-            labels.append("⚠️  移动止盈")
-
-        # ATR 动态止损/止盈提醒
-        if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
-            atr_abs = ctx.atr_pct * ctx.real_price
-            alerts = generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
-            alert_text = alerts.get("alert")
-            if isinstance(alert_text, str):
-                if "止损" in alert_text:
-                    labels.append("🔴 动态止损")
-                elif "止盈" in alert_text:
-                    labels.append("🟢 动态止盈")
+            # 原有基于低点涨幅的止盈标签、移动止盈标签等，现在仅对持仓者显示
+            if ctx.profit_pct_from_low >= 0.12:
+                if ctx.profit_level == 'clear':
+                    labels.append("⛔ 清仓止盈")
+                elif ctx.profit_level == 'half':
+                    labels.append("⚠️  半仓止盈")
                 else:
-                    labels.append(alert_text)
+                    labels.append("止盈关注")
+            if ctx.trailing_profit_level == 'clear':
+                labels.append("⛔ 移动止盈")
+            elif ctx.trailing_profit_level == 'half':
+                labels.append("⚠️  移动止盈")
 
-        # 位置特征
+            # ATR 动态止损/止盈提醒（但若已触发成本止损/止盈，则不再显示，避免冗余）
+            if "止损卖出" not in final_level and "清仓止盈" not in final_level:
+                if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
+                    atr_abs = ctx.atr_pct * ctx.real_price
+                    alerts = generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
+                    alert_text = alerts.get("alert")
+                    if isinstance(alert_text, str):
+                        # 已包含价位信息，直接使用
+                        labels.append(alert_text)
+
+        # 位置特征（所有ETF都显示）
         if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
             labels.append("📉 低位")
         if not ctx.above_ma30:
             labels.append("⬇️  弱于均线")
 
-        # 连续低分警告（已修正阈值）
+        # 连续低分警告
         if len(state.get("score_history", [])) >= RISK_WARNING_DAYS:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
                 labels.append("🛑 连续低分")
 
         return " ".join(labels)
-    
+
     def get_action(self, score: float, score_history: List[dict]) -> Tuple[str, str]:
         hist_scores = [s["score"] for s in score_history]
         buy_thresh = self.params["BUY_THRESHOLD"]
@@ -383,18 +382,16 @@ class DataAnalyzer:
 
     @staticmethod
     def _adjust_action_level_for_profit(action_level, ctx):
-        sell_or_neutral = {"中性偏空", "偏空持有", "谨慎卖出", "卖出", "强烈卖出"}
-        if action_level in sell_or_neutral:
-            return action_level
-        if ctx.trailing_profit_level == 'clear' or ctx.profit_level == 'clear':
-            return DataAnalyzer.PROFIT_DOWNGRADE_CLEAR.get(action_level, action_level)
-        elif ctx.trailing_profit_level == 'half' or ctx.profit_level == 'half':
-            return DataAnalyzer.PROFIT_DOWNGRADE_HALF.get(action_level, action_level)
+        """
+        不再使用此方法进行成本相关调整，仅在有成本价时直接由成本覆盖，
+        无成本价时也不进行任何止盈降级。
+        保留方法以防其他地方调用，但逻辑已废弃。
+        """
         return action_level
 
     def _apply_cost_based_overrides(self, action: str, action_level: str,
                                     ctx: ETFContext) -> Tuple[str, str]:
-        # 没有成本价，或者没有实时价格，都不触发
+        # 没有成本价或实时价格，不触发
         if (not USE_COST_BASED_OVERRIDE
             or ctx.cost_price is None
             or ctx.real_price is None):
@@ -410,20 +407,14 @@ class DataAnalyzer:
         )
 
         if decision["action_override"] == "SELL":
-            # 直接覆盖动作和等级，level_override 保证为 str
-            return "SELL", decision.get("level_override") or action_level
+            return "SELL", decision["level_override"] or action_level
         elif decision["level_override"]:
-            return action, decision["level_override"]  # 此时已确保非 None
+            return action, decision["level_override"]
         return action, action_level
 
     # ---------- 公开接口 ----------
     def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
                            market, today, state, cost_price=None) -> Tuple[str, Optional[dict], dict, float, Optional[dict], Optional[dict]]:
-        """
-        返回：
-            output_line, signal, state, score, risk_data, scan_info
-        新增参数 cost_price: 持仓成本（None 表示未持有）
-        """
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
                          cost_price=cost_price)
         ctx = self._core_analysis(ctx)
@@ -449,13 +440,13 @@ class DataAnalyzer:
 
         action, action_level = self.get_action(final, state["score_history"])
 
-        # 先应用原有的止盈降级（基于低点涨幅）
-        adjusted_level = self._adjust_action_level_for_profit(action_level, ctx)
+        # 有成本价时直接应用成本覆盖规则，不再进行原有的技术面降级
+        if cost_price is not None:
+            action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
+        else:
+            final_level = action_level
 
-        # 再应用基于成本的硬覆盖规则
-        action, final_level = self._apply_cost_based_overrides(action, adjusted_level, ctx)
-
-        risk_str = self._build_risk_str(ctx, state)
+        risk_str = self._build_risk_str(ctx, state, final_level)
 
         output = format_etf_output_line(
             name=name,
@@ -485,7 +476,7 @@ class DataAnalyzer:
             "max_drawdown_pct": ctx.max_drawdown_pct if ctx.max_drawdown_pct is not None else 0.0,
             "change_pct": (ctx.change_pct / 100.0) if ctx.change_pct is not None else 0.0,
             "has_weak_ma_text": "⬇️ 弱于均线" in risk_str,
-            "has_clear_stop_text": "清仓止盈" in risk_str or "清仓级" in (ctx.trailing_profit_level or ''),
+            "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
             "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
             "has_buy_signal": action == "BUY",
             "has_sell_signal": action == "SELL",
@@ -503,6 +494,10 @@ class DataAnalyzer:
 
         final = ctx.final_score
         _, action_level = self.get_action(final, state.get("score_history", []))
-        adjusted_level = self._adjust_action_level_for_profit(action_level, ctx)
-        _, final_level = self._apply_cost_based_overrides(_, adjusted_level, ctx)  # 动作忽略，只取 level
+
+        if cost_price is not None:
+            _, final_level = self._apply_cost_based_overrides(_, action_level, ctx)
+        else:
+            final_level = action_level
+
         return format_detailed_report(ctx, market, self.params, final_level, ai_comment)
