@@ -65,8 +65,9 @@ class DataLayer:
             return None
         # 只保留已完成的周（避免未来数据）
         weekly = df.resample("W-FRI").last()
-        # 删除包含当前未完成周的行
-        weekly = weekly[weekly.index.date < datetime.date.today()]
+        # 使用 Timestamp 比较，避免 .date 类型问题
+        today_ts = pd.Timestamp(datetime.date.today())
+        weekly = weekly[weekly.index < today_ts]
         if weekly.empty:
             return None
         weekly["ma_short"] = weekly["close"].rolling(ETF_MA).mean()
@@ -86,21 +87,21 @@ class DataLayer:
             return None
 
     def load_positions(self) -> pd.DataFrame:
-        """读取持仓文件，返回包含 [代码, 名称, 买入成本] 的DataFrame。
+        """读取持仓文件，返回包含 [代码, 名称, 成本] 的DataFrame。
            成本价为 None 表示未持有。
         """
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
             df = pd.read_csv(POSITION_FILE, encoding="gbk")
-        # 确保有“买入成本”列，若无则补NaN
-        if "买入成本" not in df.columns:
-            df["买入成本"] = None
+        # 确保有“成本”列，若无则补NaN
+        if "成本" not in df.columns:
+            df["成本"] = None
         # 转换成本列为数值，非法值置为None
-        df["买入成本"] = pd.to_numeric(df["买入成本"], errors="coerce")
+        df["成本"] = pd.to_numeric(df["成本"], errors="coerce")
         # 将0或负数视为无效（成本应为正数）
-        df.loc[df["买入成本"] <= 0, "买入成本"] = None
-        return df[["代码", "名称", "买入成本"]]
+        df.loc[df["成本"] <= 0, "成本"] = None
+        return df[["代码", "名称", "成本"]]
 
     def load_state(self) -> Dict:
         if not os.path.exists(self._state_file):

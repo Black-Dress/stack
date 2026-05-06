@@ -54,7 +54,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     analyzer = DataAnalyzer()
 
     try:
-        etf_list = dl.load_positions()   # 包含“买入成本”
+        etf_list = dl.load_positions()   
     except Exception as e:
         print(f"加载持仓文件失败: {e}")
         dl.logout()
@@ -85,7 +85,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             print(f"未找到代码 {target_code}")
             dl.logout()
             return
-        code, name, cost = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["买入成本"]
+        code, name, cost = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["成本"]
         hist = dl.get_daily_data(code, start, today_str)
         if hist is not None:
             hist = dl.calculate_indicators(hist, need_amount_ma=False)
@@ -94,11 +94,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         s = state.get(code, {})
         report = analyzer.detailed_analysis(
             code, name, real_price, hist, weekly, env, today, s,
-            ai_comment=(
-                ai_client.comment_on_etf(
-                    code, name, 0, "详细", env["state"], env["factor"], 50, 0.02
-                ) if ai_client else None
-            ),
+            ai_client=ai_client,
             cost_price=cost if pd.notna(cost) else None
         )
         print(report)
@@ -129,7 +125,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         futures = []
         for _, row in etf_list.iterrows():
             code, name = row["代码"], row["名称"]
-            cost = row["买入成本"] if pd.notna(row["买入成本"]) else None
+            cost = row["成本"] if pd.notna(row["成本"]) else None
             hist = dl.get_daily_data(code, start, today_str)
             if hist is not None:
                 hist = dl.calculate_indicators(hist, need_amount_ma=False)

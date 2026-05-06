@@ -114,9 +114,34 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment):
     lines.append(f"  {ctx.name} ({ctx.code})  评分: {ctx.final_score:.1f}  等级: {action_level}")
     lines.append(f"  价格: {ctx.real_price:.3f}  涨跌: {ctx.change_pct:+.2f}%  ATR: {ctx.atr_pct*100:.2f}%")
     lines.append(f"  市场状态: {market['state']}  环境因子: {market['factor']:.2f}")
-    if ctx.trailing_profit_level:
+    
+    # ---- 持仓成本信息（如果有） ----
+    if ctx.cost_price is not None and ctx.cost_price > 0:
+        profit_pct = ctx.cost_profit_pct
+        cost_str = f"持仓成本: {ctx.cost_price:.3f}"
+        if profit_pct is not None:
+            cost_str += f"  浮动盈亏: {profit_pct:+.2%}"
+        lines.append(f"  💰 {cost_str}")
+
+    # ---- 止盈/止损状态（只显示有效级别） ----
+    if ctx.trailing_profit_level and ctx.trailing_profit_level != "None":
         fall = (ctx.recent_high_price - ctx.real_price) / ctx.recent_high_price if ctx.recent_high_price > 0 else 0
-        lines.append(f"  ⚠️ 止盈风险: 高点回落{fall:.1%} ({ctx.trailing_profit_level})")
+        label = ctx.trailing_profit_level
+        if label == "clear":
+            label = "清仓"
+        elif label == "half":
+            label = "半仓"
+        lines.append(f"  ⚠️ 移动止盈: {label}级，高点回落{fall:.1%}")
+
+    if ctx.profit_pct_from_low >= 0.12:
+        if ctx.profit_level == 'clear':
+            lines.append(f"  ⛔ 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (清仓级)")
+        elif ctx.profit_level == 'half':
+            lines.append(f"  ⚠️ 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (半仓级)")
+        else:
+            lines.append(f"  止盈关注: 低点涨幅{ctx.profit_pct_from_low:.1%}")
+
+    # ---- AI 评论 ----
     if ai_comment:
         lines.append(f"  💬 AI点评: {ai_comment}")
     return "\n".join(lines)

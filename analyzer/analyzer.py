@@ -485,7 +485,7 @@ class DataAnalyzer:
         return output, signal, state, final, risk_data, scan_info
 
     def detailed_analysis(self, code, name, real_price, hist_df, weekly_df,
-                          market, today, state, ai_comment=None, cost_price=None) -> str:
+                          market, today, state, ai_client=None, cost_price=None) -> str:
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
                          cost_price=cost_price)
         ctx = self._core_analysis(ctx)
@@ -494,10 +494,28 @@ class DataAnalyzer:
 
         final = ctx.final_score
         _, action_level = self.get_action(final, state.get("score_history", []))
-
+        
         if cost_price is not None:
             _, final_level = self._apply_cost_based_overrides(_, action_level, ctx)
         else:
             final_level = action_level
+
+        # ----- AI 评论（传入真实数据）-----
+        ai_comment = None
+        if ai_client:
+            try:
+                ai_comment = ai_client.comment_on_etf(
+                    code=code,
+                    name=name,
+                    final_score=ctx.final_score,
+                    action_level=final_level,
+                    market_state=market["state"],
+                    market_factor=market["factor"],
+                    tmsv=ctx.tmsv,
+                    atr_pct=ctx.atr_pct
+                )
+            except Exception as e:
+                logger.warning(f"AI评论生成失败: {e}")
+                ai_comment = "（AI评论生成失败）"
 
         return format_detailed_report(ctx, market, self.params, final_level, ai_comment)
