@@ -60,7 +60,7 @@ DEFAULT_SELL_WEIGHTS = {
     "williams_overbought": 0.10,
     "rsi_overbought": 0.15,
     "underperform_market": 0.20,
-    "stop_loss_ma_break": 1.00,
+    "stop_loss_ma_break": 0.10,   
     "weekly_below_ma20": 0.20,
     "downside_momentum": 0.15,
     "max_drawdown_stop": 0.02,

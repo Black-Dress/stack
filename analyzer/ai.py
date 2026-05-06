@@ -409,33 +409,21 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
 
     # ---------- 批量 ETF 评论（新增） ----------
     def batch_comment_on_etfs(self, etf_list: List[Dict]) -> List[str]:
-        """
-        批量生成多只 ETF 的点评，返回与输入顺序一致的评论列表
-
-        Args:
-            etf_list: 每个元素包含字段 code, name, final_score, action_level, market_state,
-                      market_factor, sentiment_factor, buy_weights, sell_weights,
-                      buy_factors, sell_factors, tmsv, atr_pct
-
-        Returns:
-            评论字符串列表
-        """
         if not etf_list:
             return []
 
-        # 分批处理
         results = [""] * len(etf_list)
         for i in range(0, len(etf_list), AI_BATCH_COMMENT_SIZE):
             batch = etf_list[i : i + AI_BATCH_COMMENT_SIZE]
             prompts = []
             for idx, etf in enumerate(batch):
                 prompt = f"""
-ETF {idx}: {etf['name']}({etf['code']})
-市场: {etf['market_state']} 因子{etf['market_factor']:.2f} 情绪{etf['sentiment_factor']:.2f}
-评分: {etf['final_score']:.2f} 等级: {etf['action_level']} TMSV: {etf['tmsv']:.1f} ATR: {etf['atr_pct']*100:.2f}%
-买入: { {k: f"{v:.2f}" for k,v in list(etf['buy_factors'].items())[:4]} }
-卖出: { {k: f"{v:.2f}" for k,v in list(etf['sell_factors'].items())[:4]} }
-"""
+    ETF {idx}: {etf['name']}({etf['code']})
+    市场: {etf['market_state']} 因子{etf['market_factor']:.2f} 情绪{etf['sentiment_factor']:.2f}
+    评分: {etf['final_score']:.2f} 等级: {etf['action_level']} TMSV: {etf['tmsv']:.1f} ATR: {etf['atr_pct']*100:.2f}%
+    买入: { {k: f"{v:.2f}" for k,v in list(etf['buy_factors'].items())[:4]} }
+    卖出: { {k: f"{v:.2f}" for k,v in list(etf['sell_factors'].items())[:4]} }
+    """
                 prompts.append(prompt)
             combined = (
                 "为以下ETF分别生成80~120字专业点评，用JSON返回，键为序号(字符串)，值为点评文本。\n"
@@ -457,10 +445,10 @@ ETF {idx}: {etf['name']}({etf['code']})
             except Exception as e:
                 logger.error(f"批量评论生成失败(批次{i}): {e}")
                 for j in range(len(batch)):
-                    comment = data.get(str(j), "（批量评论缺失）")
-                    results[i + j] = comment.strip() if comment else "（空评）"
-        return results
-
+                    results[i + j] = "（批量评论生成失败）"
+        return results    
+    
+    
     # ---------- 止盈建议（保留原接口） ----------
     def take_profit_advice(
         self,
@@ -502,16 +490,6 @@ ETF {idx}: {etf['name']}({etf['code']})
 
     # ---------- 批量止盈建议（新增） ----------
     def batch_take_profit_advice(self, tp_list: List[Dict]) -> List[str]:
-        """
-        批量生成止盈建议
-
-        Args:
-            tp_list: 每个元素包含 code, name, profit_pct, recent_low, current_price,
-                     tmsv, rsi, atr_pct, market_state, sentiment_factor
-
-        Returns:
-            建议字符串列表
-        """
         if not tp_list:
             return []
         results = [""] * len(tp_list)
@@ -520,9 +498,9 @@ ETF {idx}: {etf['name']}({etf['code']})
             prompts = []
             for idx, etf in enumerate(batch):
                 prompt = f"""
-ETF {idx}: {etf['name']}({etf['code']}) 低点涨幅{etf['profit_pct']:.1%} 现价{etf['current_price']:.3f} 低点{etf['recent_low']:.3f}
-TMSV:{etf['tmsv']:.1f} RSI:{etf['rsi']:.1f} ATR:{etf['atr_pct']*100:.2f}% 市场:{etf['market_state']} 情绪:{etf['sentiment_factor']:.2f}
-"""
+    ETF {idx}: {etf['name']}({etf['code']}) 低点涨幅{etf['profit_pct']:.1%} 现价{etf['current_price']:.3f} 低点{etf['recent_low']:.3f}
+    TMSV:{etf['tmsv']:.1f} RSI:{etf['rsi']:.1f} ATR:{etf['atr_pct']*100:.2f}% 市场:{etf['market_state']} 情绪:{etf['sentiment_factor']:.2f}
+    """
                 prompts.append(prompt)
             combined = (
                 "为以下ETF分别生成50~80字止盈操作建议，用JSON返回，键为序号(字符串)，值为建议文本。\n"
@@ -544,6 +522,6 @@ TMSV:{etf['tmsv']:.1f} RSI:{etf['rsi']:.1f} ATR:{etf['atr_pct']*100:.2f}% 市场
             except Exception as e:
                 logger.error(f"批量止盈建议生成失败(批次{i}): {e}")
                 for j in range(len(batch)):
-                    advice = data.get(str(j), "（批量止盈建议缺失）")
-                    results[i + j] = advice.strip() if advice else "（缺失）"
+                    results[i + j] = "（批量止盈建议生成失败）"
         return results
+
