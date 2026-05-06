@@ -242,3 +242,20 @@ DISPLAY_SCORE_WIDTH = 10
 DISPLAY_ACTION_WIDTH = 24
 
 
+# ==================== 趋势推荐参数（买入/卖出） ====================
+# 买入推荐参数
+TREND_BUY_MAX_COUNT = 3                # 最大推荐数量
+TREND_BUY_LOW_PROFIT_MIN = 5.0         # 低点最小涨幅(%)
+TREND_BUY_LOW_PROFIT_MAX = 15.0        # 低点最大涨幅(%)
+TREND_BUY_MAX_PULLBACK = 5.0           # 高点最大回落(%)
+TREND_BUY_DAILY_GAIN_MIN = 0.5         # 当日最小涨幅(%)
+TREND_BUY_DAILY_GAIN_MAX = 6.0         # 当日最大涨幅(%)
+TREND_BUY_PREFER_SIGNAL = True         # 是否优先选择有[BUY]信号的
+
+# 卖出警示参数
+TREND_SELL_MAX_COUNT = 3               # 最大警示数量
+TREND_SELL_MIN_DAILY_LOSS = -3.0       # 当日跌幅超过此值(%)
+TREND_SELL_MIN_PULLBACK = 6.0          # 高点回落超过此值(%)
+TREND_SELL_MIN_LOW_PROFIT = 18.0       # 低点涨幅超过此值且回落>5%时警示
+TREND_SELL_INCLUDE_WEAK_MA = True      # 是否包含“弱于中期均线”
+TREND_SELL_INCLUDE_CLEAR_STOP = True   # 是否包含“清仓级”止盈

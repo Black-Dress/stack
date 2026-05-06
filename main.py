@@ -40,6 +40,19 @@ from analyzer.config import (
     DISPLAY_NAME_WIDTH,
     DISPLAY_PRICE_WIDTH,
     DISPLAY_SCORE_WIDTH,
+    TREND_BUY_MAX_COUNT,
+    TREND_BUY_LOW_PROFIT_MIN,
+    TREND_BUY_LOW_PROFIT_MAX,
+    TREND_BUY_MAX_PULLBACK,
+    TREND_BUY_DAILY_GAIN_MIN,
+    TREND_BUY_DAILY_GAIN_MAX,
+    TREND_BUY_PREFER_SIGNAL,
+    TREND_SELL_MAX_COUNT,
+    TREND_SELL_MIN_DAILY_LOSS,
+    TREND_SELL_MIN_PULLBACK,
+    TREND_SELL_MIN_LOW_PROFIT,
+    TREND_SELL_INCLUDE_WEAK_MA,
+    TREND_SELL_INCLUDE_CLEAR_STOP,
 )
 from analyzer.fetcher import DataFetcher, AKSHARE_AVAILABLE
 from analyzer.utils import (
@@ -171,23 +184,30 @@ def _extract_pct(out: str, pattern: str) -> Optional[float]:
 
 
 def select_trend_buy(results, max_count=3,
-                     score_low=0.55, score_high=0.82,
                      low_profit_min=5.0, low_profit_max=15.0,
                      max_pullback=5.0,
+                     daily_gain_min=0.5, daily_gain_max=6.0,
                      prefer_signal=True) -> list:
     """
-    趋势型买入推荐：上涨中继 / 回调企稳
+    趋势型买入推荐：基于技术形态和今日表现，不使用评分。
     条件：
         - 站上中期均线（无“弱于中期均线”）
-        - 评分在 [score_low, score_high]
         - 无“清仓级”止盈
-        - 低点涨幅在 [low_profit_min, low_profit_max]（已脱离底部但未暴涨）
+        - 无“强烈卖出”或“连续3日低评分”
+        - 低点涨幅在 [low_profit_min, low_profit_max] 之间（已脱离底部但未暴涨）
         - 高点回落 <= max_pullback（无显著顶部信号）
-        - 无连续低评分、强烈卖出、高波动>4%
-    排序：有 [BUY] 优先；同组内按 评分*0.6 + (1 - 回落/0.1)*0.4 降序
+        - 当日涨跌幅在 [daily_gain_min, daily_gain_max] 之间（温和上涨，不过热）
+        - 有 [BUY] 信号优先排序
+    排序：有 [BUY] 信号优先，同组内按低点涨幅接近 ideal_profit（默认10%）排序
     """
+    def extract_pct(out: str, pattern: str) -> Optional[float]:
+        m = re.search(pattern, out)
+        if m:
+            return float(m.group(1))
+        return None
+
     candidates = []
-    for out, score in results:
+    for out, _ in results:   # 忽略评分参数
         # 硬性排除
         if "弱于中期均线" in out:
             continue
@@ -195,46 +215,65 @@ def select_trend_buy(results, max_count=3,
             continue
         if "清仓级" in out:
             continue
-        if "高波动" in out and score < 0.1:  # 高波动+极低评分不碰
-            continue
-        # 评分区间
-        if not (score_low <= score <= score_high):
-            continue
+        
         # 低点涨幅
-        low_pct = _extract_pct(out, r"低点涨(\d+\.?\d*)%")
-        if low_pct is not None:
-            if low_pct < low_profit_min or low_pct > low_profit_max:
-                continue
+        low_pct = extract_pct(out, r"低点涨(\d+\.?\d*)%")
+        if low_pct is None or low_pct < low_profit_min or low_pct > low_profit_max:
+            continue
+        
         # 高点回落
-        pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
+        pullback = extract_pct(out, r"高点回落(\d+\.?\d*)%")
         if pullback is not None and pullback > max_pullback:
             continue
-        # 信号标记
+        
+        # 今日涨跌幅（从输出行中提取，格式如 "+2.58%" 或 "-1.51%"）
+        change_pct = extract_pct(out, r"([+-]\d+\.?\d*)%")
+        if change_pct is None:
+            continue
+        if change_pct < daily_gain_min or change_pct > daily_gain_max:
+            continue
+        
+        # 是否含有买入信号
         has_buy = "[BUY]" in out
-        candidates.append((score, pullback or 0.0, has_buy, out))
+        
+        # 评分：低点涨幅偏离 ideal_profit 越小越好（ideal 取 10%）
+        ideal_profit = 10.0
+        profit_score = 1.0 - abs(low_pct - ideal_profit) / ideal_profit
+        # 综合排序值：有 BUY 信号则加 10，加上 profit_score
+        sort_key = (not has_buy, - (10.0 if has_buy else 0.0) - profit_score)
+        
+        candidates.append((sort_key, out))
+    
+    candidates.sort(key=lambda x: x[0])
+    return [out for _, out in candidates[:max_count]]
 
-    # 排序
-    candidates.sort(key=lambda x: (not x[2], -(x[0] * 0.6 + (1 - x[1] / 0.1) * 0.4)))
-    return [out for _, _, _, out in candidates[:max_count]]
 
-
-def select_trend_sell(results, max_count=3) -> list:
+def select_trend_sell(results, max_count=3,
+                      min_daily_loss=-3.0,   # 当日跌幅超过此值（如 -3%）
+                      min_pullback=6.0,      # 高点回落超过此值
+                      min_low_profit=18.0,   # 低点涨幅超过此值（暴涨后风险）
+                      include_weak_ma=True,  # 包括“弱于中期均线”
+                      include_clear_stop=True) -> list:
     """
-    趋势型卖出警示：趋势转弱 / 风险累积
+    趋势型卖出警示：基于技术形态和今日表现，不使用评分。
     条件（满足任一即进入候选）：
-        - 中期均线跌破（“弱于中期均线”）
-        - 评分 <= 0.2 或操作等级包含偏空/卖出/强烈卖出
-        - 出现 [SELL] 信号
-        - 连续低评分
-        - 清仓级止盈
-        - 高点回落 > 8%
-        - 低点涨幅 > 15% 且 高点回落 > 5%（暴涨后动能衰竭）
-        - 高波动 + 评分 < 0.1
-    排序：风险严重度降序
+        - 当日跌幅 < min_daily_loss（例如 -3%）
+        - 高点回落 > min_pullback（例如 6%）
+        - 低点涨幅 > min_low_profit 且 高点回落 > 5%（暴涨后动能衰竭）
+        - 包含“弱于中期均线”（如果 include_weak_ma=True）
+        - 包含“清仓级”止盈（如果 include_clear_stop=True）
+        - 包含“强烈卖出”或“连续3日低评分”
+        - 包含 [SELL] 信号
+    排序：风险严重度降序（高风险优先）
     """
-    def risk_key(item):
-        out, score = item
-        # 风险分数越高越危险
+    def extract_pct(out: str, pattern: str) -> Optional[float]:
+        m = re.search(pattern, out)
+        if m:
+            return float(m.group(1))
+        return None
+
+    def risk_score(out: str) -> int:
+        """计算风险分数，越高越危险"""
         risk = 0
         if "[SELL]" in out and "连续3日低评分" in out:
             risk = 100
@@ -242,46 +281,69 @@ def select_trend_sell(results, max_count=3) -> list:
             risk = 90
         elif "清仓级" in out:
             risk = 80
-        elif "弱于中期均线" in out and score < 0:
-            risk = 70
-        else:
-            pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
-            if pullback and pullback > 10:
+        elif "弱于中期均线" in out:
+            # 若配合跌幅或回落再提高
+            pullback = extract_pct(out, r"高点回落(\d+\.?\d*)%")
+            change = extract_pct(out, r"([+-]\d+\.?\d*)%")
+            if (pullback and pullback > 8) or (change and change < -2):
+                risk = 75
+            else:
                 risk = 60
-            elif "弱于中期均线" in out:
-                risk = 50
-            elif "强烈卖出" in out:
+        elif "强烈卖出" in out:
+            risk = 50
+        else:
+            # 默认根据高点回落和跌幅估算
+            pullback = extract_pct(out, r"高点回落(\d+\.?\d*)%")
+            change = extract_pct(out, r"([+-]\d+\.?\d*)%")
+            if pullback and pullback > 10:
+                risk = 70
+            elif change and change < -3:
+                risk = 65
+            elif pullback and pullback > 6:
                 risk = 40
-            elif score <= 0.2:
+            elif change and change < -1:
                 risk = 30
             else:
-                risk = max(0, int(20 - score * 20))
+                risk = 10
         return risk
 
     candidates = []
-    for out, score in results:
-        # 满足任一风险条件
+    for out, _ in results:
         cond = False
-        cond = cond or ("弱于中期均线" in out)
-        cond = cond or (score <= 0.2)
-        cond = cond or ("[SELL]" in out)
-        cond = cond or ("连续3日低评分" in out)
-        cond = cond or ("清仓级" in out)
-        pullback = _extract_pct(out, r"高点回落(\d+\.?\d*)%")
-        if pullback and pullback > 8:
+        
+        # 当日跌幅
+        change = extract_pct(out, r"([+-]\d+\.?\d*)%")
+        if change is not None and change < min_daily_loss:
             cond = True
-        low_pct = _extract_pct(out, r"低点涨(\d+\.?\d*)%")
-        if low_pct and low_pct > 15 and pullback and pullback > 5:
+        
+        # 高点回落
+        pullback = extract_pct(out, r"高点回落(\d+\.?\d*)%")
+        if pullback is not None and pullback > min_pullback:
             cond = True
-        if "高波动" in out and score < 0.1:
+        
+        # 低点涨幅过大且伴有回落
+        low_pct = extract_pct(out, r"低点涨(\d+\.?\d*)%")
+        if low_pct is not None and low_pct > min_low_profit:
+            # 如果高点回落也大于5%，则为风险
+            if pullback is not None and pullback > 5:
+                cond = True
+        
+        # 文本特征
+        if include_weak_ma and "弱于中期均线" in out:
             cond = True
-
+        if include_clear_stop and "清仓级" in out:
+            cond = True
+        if "强烈卖出" in out or "连续3日低评分" in out:
+            cond = True
+        if "[SELL]" in out:
+            cond = True
+        
         if cond:
-            candidates.append((out, score))
-
-    candidates.sort(key=lambda x: risk_key(x), reverse=True)
+            candidates.append((out, risk_score(out)))
+    
+    # 按风险分数降序，取前 max_count
+    candidates.sort(key=lambda x: x[1], reverse=True)
     return [out for out, _ in candidates[:max_count]]
-
 
 
 
@@ -425,7 +487,16 @@ def run_batch_analysis(api_key=None, target_code=None):
         output_lines.append(out)
 
     # 趋势买入参考
-    trend_buys = select_trend_buy(results, max_count=3)
+    trend_buys = select_trend_buy(
+        results,
+        max_count=TREND_BUY_MAX_COUNT,
+        low_profit_min=TREND_BUY_LOW_PROFIT_MIN,
+        low_profit_max=TREND_BUY_LOW_PROFIT_MAX,
+        max_pullback=TREND_BUY_MAX_PULLBACK,
+        daily_gain_min=TREND_BUY_DAILY_GAIN_MIN,
+        daily_gain_max=TREND_BUY_DAILY_GAIN_MAX,
+        prefer_signal=TREND_BUY_PREFER_SIGNAL
+    )
     if trend_buys:
         print("\n📈 趋势型买入参考（上涨中继/回调再启动）")
         print("-" * 60)
@@ -433,7 +504,15 @@ def run_batch_analysis(api_key=None, target_code=None):
             print(line)
 
     # 趋势卖出警示
-    trend_sells = select_trend_sell(results, max_count=3)
+    trend_sells = select_trend_sell(
+        results,
+        max_count=TREND_SELL_MAX_COUNT,
+        min_daily_loss=TREND_SELL_MIN_DAILY_LOSS,
+        min_pullback=TREND_SELL_MIN_PULLBACK,
+        min_low_profit=TREND_SELL_MIN_LOW_PROFIT,
+        include_weak_ma=TREND_SELL_INCLUDE_WEAK_MA,
+        include_clear_stop=TREND_SELL_INCLUDE_CLEAR_STOP
+    )
     if trend_sells:
         print("\n📉 趋势型卖出警示（趋势转弱/风险累积）")
         print("-" * 60)
