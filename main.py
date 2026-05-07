@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer
-from analyzer.ai import AIClient
+from analyzer.analyzer import AIClient
 from analyzer.trend_scanner import select_trend_buy, select_trend_sell
 from analyzer.config import (
     HISTORY_DAYS,

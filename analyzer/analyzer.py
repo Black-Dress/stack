@@ -4,11 +4,15 @@
 import datetime
 import logging
 import numpy as np
+import openai
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional , Union
+import json
+import re
+import logging
+import openai
 
-from .risk_watch import generate_risk_alerts, evaluate_cost_based_stop_profit
 
 from .config import *
 from .utils import (
@@ -86,6 +90,74 @@ class ETFContext:
     buy_weights_used: Dict = field(default_factory=dict)
     sell_weights_used: Dict = field(default_factory=dict)
 
+class AIClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
+    @staticmethod
+    def _extract_json(content: Optional[str]) -> dict:
+        if not content:
+            raise ValueError("content is None")
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        if not m:
+            raise ValueError("未找到JSON")
+        return json.loads(m.group())
+
+    def comment_on_etf(self, code: str, name: str, final_score: float,
+                       action_level: str, market_state: str, market_factor: float,
+                       tmsv: float, atr_pct: float) -> str:
+        prompt = f"""你是一名资深ETF量化分析师，请根据以下数据给出80~120字专业点评。
+ETF：{name}（{code}），综合评分：{final_score:.1f}，等级：{action_level}
+市场状态：{market_state}，环境因子：{market_factor:.2f}
+TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
+请从技术面、市场适配性和风险角度点评，不重复数据。"""
+        try:
+            resp = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.3,
+                timeout=10,
+            )
+            content = resp.choices[0].message.content
+            return content.strip() if content else "（AI评论生成失败）"
+        except Exception as e:
+            logger.error(f"AI评论生成失败: {e}")
+            return "（AI评论生成失败）"
+
+    def batch_comment_on_etfs(self, etf_list: List[Dict], batch_size=6) -> List[str]:
+        results = [""] * len(etf_list)
+        for i in range(0, len(etf_list), batch_size):
+            batch = etf_list[i : i + batch_size]
+            prompts = []
+            for idx, e in enumerate(batch):
+                prompts.append(
+                    f"ETF {idx}: {e['name']}({e['code']}) 评分{e['final_score']:.1f} "
+                    f"等级{e['action_level']} 市场{e['market_state']} TMSV{e['tmsv']:.1f} "
+                    f"ATR{e['atr_pct']*100:.2f}%"
+                )
+            combined = (
+                "为以下ETF分别生成80~120字专业点评，用JSON返回，键为序号字符串。\n"
+                + "\n".join(prompts)
+                + '\n输出格式：{"0":"...","1":"..."}'
+            )
+            try:
+                resp = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": combined}],
+                    max_tokens=300 * len(batch),
+                    temperature=0.3,
+                    timeout=20,
+                )
+                data = self._extract_json(resp.choices[0].message.content)
+                for j in range(len(batch)):
+                    results[i + j] = data.get(str(j), "（批量评论缺失）").strip()
+            except Exception as e:
+                logger.error(f"批量评论失败(批次{i}): {e}")
+                for j in range(len(batch)):
+                    results[i + j] = "（批量评论生成失败）"
+        return results
 
 class DataAnalyzer:
     # 这些降级映射现在已经不再用于成本覆盖的ETF，保留供无成本的ETF使用（但无成本时也不做降级，因此实际上可以废弃，但保留向后兼容）
@@ -133,6 +205,79 @@ class DataAnalyzer:
         else:
             base_close = hist_df.iloc[-1]["close"]
         return (real_price - base_close) / base_close * 100 if base_close > 0 else 0.0
+
+    @staticmethod
+    def generate_risk_alerts(
+        price: float,
+        recent_high: float,
+        recent_low: float,
+        atr: float
+    ) -> Dict[str, Optional[Union[float, str]]]:
+        """
+        返回：
+            stop_loss: 动态止损价 (float or None)
+            trail_profit: 移动止盈价 (float or None)
+            alert: 提醒文本 (str or None)，已包含价位
+        """
+        if atr <= 0:
+            return {"stop_loss": None, "trail_profit": None, "alert": None}
+
+        stop_price = recent_high - ATR_STOP_MULT * atr
+        trail_price = recent_high - ATR_TRAILING_PROFIT_MULT * atr
+        alert: Optional[str] = None
+
+        if price <= stop_price:
+            alert = f"🔴 动态止损({stop_price:.3f})"
+        elif price - stop_price < RISK_ALERT_DISTANCE_ATR * atr:
+            alert = f"🟡 近止损({stop_price:.3f})"
+        elif trail_price and price - trail_price < RISK_ALERT_DISTANCE_ATR * atr:
+            alert = f"🟢 近止盈({trail_price:.3f})"
+
+        return {"stop_loss": stop_price, "trail_profit": trail_price, "alert": alert}
+
+    @staticmethod
+    def evaluate_cost_based_stop_profit(
+        price: float,
+        cost: float,
+        recent_high: float,
+        atr: float,
+        trailing_profit_level: str,
+    ) -> Dict[str, Optional[str]]:
+        """
+        基于持仓成本与移动止盈信号，判断是否触发硬性清仓/减仓。
+        返回字典：
+            - action_override: "SELL" 或 None
+            - level_override:   "清仓止盈" / "半仓止盈" / "止损卖出" / None
+        """
+        if cost is None or cost <= 0:
+            return {"action_override": None, "level_override": None}
+
+        profit_pct = (price - cost) / cost
+
+        # 硬止损：亏损达到阈值，无条件卖出
+        if profit_pct <= COST_STOP_LOSS_PCT:
+            return {"action_override": "SELL", "level_override": "止损卖出"}
+
+        # 止盈：盈利丰厚且移动止盈信号为clear
+        if profit_pct >= COST_TAKE_PROFIT_CLEAR and trailing_profit_level == "clear":
+            return {"action_override": "SELL", "level_override": "清仓止盈"}
+
+        # 半仓止盈：盈利中等且移动止盈触发
+        if profit_pct >= COST_TAKE_PROFIT_HALF and trailing_profit_level in ("half", "clear"):
+            # 根据配置决定是否卖出
+            if COST_HALF_PROFIT_ACTION == "SELL":
+                return {"action_override": "SELL", "level_override": "半仓止盈"}
+            else:
+                return {"action_override": None, "level_override": "半仓止盈"}
+
+        return {"action_override": None, "level_override": None}
+
+
+
+
+
+
+
 
     def _evaluate_take_profit(self, ctx: ETFContext):
         # 保护：若实时价格缺失，无法计算止盈数据
@@ -331,7 +476,7 @@ class DataAnalyzer:
             if "止损卖出" not in final_level and "清仓止盈" not in final_level:
                 if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
                     atr_abs = ctx.atr_pct * ctx.real_price
-                    alerts = generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
+                    alerts = self.generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
                     alert_text = alerts.get("alert")
                     if isinstance(alert_text, str):
                         # 已包含价位信息，直接使用
@@ -398,7 +543,7 @@ class DataAnalyzer:
             return action, action_level
 
         atr_abs = ctx.atr_pct * ctx.real_price if ctx.atr_pct else 0.0
-        decision = evaluate_cost_based_stop_profit(
+        decision = self.evaluate_cost_based_stop_profit(
             price=ctx.real_price,
             cost=ctx.cost_price,
             recent_high=ctx.recent_high_price,
