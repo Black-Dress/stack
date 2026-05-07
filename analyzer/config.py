@@ -35,7 +35,7 @@ NONLINEAR_SCALE_BULL = 2.5          # 趋势市场缩放
 NONLINEAR_SCALE_RANGE = 1.5         # 震荡市场缩放
 
 # ---------------------------- 信号确认 ----------------------------
-DEFAULT_CONFIRM_DAYS = 3
+DEFAULT_CONFIRM_DAYS = 2
 BUY_THRESHOLD = 50                  # 百分制买入阈值
 SELL_THRESHOLD = -20                # 卖出阈值
 QUICK_BUY_THRESHOLD = 60
