@@ -141,22 +141,22 @@
       "reversal_potential": 0.04464285714285714
     },
     "sell_weights": {
-      "price_below_ma20": 0.23221634332745447,
+      "price_below_ma20": 0.2330420307948398,
       "bollinger_break_down": 0.07936507936507937,
-      "williams_overbought": 0.12786596119929453,
-      "rsi_overbought": 0.14770723104056438,
+      "williams_overbought": 0.14669163545568042,
+      "rsi_overbought": 0.1486980560014268,
       "underperform_market": 0.07936507936507937,
       "stop_loss_ma_break": 0.03968253968253969,
       "weekly_below_ma20": 0.07936507936507937,
-      "downside_momentum": 0.1697530864197531,
-      "max_drawdown_stop": 0.0446796002351558
+      "downside_momentum": 0.17099161762083112,
+      "max_drawdown_stop": 0.022798882349444147
     },
-    "sentiment": 0.9911461099008319,
-    "sentiment_raw": 0.9896623672494576,
-    "timestamp": 1778125090.6425698,
+    "sentiment": 0.9954438706930049,
+    "sentiment_raw": 1.000408056263602,
+    "timestamp": 1778136815.0846968,
     "ai_params_advice": {
       "buy_threshold_shift": 0.02,
-      "sell_threshold_shift": 0.08,
+      "sell_threshold_shift": 0.04,
       "confirm_days_shift": -1
     }
   }

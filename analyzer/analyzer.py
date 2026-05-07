@@ -540,8 +540,6 @@ class DataAnalyzer:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
                 risk_parts.append(f"连续{RISK_WARNING_DAYS}日低评分")
-            elif final < RISK_EXTREME_LOW or final > RISK_EXTREME_HIGH:
-                risk_parts.append(f"极端评分 {final:.2f}")
             elif ctx.atr_pct > RISK_HIGH_VOL_THRESH:
                 risk_parts.append(f"高波动 {ctx.atr_pct*100:.1f}%")
         tp_detail = []
