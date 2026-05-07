@@ -47,7 +47,7 @@ ACTION_LEVEL_NAMES = [
 ]
 
 # ---------------------------- 风险提示参数 ----------------------------
-RISK_WARNING_DAYS = 3
+RISK_WARNING_DAYS = 2
 RISK_WARNING_THRESHOLD = 30         # 已修正，百分制低分阈值
 MA30_WEAKNESS_PENALTY = 0.9
 
@@ -194,7 +194,7 @@ TMSV_VOL_CONSIST_SCORE = 100.0
 # ---------------------------- 趋势扫描参数 ----------------------------
 TREND_BUY_MAX_COUNT = 3
 TREND_BUY_LOW_PROFIT_MIN = 5.0
-TREND_BUY_LOW_PROFIT_MAX = 15.0
+TREND_BUY_LOW_PROFIT_MAX = 25.0
 TREND_BUY_MAX_PULLBACK = 5.0
 TREND_BUY_DAILY_GAIN_MIN = 0.5
 TREND_BUY_DAILY_GAIN_MAX = 6.0
