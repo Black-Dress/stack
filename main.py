@@ -193,7 +193,7 @@ def select_trend_buy(results, max_count=3,
     """
     candidates = []
     for out, _ in results:
-        if "弱于中期均线" in out or "强烈卖出" in out or "连续3日低评分" in out or "清仓级" in out:
+        if "弱于中期均线" in out or "强烈卖出" in out or f"连续{str(DEFAULT_PARAMS.get('CONFIRM_DAYS'))}日低评分" in out or "清仓级" in out:
             continue
         
         low_pct = _extract_pct(out, r"低点涨(\d+\.?\d*)%")
@@ -231,7 +231,7 @@ def select_trend_sell(results, max_count=3,
     """
     def risk_score(out: str) -> int:
         risk = 0
-        if "[SELL]" in out and "连续3日低评分" in out:
+        if "[SELL]" in out and f"连续{str(DEFAULT_PARAMS.get('CONFIRM_DAYS'))}日低评分" in out:
             risk = 100
         elif "[SELL]" in out:
             risk = 90
@@ -281,7 +281,7 @@ def select_trend_sell(results, max_count=3,
             cond = True
         if include_clear_stop and "清仓级" in out:
             cond = True
-        if "强烈卖出" in out or "连续3日低评分" in out:
+        if "强烈卖出" in out or f"连续{str(DEFAULT_PARAMS.get('CONFIRM_DAYS'))}日低评分" in out:
             cond = True
         if "[SELL]" in out:
             cond = True

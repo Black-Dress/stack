@@ -151,12 +151,12 @@
       "downside_momentum": 0.1697530864197531,
       "max_drawdown_stop": 0.0446796002351558
     },
-    "sentiment": 0.9875609624782641,
-    "sentiment_raw": 0.9861552503516196,
-    "timestamp": 1778121971.4809728,
+    "sentiment": 0.9911461099008319,
+    "sentiment_raw": 0.9896623672494576,
+    "timestamp": 1778125090.6425698,
     "ai_params_advice": {
       "buy_threshold_shift": 0.02,
-      "sell_threshold_shift": 0.04,
+      "sell_threshold_shift": 0.08,
       "confirm_days_shift": -1
     }
   }
