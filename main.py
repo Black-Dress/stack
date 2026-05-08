@@ -32,7 +32,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     analyzer = DataAnalyzer()
 
     try:
-        etf_list = dl.load_positions()   # 包含“成本”
+        etf_list = dl.load_positions()
     except Exception as e:
         print(f"加载持仓文件失败: {e}")
         dl.logout()
@@ -80,7 +80,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         return
 
     # ---------- 批量分析 ----------
-    raw_outputs = []          # (output_line, score)
+    raw_outputs = []
     scan_info_list = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -98,17 +98,18 @@ def run_batch_analysis(api_key=None, target_code=None):
                 (code, name, ex.submit(analyzer.analyze_single_etf,
                                  code, name, real_price, hist, weekly, env, today, s, cost_price=cost))
             )
-        # 只循环一次，确保 raw_outputs 与 scan_info_list 长度一致
+
         for code, name, f in futures:
             out, signal, new_state, score, risk_data, scan_info = f.result()
-            raw_outputs.append((out, score))
+            # ----- 移除主表格中的 [BUY]/[SELL] 标签，保留风险提示 -----
+            out_clean = out.replace(" [BUY]", "").replace(" [SELL]", "")
+            raw_outputs.append((out_clean, score))
             state[code] = new_state
-            # 保持对齐：即使 scan_info 为 None 也补空字典
             if scan_info is None:
                 scan_info = {}
             scan_info_list.append(scan_info)
 
-    # ---------- 买入力度建议 ----------
+    # ---------- 买入力度建议（只用于趋势扫描附加） ----------
     buy_advice_map = {}
     if BUY_ADVICE_ENABLE:
         from analyzer.trend_scanner import evaluate_buy_level
@@ -117,7 +118,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             if advice:
                 buy_advice_map[idx] = advice
 
-    # ---------- 排序输出主表格（无买入建议） ----------
+    # ---------- 排序输出主表格（无买入/卖出信号） ----------
     sorted_results = sorted(raw_outputs, key=lambda x: x[1], reverse=True)
     print(f"\n{'='*90}")
     print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
@@ -131,15 +132,14 @@ def run_batch_analysis(api_key=None, target_code=None):
         pad_display("涨跌", DISPLAY_CHANGE_WIDTH, "right"),
         pad_display("评分", DISPLAY_SCORE_WIDTH, "right"),
         " " + pad_display("操作", DISPLAY_ACTION_WIDTH),
-        " 信号/提示"
+        " 信号/提示"                     # 表头不改动，但不会再有 [BUY]
     )
     print("-" * 90)
     for out, score in sorted_results:
         print(out)
 
-    # ---------- 左右侧趋势扫描 ----------
-    # 原始输出行列表，用于扫描结果展示
-    scan_to_out = [out for out, _ in raw_outputs]
+    # ---------- 左右侧趋势扫描（附买入建议及所有风险提示） ----------
+    scan_to_out = [out for out, _ in raw_outputs]      # 已清洗
 
     # 右侧（原逻辑）
     right_buy_indices = select_trend_buy(
@@ -191,7 +191,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                 line += f"  {advice}"
             print(line)
 
-    # 卖出扫描不变
+    # 卖出扫描
     sell_indices = select_trend_sell(
         scan_info_list,
         max_count=TREND_SELL_MAX_COUNT,
@@ -210,7 +210,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     dl.save_state(state)
     dl.logout()
 
-
+    
 
 
     
