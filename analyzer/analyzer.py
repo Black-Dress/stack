@@ -620,11 +620,16 @@ class DataAnalyzer:
             "profit_pct_from_low": ctx.profit_pct_from_low if ctx.profit_pct_from_low is not None else 0.0,
             "max_drawdown_pct": ctx.max_drawdown_pct if ctx.max_drawdown_pct is not None else 0.0,
             "change_pct": (ctx.change_pct / 100.0) if ctx.change_pct is not None else 0.0,
-            "has_weak_ma_text": "弱于均线" in risk_str,
+            "has_weak_ma_text": "⬇️ 弱于均线" in ' '.join(risk_str.split()),
             "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
             "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
             "has_buy_signal": action == "BUY",
             "has_sell_signal": action == "SELL",
+            "final_score": final,
+            "rsi": ctx.rsi,
+            "tmsv": ctx.tmsv,
+            "cost_profit_pct": ctx.cost_profit_pct,
+            "cost_price": ctx.cost_price,
         }
 
         return output, signal, state, final, risk_data, scan_info

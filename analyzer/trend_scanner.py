@@ -120,3 +120,108 @@ def select_trend_sell(
             candidates.append((idx, risk_score(s)))
     candidates.sort(key=lambda x: x[1], reverse=True)
     return [idx for idx, _ in candidates[:max_count]]
+
+def select_left_buy(
+    scan_list: List[Dict],
+    max_count: int = 3,
+    daily_gain_min: float = -0.02,
+    daily_gain_max: float = 0.03,
+    low_profit_min: float = 0.0,
+    low_profit_max: float = 0.08,
+    max_pullback: float = 0.05,
+    min_score: float = 55,
+    rsi_max: float = 50,
+    require_below_ma: bool = True,
+) -> List[int]:
+    """左侧买入形态：从低位反弹初期或超卖区域筛选"""
+    candidates = []
+    for idx, s in enumerate(scan_list):
+        # 排除已明确卖出/风险项
+        if s.get("has_strong_sell_text") or s.get("has_clear_stop_text"):
+            continue
+        if s.get("has_sell_signal"):
+            continue
+
+        # 评分过滤
+        score = s.get("final_score", 0)
+        if score < min_score:
+            continue
+
+        # 涨跌范围（允许小跌小涨）
+        change = s.get("change_pct")
+        if change is None or change < daily_gain_min or change > daily_gain_max:
+            continue
+
+        # 低点涨幅范围（初启动或低位徘徊）
+        low_pct = s.get("profit_pct_from_low")
+        if low_pct is None or low_pct < low_profit_min or low_pct > low_profit_max:
+            continue
+
+        # 回撤限制
+        pullback = s.get("max_drawdown_pct")
+        if pullback is not None and pullback > max_pullback:
+            continue
+
+        # RSI 偏低（超卖区域）
+        rsi = s.get("rsi")
+        if rsi is not None and rsi > rsi_max:
+            continue
+
+        # 是否要求低于均线（左侧特征）
+        if require_below_ma and not s.get("has_weak_ma_text"):
+            continue
+
+        # 有买入信号更好，但不是必须
+        has_buy = s.get("has_buy_signal", False)
+        # 排序：优先有信号且距离低点涨幅较小者
+        sort_key = (not has_buy, low_pct if low_pct else 999)
+        candidates.append((sort_key, idx))
+
+    candidates.sort(key=lambda x: x[0])
+    return [idx for _, idx in candidates[:max_count]]
+
+def evaluate_buy_level(scan_info: Dict) -> str:
+    """
+    根据综合条件给出买入力度建议：
+    🔥大量买入 / 📈适量买入 / 💡少量买入 / 空字符串（无建议）
+    不强制要求持仓成本，无成本时仅依靠技术面。
+    """
+    if not isinstance(scan_info, dict):
+        return ""
+
+    score = scan_info.get("final_score", 0)
+    rsi = scan_info.get("rsi")
+    tmsv = scan_info.get("tmsv")
+    change = scan_info.get("change_pct")
+    cost_profit = scan_info.get("cost_profit_pct")  # 可能为 None
+    above_ma = not scan_info.get("has_weak_ma_text", False)
+
+    # 止损/重大风险时不建议买入
+    if scan_info.get("has_clear_stop_text") or scan_info.get("has_strong_sell_text"):
+        return ""
+
+    # ---- 无持仓成本，纯技术面建议 ----
+    if cost_profit is None:
+        if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
+            return "🔥大量买入"
+        if score >= 70 and not above_ma and rsi is not None and rsi < 50:
+            return "📈适量买入"
+        if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
+            return "💡少量买入"
+        return ""
+
+    # ---- 有持仓成本，结合盈亏调整力度 ----
+    if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
+        return "🔥大量买入"
+    if score >= 70 and not above_ma and rsi is not None and rsi < 50:
+        return "📈适量买入"
+    if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
+        return "💡少量买入"
+    # 若有5%以上浮亏且技术面不差，可少量补仓
+    if cost_profit < -0.05 and score >= 50 and rsi is not None and rsi < 40:
+        return "💡少量买入"
+    return ""
+
+
+
+

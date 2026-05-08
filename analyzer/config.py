@@ -207,6 +207,22 @@ TREND_SELL_MIN_LOW_PROFIT = 18.0
 TREND_SELL_INCLUDE_WEAK_MA = True
 TREND_SELL_INCLUDE_CLEAR_STOP = True
 
+# ---------------------------- 左侧买入扫描 ----------------------------
+LEFT_BUY_ENABLE = True
+LEFT_BUY_DAILY_GAIN_MIN = -0.03       # 放宽到 -3%
+LEFT_BUY_DAILY_GAIN_MAX = 0.03        # 仍控制追涨
+LEFT_BUY_LOW_PROFIT_MIN = 0.0
+LEFT_BUY_LOW_PROFIT_MAX = 0.15        # 放宽到 15%，允许较多上涨的品种
+LEFT_BUY_MAX_PULLBACK = 0.08          # 放宽回撤限制
+LEFT_BUY_MIN_SCORE = 50               # 降低评分门槛
+LEFT_BUY_RSI_MAX = 55                 # RSI上限适当提高
+LEFT_BUY_REQUIRE_BELOW_MA = False     # 不强制要求低于均线
+LEFT_BUY_MAX_COUNT = 4                # 最多推荐数量
+
+# ---------------------------- 买入力度建议 ----------------------------
+BUY_ADVICE_ENABLE = True            # 是否在输出中显示买入力度建议
+
+
 # ---------------------------- 邮件配置 ----------------------------
 def get_email_config():
     return {
