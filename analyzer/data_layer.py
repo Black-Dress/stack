@@ -6,6 +6,7 @@ import json
 import datetime
 import logging
 import time
+import random
 import requests
 import pandas as pd
 import numpy as np
@@ -63,9 +64,7 @@ class DataLayer:
         df = self.get_daily_data(code, start_date, end_date)
         if df is None:
             return None
-        # 只保留已完成的周（避免未来数据）
         weekly = df.resample("W-FRI").last()
-        # 使用 Timestamp 比较，避免 .date 类型问题
         today_ts = pd.Timestamp(datetime.date.today())
         weekly = weekly[weekly.index < today_ts]
         if weekly.empty:
@@ -74,17 +73,24 @@ class DataLayer:
         return weekly
 
     def get_realtime_price(self, code: str) -> Optional[float]:
-        try:
-            for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
-                url = f"http://{domain}/list={code.replace('.', '')}"
-                r = requests.get(url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3)
-                if r.status_code == 200:
-                    parts = r.text.split('"')[1].split(",")
-                    if len(parts) > 3 and parts[3]:
-                        return float(parts[3])
-            return None
-        except Exception:
-            return None
+        """增加简单重试与延迟，避免限流"""
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                for domain in ["hq.sinajs.cn", "hq2.sinajs.cn", "hq3.sinajs.cn"]:
+                    url = f"http://{domain}/list={code.replace('.', '')}"
+                    r = requests.get(url, headers={"Referer": "http://finance.sina.com.cn"}, timeout=3)
+                    if r.status_code == 200:
+                        parts = r.text.split('"')[1].split(",")
+                        if len(parts) > 3 and parts[3]:
+                            return float(parts[3])
+                return None
+            except Exception:
+                if attempt < max_retries:
+                    time.sleep(random.uniform(0.5, 1.5))
+                else:
+                    return None
+        return None
 
     def load_positions(self) -> pd.DataFrame:
         """读取持仓文件，返回包含 [代码, 名称, 成本] 的DataFrame。
@@ -94,12 +100,9 @@ class DataLayer:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
             df = pd.read_csv(POSITION_FILE, encoding="gbk")
-        # 确保有“成本”列，若无则补NaN
         if "成本" not in df.columns:
             df["成本"] = None
-        # 转换成本列为数值，非法值置为None
         df["成本"] = pd.to_numeric(df["成本"], errors="coerce")
-        # 将0或负数视为无效（成本应为正数）
         df.loc[df["成本"] <= 0, "成本"] = None
         return df[["代码", "名称", "成本"]]
 
@@ -117,7 +120,6 @@ class DataLayer:
         with open(self._state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
-    # ---------- 技术指标计算 ----------
     def calculate_indicators(self, df: pd.DataFrame,
                              need_amount_ma=False,
                              recent_high_window=10,
@@ -167,7 +169,6 @@ class DataLayer:
         df["close_open_ratio"] = df["close"] / df["open"]
         return df
 
-    # ---------- 市场环境评估 ----------
     def get_market_environment(self, market_df: pd.DataFrame) -> Dict:
         d = market_df.iloc[-1]
         ma20 = d["ma_short"]
@@ -177,7 +178,6 @@ class DataLayer:
         atr_pct = (d["atr"] / d["close"]) if d["close"] > 0 else 0
         vol_ratio = d["volume"] / d["vol_ma"] if d["vol_ma"] > 0 else 1.0
 
-        # 状态标签
         if above_60 and above_20:
             state = "强牛" if atr_pct < 0.02 else "弱牛"
         elif not above_60 and above_20:
@@ -189,7 +189,6 @@ class DataLayer:
         else:
             state = "震荡"
 
-        # 环境因子合成
         pos_score = ((d["close"] / ma20 - 1) * 5).clip(-1, 1)
         rsi_norm = (d["rsi"] - 50) / 50
         vol_norm = (atr_pct - 0.02) / 0.02
@@ -215,7 +214,6 @@ class DataLayer:
             "risk_tip": risk_tip
         }
 
-    # ---------- 权重选择 ----------
     def select_weights(self, env_state: str) -> Tuple[Dict, Dict]:
         if "牛" in env_state:
             return BUY_WEIGHTS_BULL.copy(), SELL_WEIGHTS_BULL.copy()

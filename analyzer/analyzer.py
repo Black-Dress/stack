@@ -7,12 +7,9 @@ import numpy as np
 import openai
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional , Union
+from typing import Dict, List, Tuple, Optional, Union
 import json
 import re
-import logging
-import openai
-
 
 from .config import *
 from .utils import (
@@ -58,7 +55,7 @@ class ETFContext:
     today: datetime.date
     market: Dict
     params: Dict
-    cost_price: Optional[float] = None       # 持仓成本价
+    cost_price: Optional[float] = None
 
     change_pct: float = 0.0
     atr_pct: float = 0.0
@@ -69,6 +66,7 @@ class ETFContext:
     weekly_above: bool = False
     weekly_below: bool = False
     above_ma30: bool = False
+    is_weak_ma: bool = False            # 新增：价格低于 MA30
     buy_factors: Dict = field(default_factory=dict)
     sell_factors: Dict = field(default_factory=dict)
     buy_score: float = 0.0
@@ -85,10 +83,11 @@ class ETFContext:
     recent_high_price: float = 0.0
     trailing_profit_level: Optional[str] = None
     profit_level: Optional[str] = None
-    cost_profit_pct: Optional[float] = None          # 基于成本的浮动盈亏
+    cost_profit_pct: Optional[float] = None
 
     buy_weights_used: Dict = field(default_factory=dict)
     sell_weights_used: Dict = field(default_factory=dict)
+
 
 class AIClient:
     def __init__(self, api_key: str):
@@ -106,12 +105,43 @@ class AIClient:
 
     def comment_on_etf(self, code: str, name: str, final_score: float,
                        action_level: str, market_state: str, market_factor: float,
-                       tmsv: float, atr_pct: float) -> str:
-        prompt = f"""你是一名资深ETF量化分析师，请根据以下数据给出80~120字专业点评。
-ETF：{name}（{code}），综合评分：{final_score:.1f}，等级：{action_level}
-市场状态：{market_state}，环境因子：{market_factor:.2f}
-TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
-请从技术面、市场适配性和风险角度点评，不重复数据。"""
+                       tmsv: float, atr_pct: float,
+                       cost_price: Optional[float] = None,
+                       cost_profit_pct: Optional[float] = None,
+                       signal_action: Optional[str] = None,
+                       risk_tags: str = "",
+                       rsi: Optional[float] = None,
+                       macd_status: str = "",
+                       vol_ratio: Optional[float] = None) -> str:
+        extra = []
+        if cost_price and cost_price > 0:
+            profit_str = f"{cost_profit_pct*100:+.2f}%" if cost_profit_pct is not None else "未知"
+            extra.append(f"持仓成本：{cost_price:.3f}，浮动盈亏：{profit_str}")
+        if signal_action:
+            extra.append(f"系统信号：{signal_action}")
+        if risk_tags:
+            extra.append(f"风险标签：{risk_tags}")
+        tech = []
+        if rsi is not None:
+            tech.append(f"RSI: {rsi:.1f}")
+        if macd_status:
+            tech.append(f"MACD: {macd_status}")
+        if vol_ratio is not None:
+            tech.append(f"成交量比: {vol_ratio:.2f}")
+        if tech:
+            extra.append("关键指标: " + " | ".join(tech))
+        extra_info = "\n".join(extra)
+
+        prompt = f"""你是资深ETF分析师，请基于以下数据给出80~120字点评，要求：
+- 结合持仓盈亏、技术指标、风险标签具体分析，不可仅重复数值。
+- 若存在风险标签（如近止盈、低位、弱于均线），请重点提示。
+- 若系统信号为BUY或SELL，需解释原因。
+ETF：{name}（{code}）
+综合评分：{final_score:.1f}  等级：{action_level}
+市场状态：{market_state}  环境因子：{market_factor:.2f}
+TMSV复合强度：{tmsv:.1f}  ATR波动率：{atr_pct*100:.2f}%
+{extra_info}
+请直接在技术面、风险应对两方面给出具体点评。"""
         try:
             resp = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -159,8 +189,9 @@ TMSV复合强度：{tmsv:.1f}，ATR波动率：{atr_pct*100:.2f}%
                     results[i + j] = "（批量评论生成失败）"
         return results
 
+
 class DataAnalyzer:
-    # 这些降级映射现在已经不再用于成本覆盖的ETF，保留供无成本的ETF使用（但无成本时也不做降级，因此实际上可以废弃，但保留向后兼容）
+    # 降级映射（已废弃，保留向后兼容）
     PROFIT_DOWNGRADE_CLEAR = {
         "极度看好": "谨慎买入(高估)",
         "强烈买入": "谨慎买入(高估)",
@@ -199,7 +230,8 @@ class DataAnalyzer:
     def calc_change_pct(real_price, hist_df, today):
         if real_price is None or hist_df is None or hist_df.empty:
             return 0.0
-        finished_bars = hist_df[hist_df.index.date < today]
+        today_ts = pd.Timestamp(today)
+        finished_bars = hist_df[hist_df.index < today_ts]
         if not finished_bars.empty:
             base_close = finished_bars.iloc[-1]["close"]
         else:
@@ -213,12 +245,6 @@ class DataAnalyzer:
         recent_low: float,
         atr: float
     ) -> Dict[str, Optional[Union[float, str]]]:
-        """
-        返回：
-            stop_loss: 动态止损价 (float or None)
-            trail_profit: 移动止盈价 (float or None)
-            alert: 提醒文本 (str or None)，已包含价位
-        """
         if atr <= 0:
             return {"stop_loss": None, "trail_profit": None, "alert": None}
 
@@ -241,30 +267,20 @@ class DataAnalyzer:
         cost: float,
         recent_high: float,
         atr: float,
-        trailing_profit_level: str,
+        trailing_profit_level: Optional[str],
     ) -> Dict[str, Optional[str]]:
-        """
-        基于持仓成本与移动止盈信号，判断是否触发硬性清仓/减仓。
-        返回字典：
-            - action_override: "SELL" 或 None
-            - level_override:   "清仓止盈" / "半仓止盈" / "止损卖出" / None
-        """
         if cost is None or cost <= 0:
             return {"action_override": None, "level_override": None}
 
         profit_pct = (price - cost) / cost
 
-        # 硬止损：亏损达到阈值，无条件卖出
         if profit_pct <= COST_STOP_LOSS_PCT:
             return {"action_override": "SELL", "level_override": "止损卖出"}
 
-        # 止盈：盈利丰厚且移动止盈信号为clear
         if profit_pct >= COST_TAKE_PROFIT_CLEAR and trailing_profit_level == "clear":
             return {"action_override": "SELL", "level_override": "清仓止盈"}
 
-        # 半仓止盈：盈利中等且移动止盈触发
         if profit_pct >= COST_TAKE_PROFIT_HALF and trailing_profit_level in ("half", "clear"):
-            # 根据配置决定是否卖出
             if COST_HALF_PROFIT_ACTION == "SELL":
                 return {"action_override": "SELL", "level_override": "半仓止盈"}
             else:
@@ -272,15 +288,7 @@ class DataAnalyzer:
 
         return {"action_override": None, "level_override": None}
 
-
-
-
-
-
-
-
     def _evaluate_take_profit(self, ctx: ETFContext):
-        # 保护：若实时价格缺失，无法计算止盈数据
         if ctx.real_price is None:
             return
         price = ctx.real_price
@@ -303,7 +311,7 @@ class DataAnalyzer:
 
         ctx.trailing_profit_level = get_trailing_profit_signals(
             price, recent_high, ctx.atr_pct
-        )
+        )  # 此时返回的是字符串 "clear"/"half" 或 None
 
         if recent_low > 0:
             ctx.profit_pct_from_low = (price - recent_low) / recent_low
@@ -320,12 +328,11 @@ class DataAnalyzer:
             ctx.profit_pct_from_low = 0.0
             ctx.profit_level = None
 
-    # ---------- 因子计算 ----------
     def _compute_factors(self, ctx: ETFContext, d: pd.Series):
         hist_df = ctx.hist_df
-        assert hist_df is not None, "hist_df must not be None when computing factors"
+        assert hist_df is not None
         price = ctx.real_price
-        assert price is not None, "real_price must not be None"
+        assert price is not None
 
         ma20 = d["ma_short"]
         volume = d["volume"]
@@ -379,7 +386,6 @@ class DataAnalyzer:
             "max_drawdown_stop":     factor_sell_max_drawdown_stop(ctx.max_drawdown_pct),
         }
 
-    # ---------- 核心分析 ----------
     def _core_analysis(self, ctx: ETFContext):
         real_price = ctx.real_price
         hist_df = ctx.hist_df
@@ -392,8 +398,8 @@ class DataAnalyzer:
         ctx.atr_pct = d["atr"] / real_price if real_price > 0 else 0
         ctx.rsi = d["rsi"]
         ctx.above_ma30 = real_price > d["ma30"] if "ma30" in d and not pd.isna(d["ma30"]) else True
+        ctx.is_weak_ma = not ctx.above_ma30   # 直接记录弱于均线标志
 
-        # 周线状态
         ctx.weekly_above = ctx.weekly_below = False
         if ctx.weekly_df is not None and not ctx.weekly_df.empty:
             w = ctx.weekly_df.iloc[-1]
@@ -401,7 +407,6 @@ class DataAnalyzer:
                 ctx.weekly_above = w["close"] > w["ma_short"]
                 ctx.weekly_below = w["close"] < w["ma_short"]
 
-        # TMSV 强度
         market_state = ctx.market.get("state", "震荡")
         try:
             tmsv_series = compute_tmsv(hist_df, market_state, ctx.market.get("volatility", 0.02))
@@ -414,7 +419,6 @@ class DataAnalyzer:
         ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
         self._evaluate_take_profit(ctx)
 
-        # 如果提供了成本价，计算浮动盈亏
         if ctx.cost_price is not None and ctx.cost_price > 0:
             ctx.cost_profit_pct = (real_price - ctx.cost_price) / ctx.cost_price
 
@@ -431,7 +435,8 @@ class DataAnalyzer:
             ctx.buy_score *= 0.95
 
         ctx.raw_score = ctx.buy_score - ctx.sell_score
-        env_factor = clip_env_factor(ctx.market["factor"], 1.0)
+        # 修复：直接使用市场因子，不再二次压缩
+        env_factor = ctx.market["factor"]
         transformed = nonlinear_score_transform(
             ctx.raw_score, market_state,
             NONLINEAR_SCALE_BULL, NONLINEAR_SCALE_RANGE
@@ -449,9 +454,21 @@ class DataAnalyzer:
     def _build_risk_str(self, ctx: ETFContext, state: dict, final_level: str = "") -> str:
         labels = []
 
-        # 有持仓成本的才添加止盈止损相关标签
+        # 量价关系标签（全品种显示）
+        if ctx.real_price and ctx.hist_df is not None and not ctx.hist_df.empty:
+            d = ctx.hist_df.iloc[-1]
+            vol_ratio = (d["volume"] / d["vol_ma"]) if d["vol_ma"] > 0 else None
+            if vol_ratio is not None:
+                if ctx.change_pct > 0 and vol_ratio < 0.8:
+                    labels.append("缩量上涨")
+                elif ctx.change_pct > 0 and vol_ratio > 1.5:
+                    labels.append("放量上涨")
+                elif ctx.change_pct < 0 and vol_ratio < 0.8:
+                    labels.append("缩量下跌")
+                elif ctx.change_pct < 0 and vol_ratio > 1.5:
+                    labels.append("放量下跌")
+
         if ctx.cost_price is not None:
-            # 浮动盈亏标签
             if ctx.cost_profit_pct is not None:
                 pct = ctx.cost_profit_pct * 100
                 if pct >= COST_TAKE_PROFIT_CLEAR * 100:
@@ -459,7 +476,6 @@ class DataAnalyzer:
                 elif pct <= COST_STOP_LOSS_PCT * 100:
                     labels.append(f"🔻浮亏 {pct:.1f}%")
 
-            # 原有基于低点涨幅的止盈标签、移动止盈标签等，现在仅对持仓者显示
             if ctx.profit_pct_from_low >= 0.12:
                 if ctx.profit_level == 'clear':
                     labels.append("⛔ 清仓止盈")
@@ -472,23 +488,19 @@ class DataAnalyzer:
             elif ctx.trailing_profit_level == 'half':
                 labels.append("⚠️  移动止盈")
 
-            # ATR 动态止损/止盈提醒（但若已触发成本止损/止盈，则不再显示，避免冗余）
             if "止损卖出" not in final_level and "清仓止盈" not in final_level:
                 if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
                     atr_abs = ctx.atr_pct * ctx.real_price
                     alerts = self.generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
                     alert_text = alerts.get("alert")
                     if isinstance(alert_text, str):
-                        # 已包含价位信息，直接使用
                         labels.append(alert_text)
 
-        # 位置特征（所有ETF都显示）
         if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
             labels.append("📉 低位")
-        if not ctx.above_ma30:
-            labels.append("⬇️  弱于均线")
+        if ctx.is_weak_ma:
+            labels.append("⬇️ 弱于均线")
 
-        # 连续低分警告
         if len(state.get("score_history", [])) >= RISK_WARNING_DAYS:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
@@ -527,16 +539,11 @@ class DataAnalyzer:
 
     @staticmethod
     def _adjust_action_level_for_profit(action_level, ctx):
-        """
-        不再使用此方法进行成本相关调整，仅在有成本价时直接由成本覆盖，
-        无成本价时也不进行任何止盈降级。
-        保留方法以防其他地方调用，但逻辑已废弃。
-        """
+        # 已废弃，不再使用成本相关降级
         return action_level
 
     def _apply_cost_based_overrides(self, action: str, action_level: str,
                                     ctx: ETFContext) -> Tuple[str, str]:
-        # 没有成本价或实时价格，不触发
         if (not USE_COST_BASED_OVERRIDE
             or ctx.cost_price is None
             or ctx.real_price is None):
@@ -548,7 +555,7 @@ class DataAnalyzer:
             cost=ctx.cost_price,
             recent_high=ctx.recent_high_price,
             atr=atr_abs,
-            trailing_profit_level=ctx.trailing_profit_level or "",
+            trailing_profit_level=ctx.trailing_profit_level,  # 可能为 None
         )
 
         if decision["action_override"] == "SELL":
@@ -557,7 +564,6 @@ class DataAnalyzer:
             return action, decision["level_override"]
         return action, action_level
 
-    # ---------- 公开接口 ----------
     def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
                            market, today, state, cost_price=None) -> Tuple[str, Optional[dict], dict, float, Optional[dict], Optional[dict]]:
         ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
@@ -585,7 +591,6 @@ class DataAnalyzer:
 
         action, action_level = self.get_action(final, state["score_history"])
 
-        # 有成本价时直接应用成本覆盖规则，不再进行原有的技术面降级
         if cost_price is not None:
             action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
         else:
@@ -620,7 +625,7 @@ class DataAnalyzer:
             "profit_pct_from_low": ctx.profit_pct_from_low if ctx.profit_pct_from_low is not None else 0.0,
             "max_drawdown_pct": ctx.max_drawdown_pct if ctx.max_drawdown_pct is not None else 0.0,
             "change_pct": (ctx.change_pct / 100.0) if ctx.change_pct is not None else 0.0,
-            "has_weak_ma_text": "⬇️ 弱于均线" in ' '.join(risk_str.split()),
+            "has_weak_ma_text": ctx.is_weak_ma,               # 使用布尔值
             "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
             "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
             "has_buy_signal": action == "BUY",
@@ -643,17 +648,24 @@ class DataAnalyzer:
             return f"【{name} ({code})】{ctx.error}，无法分析。"
 
         final = ctx.final_score
-        _, action_level = self.get_action(final, state.get("score_history", []))
-        
+        action, action_level = self.get_action(final, state.get("score_history", []))
+
         if cost_price is not None:
-            _, final_level = self._apply_cost_based_overrides(_, action_level, ctx)
+            action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
         else:
             final_level = action_level
 
-        # ----- AI 评论（传入真实数据）-----
         ai_comment = None
         if ai_client:
             try:
+                d = ctx.hist_df.iloc[-1] if ctx.hist_df is not None else None
+                macd_status = ""
+                if d is not None and pd.notna(d.get("macd_dif")) and pd.notna(d.get("macd_dea")):
+                    macd_status = "金叉" if d["macd_dif"] > d["macd_dea"] else "死叉"
+                vol_ratio = None
+                if d is not None and d.get("volume") and d.get("vol_ma") and d["vol_ma"] > 0:
+                    vol_ratio = d["volume"] / d["vol_ma"]
+
                 ai_comment = ai_client.comment_on_etf(
                     code=code,
                     name=name,
@@ -662,10 +674,18 @@ class DataAnalyzer:
                     market_state=market["state"],
                     market_factor=market["factor"],
                     tmsv=ctx.tmsv,
-                    atr_pct=ctx.atr_pct
+                    atr_pct=ctx.atr_pct,
+                    cost_price=ctx.cost_price,
+                    cost_profit_pct=ctx.cost_profit_pct,
+                    signal_action=action if action in ("BUY", "SELL") else None,
+                    risk_tags=self._build_risk_str(ctx, state, final_level),
+                    rsi=ctx.rsi,
+                    macd_status=macd_status,
+                    vol_ratio=vol_ratio,
                 )
             except Exception as e:
                 logger.warning(f"AI评论生成失败: {e}")
                 ai_comment = "（AI评论生成失败）"
 
-        return format_detailed_report(ctx, market, self.params, final_level, ai_comment)
+        return format_detailed_report(ctx, market, self.params, final_level, ai_comment,
+                                      signal_action=action if action in ("BUY", "SELL") else None)

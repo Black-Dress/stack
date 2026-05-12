@@ -35,7 +35,7 @@ NONLINEAR_SCALE_BULL = 2.5          # 趋势市场缩放
 NONLINEAR_SCALE_RANGE = 1.5         # 震荡市场缩放
 
 # ---------------------------- 信号确认 ----------------------------
-DEFAULT_CONFIRM_DAYS = 2
+DEFAULT_CONFIRM_DAYS = 3             # 已优化：从2天提至3天，减少信号闪烁
 BUY_THRESHOLD = 50                  # 百分制买入阈值
 SELL_THRESHOLD = -20                # 卖出阈值
 QUICK_BUY_THRESHOLD = 60
@@ -47,12 +47,12 @@ ACTION_LEVEL_NAMES = [
 ]
 
 # ---------------------------- 风险提示参数 ----------------------------
-RISK_WARNING_DAYS = 2
-RISK_WARNING_THRESHOLD = 30         # 已修正，百分制低分阈值
+RISK_WARNING_DAYS = 3
+RISK_WARNING_THRESHOLD = 30         # 百分制低分阈值
 MA30_WEAKNESS_PENALTY = 0.9
 
 # ---------------------------- 动态风险（ATR 倍数） ----------------------------
-ATR_STOP_MULT = 2.0                 # 硬止损
+ATR_STOP_MULT = 2.0                 # 硬止损（统一值，factors.py 不再重复定义）
 ATR_TRAILING_PROFIT_MULT = 1.5      # 移动止盈
 RISK_ALERT_DISTANCE_ATR = 0.5       # 提醒距离
 
@@ -72,7 +72,6 @@ DISPLAY_SCORE_WIDTH = 8
 DISPLAY_ACTION_WIDTH = 22
 
 # ---------------------------- 市场状态权重表 ----------------------------
-# 买入权重（牛市 / 震荡 / 熊市）
 BUY_WEIGHTS_BULL = {
     "price_above_ma20": 0.18,
     "volume_above_ma5": 0.10,
@@ -122,7 +121,6 @@ BUY_WEIGHTS_BEAR = {
     "reversal_potential": 0.24,
 }
 
-# 卖出权重（牛市 / 震荡 / 熊市）
 SELL_WEIGHTS_BULL = {
     "price_below_ma20": 0.30,
     "bollinger_break_down": 0.15,
@@ -191,37 +189,36 @@ TMSV_VOL_RATIO_BASE = 0.8
 TMSV_VOL_RATIO_DIVISOR = 1.2
 TMSV_VOL_CONSIST_SCORE = 100.0
 
-# ---------------------------- 趋势扫描参数 ----------------------------
+# ---------------------------- 趋势扫描参数（统一使用小数） ----------------------------
 TREND_BUY_MAX_COUNT = 3
-TREND_BUY_LOW_PROFIT_MIN = 5.0
-TREND_BUY_LOW_PROFIT_MAX = 25.0
-TREND_BUY_MAX_PULLBACK = 5.0
-TREND_BUY_DAILY_GAIN_MIN = 0.5
-TREND_BUY_DAILY_GAIN_MAX = 6.0
+TREND_BUY_LOW_PROFIT_MIN = 0.05      # 5%
+TREND_BUY_LOW_PROFIT_MAX = 0.25      # 25%
+TREND_BUY_MAX_PULLBACK = 0.05        # 5%
+TREND_BUY_DAILY_GAIN_MIN = 0.005     # 0.5%
+TREND_BUY_DAILY_GAIN_MAX = 0.06      # 6%
 TREND_BUY_PREFER_SIGNAL = True
 
 TREND_SELL_MAX_COUNT = 5
-TREND_SELL_MIN_DAILY_LOSS = -3.0
-TREND_SELL_MIN_PULLBACK = 6.0
-TREND_SELL_MIN_LOW_PROFIT = 18.0
+TREND_SELL_MIN_DAILY_LOSS = -0.03    # -3%
+TREND_SELL_MIN_PULLBACK = 0.06       # 6%
+TREND_SELL_MIN_LOW_PROFIT = 0.18     # 18%
 TREND_SELL_INCLUDE_WEAK_MA = True
 TREND_SELL_INCLUDE_CLEAR_STOP = True
 
-# ---------------------------- 左侧买入扫描 ----------------------------
+# ---------------------------- 左侧买入扫描（已为小数） ----------------------------
 LEFT_BUY_ENABLE = True
-LEFT_BUY_DAILY_GAIN_MIN = -0.03       # 放宽到 -3%
-LEFT_BUY_DAILY_GAIN_MAX = 0.03        # 仍控制追涨
+LEFT_BUY_DAILY_GAIN_MIN = -0.03
+LEFT_BUY_DAILY_GAIN_MAX = 0.03
 LEFT_BUY_LOW_PROFIT_MIN = 0.0
-LEFT_BUY_LOW_PROFIT_MAX = 0.15        # 放宽到 15%，允许较多上涨的品种
-LEFT_BUY_MAX_PULLBACK = 0.08          # 放宽回撤限制
-LEFT_BUY_MIN_SCORE = 50               # 降低评分门槛
-LEFT_BUY_RSI_MAX = 55                 # RSI上限适当提高
-LEFT_BUY_REQUIRE_BELOW_MA = False     # 不强制要求低于均线
-LEFT_BUY_MAX_COUNT = 4                # 最多推荐数量
+LEFT_BUY_LOW_PROFIT_MAX = 0.15
+LEFT_BUY_MAX_PULLBACK = 0.08
+LEFT_BUY_MIN_SCORE = 50
+LEFT_BUY_RSI_MAX = 55
+LEFT_BUY_REQUIRE_BELOW_MA = False
+LEFT_BUY_MAX_COUNT = 4
 
 # ---------------------------- 买入力度建议 ----------------------------
-BUY_ADVICE_ENABLE = True            # 是否在输出中显示买入力度建议
-
+BUY_ADVICE_ENABLE = True
 
 # ---------------------------- 邮件配置 ----------------------------
 def get_email_config():
