@@ -22,6 +22,27 @@ from analyzer.utils import pad_display
 logger = logging.getLogger(__name__)
 
 
+def print_table(rows, env, today_str):
+    """统一打印报告表头及所有数据行"""
+    print(f"\n{'='*90}")
+    print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
+    if env.get("risk_tip"):
+        print(f"  {env['risk_tip']}")
+    print(f"{'='*90}")
+    print(
+        pad_display("名称", DISPLAY_NAME_WIDTH),
+        pad_display("代码", DISPLAY_CODE_WIDTH),
+        pad_display("价格", DISPLAY_PRICE_WIDTH, "right"),
+        pad_display("涨跌", DISPLAY_CHANGE_WIDTH, "right"),
+        pad_display("评分", DISPLAY_SCORE_WIDTH, "right"),
+        " " + pad_display("评级", DISPLAY_LEVEL_WIDTH),
+        " 信号/提示"
+    )
+    print("-" * 90)
+    for out, score in rows:
+        print(out)
+
+
 def run_batch_analysis(api_key=None, target_code=None):
     dl = DataLayer()
     if not dl.login():
@@ -113,30 +134,16 @@ def run_batch_analysis(api_key=None, target_code=None):
                 buy_advice_map[idx] = advice
 
     sorted_results = sorted(raw_outputs, key=lambda x: x[1], reverse=True)
-    print(f"\n{'='*90}")
-    print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
-    if env.get("risk_tip"):
-        print(f"  {env['risk_tip']}")
-    print(f"{'='*90}")
-    print(
-        pad_display("名称", DISPLAY_NAME_WIDTH),
-        pad_display("代码", DISPLAY_CODE_WIDTH),
-        pad_display("价格", DISPLAY_PRICE_WIDTH, "right"),
-        pad_display("涨跌", DISPLAY_CHANGE_WIDTH, "right"),
-        pad_display("评分", DISPLAY_SCORE_WIDTH, "right"),
-        " " + pad_display("操作", DISPLAY_ACTION_WIDTH),
-        " 信号/提示"
-    )
-    print("-" * 90)
-    for out, score in sorted_results:
-        print(out)
+
+    # 统一打印表格（表头 + 行）
+    print_table(sorted_results, env, today_str)
 
     scan_to_out = [out for out, _ in raw_outputs]
 
     right_buy_indices = select_trend_buy(
         scan_info_list,
         max_count=TREND_BUY_MAX_COUNT,
-        low_profit_min=TREND_BUY_LOW_PROFIT_MIN,          # 小数，不再除以100
+        low_profit_min=TREND_BUY_LOW_PROFIT_MIN,
         low_profit_max=TREND_BUY_LOW_PROFIT_MAX,
         max_pullback=TREND_BUY_MAX_PULLBACK,
         daily_gain_min=TREND_BUY_DAILY_GAIN_MIN,

@@ -517,7 +517,7 @@ class DataAnalyzer:
             for th, lvl in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
                 if s >= th:
                     return lvl
-            return "强烈卖出"
+            return ACTION_LEVEL_NAMES[-1]
 
         level = _get_level(score)
 

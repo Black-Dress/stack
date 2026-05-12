@@ -31,37 +31,38 @@ RSI_WINDOW = 14
 MA30_WINDOW = 30
 
 # ---------------------------- 评分合成 ----------------------------
-NONLINEAR_SCALE_BULL = 2.5          # 趋势市场缩放
-NONLINEAR_SCALE_RANGE = 1.5         # 震荡市场缩放
+NONLINEAR_SCALE_BULL = 2.5
+NONLINEAR_SCALE_RANGE = 1.5
 
 # ---------------------------- 信号确认 ----------------------------
-DEFAULT_CONFIRM_DAYS = 3             # 已优化：从2天提至3天，减少信号闪烁
-BUY_THRESHOLD = 50                  # 百分制买入阈值
-SELL_THRESHOLD = -20                # 卖出阈值
+DEFAULT_CONFIRM_DAYS = 3
+BUY_THRESHOLD = 50
+SELL_THRESHOLD = -20
 QUICK_BUY_THRESHOLD = 60
 
-ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -80]
+# 评分 → 强度映射（不再使用买入/卖出字眼）
+ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -999]
 ACTION_LEVEL_NAMES = [
-    "极度看好", "强烈买入", "买入", "谨慎买入", "偏多持有",
-    "中性偏多", "中性偏空", "偏空持有", "谨慎卖出", "卖出"
+    "极强", "强势", "偏强", "中性偏强", "中性",
+    "中性偏弱", "偏弱", "弱势", "极弱", "极弱"
 ]
 
 # ---------------------------- 风险提示参数 ----------------------------
 RISK_WARNING_DAYS = 3
-RISK_WARNING_THRESHOLD = 30         # 百分制低分阈值
+RISK_WARNING_THRESHOLD = 30
 MA30_WEAKNESS_PENALTY = 0.9
 
 # ---------------------------- 动态风险（ATR 倍数） ----------------------------
-ATR_STOP_MULT = 2.0                 # 硬止损（统一值，factors.py 不再重复定义）
-ATR_TRAILING_PROFIT_MULT = 1.5      # 移动止盈
-RISK_ALERT_DISTANCE_ATR = 0.5       # 提醒距离
+ATR_STOP_MULT = 2.0
+ATR_TRAILING_PROFIT_MULT = 1.5
+RISK_ALERT_DISTANCE_ATR = 0.5
 
 # ---------------------------- 基于成本的止盈止损（硬规则） ----------------------------
-COST_TAKE_PROFIT_CLEAR = 0.20       # 浮动盈利≥20% 且移动止盈触发 → 清仓卖出
-COST_TAKE_PROFIT_HALF = 0.15        # 浮动盈利≥15% 且移动止盈触发 → 半仓卖出（可配置）
-COST_STOP_LOSS_PCT = -0.08          # 浮动亏损≤-8% → 无条件止损卖出
-USE_COST_BASED_OVERRIDE = True      # 是否启用成本价覆盖规则
-COST_HALF_PROFIT_ACTION = "HOLD"    # 半仓止盈时的动作："SELL" 或 "HOLD"
+COST_TAKE_PROFIT_CLEAR = 0.20
+COST_TAKE_PROFIT_HALF = 0.15
+COST_STOP_LOSS_PCT = -0.08
+USE_COST_BASED_OVERRIDE = True
+COST_HALF_PROFIT_ACTION = "HOLD"
 
 # ---------------------------- 显示宽度 ----------------------------
 DISPLAY_NAME_WIDTH = 16
@@ -69,7 +70,7 @@ DISPLAY_CODE_WIDTH = 12
 DISPLAY_PRICE_WIDTH = 10
 DISPLAY_CHANGE_WIDTH = 10
 DISPLAY_SCORE_WIDTH = 8
-DISPLAY_ACTION_WIDTH = 22
+DISPLAY_LEVEL_WIDTH = 22
 
 # ---------------------------- 市场状态权重表 ----------------------------
 BUY_WEIGHTS_BULL = {
@@ -189,23 +190,22 @@ TMSV_VOL_RATIO_BASE = 0.8
 TMSV_VOL_RATIO_DIVISOR = 1.2
 TMSV_VOL_CONSIST_SCORE = 100.0
 
-# ---------------------------- 趋势扫描参数（统一使用小数） ----------------------------
+# ---------------------------- 趋势扫描参数（小数） ----------------------------
 TREND_BUY_MAX_COUNT = 3
-TREND_BUY_LOW_PROFIT_MIN = 0.05      # 5%
-TREND_BUY_LOW_PROFIT_MAX = 0.25      # 25%
-TREND_BUY_MAX_PULLBACK = 0.05        # 5%
-TREND_BUY_DAILY_GAIN_MIN = 0.005     # 0.5%
-TREND_BUY_DAILY_GAIN_MAX = 0.06      # 6%
+TREND_BUY_LOW_PROFIT_MIN = 0.05
+TREND_BUY_LOW_PROFIT_MAX = 0.25
+TREND_BUY_MAX_PULLBACK = 0.05
+TREND_BUY_DAILY_GAIN_MIN = 0.005
+TREND_BUY_DAILY_GAIN_MAX = 0.06
 TREND_BUY_PREFER_SIGNAL = True
 
 TREND_SELL_MAX_COUNT = 5
-TREND_SELL_MIN_DAILY_LOSS = -0.03    # -3%
-TREND_SELL_MIN_PULLBACK = 0.06       # 6%
-TREND_SELL_MIN_LOW_PROFIT = 0.18     # 18%
+TREND_SELL_MIN_DAILY_LOSS = -0.03
+TREND_SELL_MIN_PULLBACK = 0.06
+TREND_SELL_MIN_LOW_PROFIT = 0.18
 TREND_SELL_INCLUDE_WEAK_MA = True
 TREND_SELL_INCLUDE_CLEAR_STOP = True
 
-# ---------------------------- 左侧买入扫描（已为小数） ----------------------------
 LEFT_BUY_ENABLE = True
 LEFT_BUY_DAILY_GAIN_MIN = -0.03
 LEFT_BUY_DAILY_GAIN_MAX = 0.03
@@ -217,10 +217,8 @@ LEFT_BUY_RSI_MAX = 55
 LEFT_BUY_REQUIRE_BELOW_MA = False
 LEFT_BUY_MAX_COUNT = 4
 
-# ---------------------------- 买入力度建议 ----------------------------
 BUY_ADVICE_ENABLE = True
 
-# ---------------------------- 邮件配置 ----------------------------
 def get_email_config():
     return {
         "smtp_server": os.getenv("SMTP_SERVER", "smtp.qq.com"),

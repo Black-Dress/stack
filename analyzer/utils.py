@@ -99,7 +99,7 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
            f"{pad_display(price_str, DISPLAY_PRICE_WIDTH, 'right')} "
            f"{pad_display(change_str, DISPLAY_CHANGE_WIDTH, 'right')} "
            f"{pad_display(score_str, DISPLAY_SCORE_WIDTH, 'right')}  "
-           f"{pad_display(action_level, DISPLAY_ACTION_WIDTH)}")
+           f"{pad_display(action_level, DISPLAY_LEVEL_WIDTH)}")
     parts = []
     if risk_str:
         parts.append(risk_str)
