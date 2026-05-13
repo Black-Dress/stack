@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import baostock as bs
 from contextlib import redirect_stdout
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 from .config import *
 from .utils import calc_rsi, calc_macd, calculate_atr, calculate_adx
@@ -20,11 +20,81 @@ from .utils import calc_rsi, calc_macd, calculate_atr, calculate_adx
 logger = logging.getLogger(__name__)
 
 
+class PositionManager:
+    def __init__(self, ai_client=None):
+        self.ai_client = ai_client
+
+    def get_unified_advice(self, ctx, final_score: float, risk_str: str) -> str:
+        """
+        根据是否有持仓返回唯一建议：
+        - 有持仓：调用 AI 仓位建议（后备硬编码）
+        - 无持仓：调用 AI 买入力度建议（后备 evaluate_buy_level）
+        """
+        if ctx.shares > 0 and ctx.cost_price is not None and ctx.real_price is not None:
+            # 有持仓 -> 仓位管理建议
+            advice = ""
+            if self.ai_client and AI_ENABLE_POSITION_ADVICE:
+                advice = self.ai_client.get_position_advice(ctx, final_score, risk_str)
+            if not advice:
+                advice = self._fallback_position_advice(ctx, final_score, risk_str)
+            return advice
+        else:
+            # 无持仓 -> 买入力度建议
+            if self.ai_client and AI_ENABLE_BUY_LEVEL:
+                # 构造 scan_info 字典
+                scan_info = {
+                    "final_score": final_score,
+                    "rsi": ctx.rsi,
+                    "vol_ratio": getattr(ctx, 'vol_ratio', 1.0),
+                    "has_weak_ma_text": ctx.is_weak_ma,
+                    "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in risk_str,
+                    "has_strong_sell_text": "连续低分" in risk_str,
+                    "change_pct": ctx.change_pct / 100.0,
+                }
+                advice = self.ai_client.get_buy_level(scan_info)
+            if not advice:
+                # 后备：使用原来的 evaluate_buy_level
+                scan_info = {
+                    "final_score": final_score,
+                    "rsi": ctx.rsi,
+                    "change_pct": ctx.change_pct / 100.0,
+                    "has_weak_ma_text": ctx.is_weak_ma,
+                    "has_clear_stop_text": False,
+                    "has_strong_sell_text": False,
+                    "cost_profit_pct": None,
+                }
+                advice = evaluate_buy_level(scan_info)
+            return advice
+
+    def _fallback_position_advice(self, ctx, final_score: float, risk_str: str) -> str:
+        """硬编码仓位建议（后备）"""
+        profit_pct = (ctx.real_price - ctx.cost_price) / ctx.cost_price
+        if final_score >= POSITION_ADD_THRESHOLD:
+            if profit_pct < 0.05:
+                return f"🔼 加仓{int(POSITION_ADD_RATIO*100)}%"
+            elif profit_pct < 0.15:
+                return f"📈 小幅加仓{int(POSITION_ADD_RATIO*100)}%"
+            else:
+                return f"💰 浮盈{profit_pct:.1%}，加仓{int(POSITION_ADD_RATIO*50)}%"
+        elif final_score <= POSITION_CLEAR_THRESHOLD:
+            return "⛔ 清仓离场"
+        elif final_score <= POSITION_REDUCE_THRESHOLD:
+            return f"🔽 减仓{int(POSITION_REDUCE_RATIO*100)}%"
+        else:
+            base = "⚪ 持有"
+            if "清仓止盈" in risk_str or "移动止盈" in risk_str:
+                return "⚠️ " + base + "，注意止盈"
+            elif "止损卖出" in risk_str:
+                return "⛔ 强制止损"
+            elif "连续低分" in risk_str:
+                return "🔽 强烈减仓"
+            return base
+
 class DataLayer:
     def __init__(self):
         self._logged_in = False
         self._state_file = STATE_FILE
-        self._price_cache = {}          # 简单缓存： {(code, date): price}
+        self._price_cache = {}
 
     def login(self) -> bool:
         with open(os.devnull, "w") as f, redirect_stdout(f):
@@ -81,7 +151,6 @@ class DataLayer:
         return weekly
 
     def get_realtime_price(self, code: str, cache_ttl_seconds: int = 60) -> Optional[float]:
-        """增加缓存，避免短时间内重复请求"""
         now = datetime.datetime.now()
         cache_key = (code, now.strftime("%Y-%m-%d %H:%M"))
         if cache_key in self._price_cache:
@@ -108,7 +177,6 @@ class DataLayer:
         return None
 
     def load_positions(self) -> pd.DataFrame:
-        """读取持仓文件，支持 '代码','名称','成本','份额' 列。份额可选，无则置0"""
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
@@ -121,6 +189,59 @@ class DataLayer:
         df.loc[df["成本"] <= 0, "成本"] = None
         df["份额"] = pd.to_numeric(df["份额"], errors="coerce").fillna(0)
         return df[["代码", "名称", "成本", "份额"]]
+
+    # ---------- 持仓历史记录 ----------
+    def load_position_history(self) -> List[Dict]:
+        if not os.path.exists(POSITION_HISTORY_FILE):
+            return []
+        try:
+            with open(POSITION_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            logger.warning("持仓历史文件损坏，重置")
+            return []
+
+    def save_position_history(self, history: List[Dict]):
+        with open(POSITION_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+
+    def append_daily_snapshot(self, date: str, positions_df: pd.DataFrame):
+        """将当日持仓快照写入历史（若当天已有则覆盖）"""
+        history = self.load_position_history()
+        # 移除同一天的旧记录
+        history = [rec for rec in history if rec.get("date") != date]
+        snapshot = {
+            "date": date,
+            "positions": []
+        }
+        for _, row in positions_df.iterrows():
+            if row["份额"] > 0:
+                snapshot["positions"].append({
+                    "code": row["代码"],
+                    "name": row["名称"],
+                    "shares": int(row["份额"]),
+                    "cost": row["成本"] if pd.notna(row["成本"]) else None
+                })
+        history.append(snapshot)
+        # 按日期排序
+        history.sort(key=lambda x: x["date"])
+        self.save_position_history(history)
+
+    def get_position_change(self, code: str, current_shares: int) -> Tuple[int, float]:
+        """返回 (变化份额, 变化百分比) 与前一日快照对比"""
+        history = self.load_position_history()
+        if len(history) < 2:
+            return (0, 0.0)
+        latest = history[-1]  # 今日已保存的快照
+        prev = history[-2]    # 昨日快照
+        prev_shares = 0
+        for p in prev.get("positions", []):
+            if p["code"] == code:
+                prev_shares = p["shares"]
+                break
+        delta = current_shares - prev_shares
+        pct_change = (delta / prev_shares * 100) if prev_shares > 0 else 100.0 if delta > 0 else 0.0
+        return (delta, pct_change)
 
     def load_state(self) -> Dict:
         if not os.path.exists(self._state_file):

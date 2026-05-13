@@ -8,6 +8,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")
 STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")
+POSITION_HISTORY_FILE = os.path.join(DATA_DIR, "position_history.json")
 
 # ---------------------------- ETF 技术参数 ----------------------------
 ETF_MA = 20
@@ -40,12 +41,12 @@ BUY_THRESHOLD = 50
 SELL_THRESHOLD = -20
 QUICK_BUY_THRESHOLD = 60
 
-# 信号确认软化模式：'strict'（原严格模式） / 'majority'（多数满足） / 'trend_break'（趋势突破）
+# 信号确认软化模式：'strict' / 'majority' / 'trend_break'
 SIGNAL_CONFIRM_MODE = "majority"
 QUICK_BUY_ENABLE = True
-QUICK_BUY_SCORE_INCREASE = 15   # 相比前一日增加超过此值触发快速买入
+QUICK_BUY_SCORE_INCREASE = 15
 
-# 评分 → 强度映射（不再使用买入/卖出字眼）
+# 评分 → 强度映射（用于操作等级，主表格已删除此列，但 analyzer 内部仍使用）
 ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -999]
 ACTION_LEVEL_NAMES = [
     "极强", "强势", "偏强", "中性偏强", "中性",
@@ -67,28 +68,32 @@ COST_TAKE_PROFIT_CLEAR = 0.20
 COST_TAKE_PROFIT_HALF = 0.15
 COST_STOP_LOSS_PCT = -0.08
 USE_COST_BASED_OVERRIDE = True
-# 止盈模式：'soft' 仅提示不强制卖出，'hard' 强制卖出（可能导致踏空）
-PROFIT_TAKE_MODE = "soft"        # 'soft' 或 'hard'
-# 半仓止盈在 soft 模式下只改等级，hard 模式下可配置动作
+PROFIT_TAKE_MODE = "soft"        # 'soft' 仅提示不强制卖出
 COST_HALF_PROFIT_ACTION = "HOLD"
 
-# ---------------------------- 仓位管理参数 ----------------------------
+# ---------------------------- 仓位管理参数（后备规则） ----------------------------
 POSITION_ADVICE_ENABLE = True
-# 加减仓阈值（基于评分区间）
-POSITION_ADD_THRESHOLD = 65      # 评分超过此值建议加仓
-POSITION_REDUCE_THRESHOLD = 40   # 评分低于此值建议减仓
-POSITION_CLEAR_THRESHOLD = 20    # 评分低于此值建议清仓
-# 单次加减仓比例（占当前持仓的百分比）
+POSITION_ADD_THRESHOLD = 65
+POSITION_REDUCE_THRESHOLD = 40
+POSITION_CLEAR_THRESHOLD = 20
 POSITION_ADD_RATIO = 0.2
 POSITION_REDUCE_RATIO = 0.3
 
-# ---------------------------- 显示宽度 ----------------------------
+# ---------------------------- AI 缓存配置 ----------------------------
+AI_CACHE_TTL = 300  # 5分钟
+AI_ENABLE = True
+AI_ENABLE_POSITION_ADVICE = True
+AI_ENABLE_BUY_LEVEL = True
+AI_ENABLE_HISTORY_ANALYSIS = True
+
+# ---------------------------- 显示宽度配置 ----------------------------
 DISPLAY_NAME_WIDTH = 22
-DISPLAY_CODE_WIDTH = 14
-DISPLAY_PRICE_WIDTH = 10
-DISPLAY_CHANGE_WIDTH = 10
-DISPLAY_SCORE_WIDTH = 8
-DISPLAY_LEVEL_WIDTH = 22
+DISPLAY_CODE_WIDTH = 16
+DISPLAY_PRICE_WIDTH = 12
+DISPLAY_CHANGE_WIDTH = 12
+DISPLAY_SCORE_WIDTH = 16
+DISPLAY_TAGS_WIDTH = 40 
+DISPLAY_NUMS_WIDTH = 12
 
 # ---------------------------- 市场状态权重表 ----------------------------
 BUY_WEIGHTS_BULL = {
@@ -208,7 +213,7 @@ TMSV_VOL_RATIO_BASE = 0.8
 TMSV_VOL_RATIO_DIVISOR = 1.2
 TMSV_VOL_CONSIST_SCORE = 100.0
 
-# ---------------------------- 趋势扫描参数（小数） ----------------------------
+# ---------------------------- 趋势扫描参数（硬编码后备） ----------------------------
 TREND_BUY_MAX_COUNT = 3
 TREND_BUY_LOW_PROFIT_MIN = 0.05
 TREND_BUY_LOW_PROFIT_MAX = 0.25
