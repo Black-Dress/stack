@@ -183,7 +183,7 @@ def select_left_buy(
 def evaluate_buy_level(scan_info: Dict) -> str:
     """
     根据综合条件给出买入力度建议：
-    🔥大量买入 / 📈适量买入 / 💡少量买入 / 空字符串（无建议）
+    大量买入 / 📈 适量买入 / 💡 少量买入 / 空字符串（无建议）
     不强制要求持仓成本，无成本时仅依靠技术面。
     """
     if not isinstance(scan_info, dict):
@@ -203,23 +203,23 @@ def evaluate_buy_level(scan_info: Dict) -> str:
     # ---- 无持仓成本，纯技术面建议 ----
     if cost_profit is None:
         if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-            return "🔥大量买入"
+            return "🤡 大量买入"
         if score >= 70 and not above_ma and rsi is not None and rsi < 50:
-            return "📈适量买入"
+            return "📈 适量买入"
         if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
-            return "💡少量买入"
+            return "💡 少量买入"
         return ""
 
     # ---- 有持仓成本，结合盈亏调整力度 ----
     if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-        return "🔥大量买入"
+        return "🤡 大量买入"
     if score >= 70 and not above_ma and rsi is not None and rsi < 50:
-        return "📈适量买入"
+        return "📈 适量买入"
     if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
-        return "💡少量买入"
+        return "💡 少量买入"
     # 若有5%以上浮亏且技术面不差，可少量补仓
     if cost_profit < -0.05 and score >= 50 and rsi is not None and rsi < 40:
-        return "💡少量买入"
+        return "💡 少量买入"
     return ""
 
 

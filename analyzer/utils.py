@@ -94,6 +94,7 @@ def format_etf_output_line(name, code, price, change_pct, final_score, action_le
     price_str = f"{price:.3f}" if price is not None else "N/A"
     change_str = f"{change_pct:+.2f}%" if change_pct is not None else "0.00%"
     score_str = f"{final_score:.1f}" if final_score is not None else "0.0"
+    
     out = (f"{pad_display(name, DISPLAY_NAME_WIDTH)} "
            f"{pad_display(code, DISPLAY_CODE_WIDTH)} "
            f"{pad_display(price_str, DISPLAY_PRICE_WIDTH, 'right')} "
@@ -148,13 +149,13 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment, signal
             label = "清仓"
         elif label == "half":
             label = "半仓"
-        lines.append(f"  ⚠️ 移动止盈: {label}级，高点回落{fall:.1%}")
+        lines.append(f"  💸 移动止盈: {label}级，高点回落{fall:.1%}")
 
     if ctx.profit_pct_from_low >= 0.12:
         if ctx.profit_level == 'clear':
             lines.append(f"  ⛔ 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (清仓级)")
         elif ctx.profit_level == 'half':
-            lines.append(f"  ⚠️ 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (半仓级)")
+            lines.append(f"  💸 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (半仓级)")
         else:
             lines.append(f"  止盈关注: 低点涨幅{ctx.profit_pct_from_low:.1%}")
 

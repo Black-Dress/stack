@@ -15,9 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer, AIClient
-from analyzer.trend_scanner import select_left_buy, select_trend_buy, select_trend_sell
+from analyzer.trend_scanner import (
+    select_left_buy, select_trend_buy, select_trend_sell, evaluate_buy_level
+)
 from analyzer.config import *
-from analyzer.utils import pad_display
+from analyzer.utils import format_etf_output_line, pad_display
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ def print_table(rows, env, today_str):
         pad_display("价格", DISPLAY_PRICE_WIDTH, "right"),
         pad_display("涨跌", DISPLAY_CHANGE_WIDTH, "right"),
         pad_display("评分", DISPLAY_SCORE_WIDTH, "right"),
-        " " + pad_display("评级", DISPLAY_LEVEL_WIDTH),
+        " " + pad_display("操作", DISPLAY_LEVEL_WIDTH),
         " 信号/提示"
     )
     print("-" * 90)
@@ -118,6 +120,7 @@ def run_batch_analysis(api_key=None, target_code=None):
 
         for code, name, f in futures:
             out, signal, new_state, score, risk_data, scan_info = f.result()
+            # 移除主表格中的买卖信号标签，仅保留风险提示
             out_clean = out.replace(" [BUY]", "").replace(" [SELL]", "")
             raw_outputs.append((out_clean, score))
             state[code] = new_state
@@ -125,21 +128,22 @@ def run_batch_analysis(api_key=None, target_code=None):
                 scan_info = {}
             scan_info_list.append(scan_info)
 
+    # ---------- 买入力度建议（统一在 main 中生成） ----------
     buy_advice_map = {}
     if BUY_ADVICE_ENABLE:
-        from analyzer.trend_scanner import evaluate_buy_level
         for idx, si in enumerate(scan_info_list):
             advice = evaluate_buy_level(si)
             if advice:
                 buy_advice_map[idx] = advice
 
+    # ---------- 表格输出 ----------
     sorted_results = sorted(raw_outputs, key=lambda x: x[1], reverse=True)
-
-    # 统一打印表格（表头 + 行）
     print_table(sorted_results, env, today_str)
 
+    # 用于趋势扫描的原始输出行（不包含买入建议）
     scan_to_out = [out for out, _ in raw_outputs]
 
+    # ---------- 右侧趋势扫描 ----------
     right_buy_indices = select_trend_buy(
         scan_info_list,
         max_count=TREND_BUY_MAX_COUNT,
@@ -151,6 +155,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         prefer_signal=TREND_BUY_PREFER_SIGNAL,
     )
 
+    # ---------- 左侧趋势扫描 ----------
     left_buy_indices = []
     if LEFT_BUY_ENABLE:
         left_buy_indices = select_left_buy(
@@ -166,26 +171,52 @@ def run_batch_analysis(api_key=None, target_code=None):
             require_below_ma=LEFT_BUY_REQUIRE_BELOW_MA,
         )
 
+    # ---------- 打印右侧推荐（统一列对齐） ----------
     if right_buy_indices:
         print("\n📈 [趋势扫描] 上涨中继/回调再启动形态：")
         print("-" * 60)
         for idx in right_buy_indices:
-            line = scan_to_out[idx]
-            advice = buy_advice_map.get(idx)
+            disp = scan_info_list[idx]["display"]
+            advice = buy_advice_map.get(idx, "")
+            # 将买入建议附加到风险提示中
+            risk_with_advice = disp["risk_str"]
             if advice:
-                line += f"  {advice}"
+                risk_with_advice += f"  {advice}" if risk_with_advice else advice
+            # 重新生成固定宽度行
+            line = format_etf_output_line(
+                name=disp["name"],
+                code=disp["code"],
+                price=disp["price"],
+                change_pct=disp["change_pct"],
+                final_score=disp["final_score"],
+                action_level=disp["action_level"],
+                risk_str=risk_with_advice,
+                signal_action=None,  # 不显示买卖信号
+            )
             print(line)
 
+    # 打印左侧推荐同理
     if left_buy_indices:
         print("\n📉 [左侧扫描] 潜在低吸/反转形态：")
         print("-" * 60)
         for idx in left_buy_indices:
-            line = scan_to_out[idx]
-            advice = buy_advice_map.get(idx)
+            disp = scan_info_list[idx]["display"]
+            advice = buy_advice_map.get(idx, "")
+            risk_with_advice = disp["risk_str"]
             if advice:
-                line += f"  {advice}"
+                risk_with_advice += f"  {advice}" if risk_with_advice else advice
+            line = format_etf_output_line(
+                name=disp["name"],
+                code=disp["code"],
+                price=disp["price"],
+                change_pct=disp["change_pct"],
+                final_score=disp["final_score"],
+                action_level=disp["action_level"],
+                risk_str=risk_with_advice,
+            )
             print(line)
 
+    # ---------- 卖出扫描 ----------
     sell_indices = select_trend_sell(
         scan_info_list,
         max_count=TREND_SELL_MAX_COUNT,

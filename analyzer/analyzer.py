@@ -460,13 +460,13 @@ class DataAnalyzer:
             vol_ratio = (d["volume"] / d["vol_ma"]) if d["vol_ma"] > 0 else None
             if vol_ratio is not None:
                 if ctx.change_pct > 0 and vol_ratio < 0.8:
-                    labels.append("缩量上涨")
+                    labels.append("🤔 缩量上涨")
                 elif ctx.change_pct > 0 and vol_ratio > 1.5:
-                    labels.append("放量上涨")
+                    labels.append("🤑 放量上涨")
                 elif ctx.change_pct < 0 and vol_ratio < 0.8:
-                    labels.append("缩量下跌")
+                    labels.append("😦 缩量下跌")
                 elif ctx.change_pct < 0 and vol_ratio > 1.5:
-                    labels.append("放量下跌")
+                    labels.append("😭 放量下跌")
 
         if ctx.cost_price is not None:
             if ctx.cost_profit_pct is not None:
@@ -480,13 +480,13 @@ class DataAnalyzer:
                 if ctx.profit_level == 'clear':
                     labels.append("⛔ 清仓止盈")
                 elif ctx.profit_level == 'half':
-                    labels.append("⚠️  半仓止盈")
+                    labels.append("💸 半仓止盈")
                 else:
                     labels.append("止盈关注")
             if ctx.trailing_profit_level == 'clear':
                 labels.append("⛔ 移动止盈")
             elif ctx.trailing_profit_level == 'half':
-                labels.append("⚠️  移动止盈")
+                labels.append("💸 移动止盈")
 
             if "止损卖出" not in final_level and "清仓止盈" not in final_level:
                 if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
@@ -499,7 +499,7 @@ class DataAnalyzer:
         if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
             labels.append("📉 低位")
         if ctx.is_weak_ma:
-            labels.append("⬇️ 弱于均线")
+            labels.append("🔽 弱于均线")
 
         if len(state.get("score_history", [])) >= RISK_WARNING_DAYS:
             recent_scores = [s["score"] for s in state["score_history"][-RISK_WARNING_DAYS:]]
@@ -625,7 +625,7 @@ class DataAnalyzer:
             "profit_pct_from_low": ctx.profit_pct_from_low if ctx.profit_pct_from_low is not None else 0.0,
             "max_drawdown_pct": ctx.max_drawdown_pct if ctx.max_drawdown_pct is not None else 0.0,
             "change_pct": (ctx.change_pct / 100.0) if ctx.change_pct is not None else 0.0,
-            "has_weak_ma_text": ctx.is_weak_ma,               # 使用布尔值
+            "has_weak_ma_text": ctx.is_weak_ma,
             "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
             "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
             "has_buy_signal": action == "BUY",
@@ -635,6 +635,15 @@ class DataAnalyzer:
             "tmsv": ctx.tmsv,
             "cost_profit_pct": ctx.cost_profit_pct,
             "cost_price": ctx.cost_price,
+            "display": {
+                "name": name,
+                "code": code,
+                "price": real_price,
+                "change_pct": ctx.change_pct,
+                "final_score": final,
+                "action_level": final_level,
+                "risk_str": risk_str,
+            }
         }
 
         return output, signal, state, final, risk_data, scan_info
