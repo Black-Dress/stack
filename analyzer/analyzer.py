@@ -482,7 +482,7 @@ class DataAnalyzer:
                 elif ctx.profit_level == 'half':
                     labels.append("💸 半仓止盈")
                 else:
-                    labels.append("止盈关注")
+                    labels.append("🤭 止盈关注")
             if ctx.trailing_profit_level == 'clear':
                 labels.append("⛔ 移动止盈")
             elif ctx.trailing_profit_level == 'half':

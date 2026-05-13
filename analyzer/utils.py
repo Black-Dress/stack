@@ -157,7 +157,7 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment, signal
         elif ctx.profit_level == 'half':
             lines.append(f"  💸 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (半仓级)")
         else:
-            lines.append(f"  止盈关注: 低点涨幅{ctx.profit_pct_from_low:.1%}")
+            lines.append(f"  🤭 止盈关注: 低点涨幅{ctx.profit_pct_from_low:.1%}")
 
     # AI 评论
     if ai_comment:
