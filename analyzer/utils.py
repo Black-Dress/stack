@@ -96,10 +96,11 @@ def calculate_adx(df, period=14) -> pd.DataFrame:
     adx = dx.rolling(period).mean()
     return pd.DataFrame({"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index)
 
-def print_unified_table(rows, title=None, env=None, today_str=None, table_type="main"):
+def print_unified_table(rows, title=None, env=None, today_str=None, table_type="main", print_header=True):
     """
     统一表格打印函数
     table_type: "main" - 主表格（特征标签）, "position" - 持仓表格, "trend" - 趋势扫描综合表格
+    print_header: 是否打印表头
     """
     # 打印标题或报告头部
     if title:
@@ -153,11 +154,15 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
         raise ValueError(f"未知表格类型: {table_type}")
 
     # 打印表头（根据列类型决定对齐方式）
-    header_parts = []
-    for col_name, col_key, width, align in cols:
-        header_parts.append(pad_display(col_name, width, align))
-    print(" ".join(header_parts))
-    print("-" * 90)
+    if print_header:
+        header_parts = []
+        for col_name, col_key, width, align in cols:
+            header_parts.append(pad_display(col_name, width, align))
+        header_line = " ".join(header_parts)
+        print(header_line)
+        # 计算总宽度（包括列之间的空格）
+        total_width = len(header_line)
+        print("-" * total_width)
 
     # 打印数据行
     for row in rows:

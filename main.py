@@ -191,8 +191,8 @@ def run_batch_analysis(api_key=None, target_code=None):
         clear_stop = si.get("has_clear_stop_text", False)
         strong_sell = si.get("has_strong_sell_text", False)
 
-        # 买入候选：未持仓 且 不弱于均线
-        if si.get("shares", 0) == 0 and not weak_ma:
+        # 买入候选：未持仓
+        if si.get("shares", 0) == 0:
             # 右侧买入硬指标
             if (score >= 70 and rsi >= 50 and vol_ratio >= 1.2 and above_ma and change >= 0.005):
                 buy_candidates.append({
@@ -209,7 +209,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                     "profit_pct_from_low": low_rise, "max_drawdown_pct": pullback,
                     "type": "left"
                 })
-        
+
         # 卖出候选：所有ETF，满足硬指标
         sell_conditions = [
             score < 40,
@@ -299,7 +299,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     if buy_rows and sell_rows:
         print("-" * 90)
     if sell_rows:
-        print_unified_table(sell_rows, table_type="trend")  # 无标题
+        print_unified_table(sell_rows, table_type="trend", print_header=False)  # 无标题且无表头
 
     dl.save_state(state)
     dl.logout()
