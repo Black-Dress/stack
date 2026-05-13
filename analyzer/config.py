@@ -40,6 +40,11 @@ BUY_THRESHOLD = 50
 SELL_THRESHOLD = -20
 QUICK_BUY_THRESHOLD = 60
 
+# 信号确认软化模式：'strict'（原严格模式） / 'majority'（多数满足） / 'trend_break'（趋势突破）
+SIGNAL_CONFIRM_MODE = "majority"
+QUICK_BUY_ENABLE = True
+QUICK_BUY_SCORE_INCREASE = 15   # 相比前一日增加超过此值触发快速买入
+
 # 评分 → 强度映射（不再使用买入/卖出字眼）
 ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -999]
 ACTION_LEVEL_NAMES = [
@@ -57,12 +62,25 @@ ATR_STOP_MULT = 2.0
 ATR_TRAILING_PROFIT_MULT = 1.5
 RISK_ALERT_DISTANCE_ATR = 0.5
 
-# ---------------------------- 基于成本的止盈止损（硬规则） ----------------------------
+# ---------------------------- 基于成本的止盈止损 ----------------------------
 COST_TAKE_PROFIT_CLEAR = 0.20
 COST_TAKE_PROFIT_HALF = 0.15
 COST_STOP_LOSS_PCT = -0.08
 USE_COST_BASED_OVERRIDE = True
+# 止盈模式：'soft' 仅提示不强制卖出，'hard' 强制卖出（可能导致踏空）
+PROFIT_TAKE_MODE = "soft"        # 'soft' 或 'hard'
+# 半仓止盈在 soft 模式下只改等级，hard 模式下可配置动作
 COST_HALF_PROFIT_ACTION = "HOLD"
+
+# ---------------------------- 仓位管理参数 ----------------------------
+POSITION_ADVICE_ENABLE = True
+# 加减仓阈值（基于评分区间）
+POSITION_ADD_THRESHOLD = 65      # 评分超过此值建议加仓
+POSITION_REDUCE_THRESHOLD = 40   # 评分低于此值建议减仓
+POSITION_CLEAR_THRESHOLD = 20    # 评分低于此值建议清仓
+# 单次加减仓比例（占当前持仓的百分比）
+POSITION_ADD_RATIO = 0.2
+POSITION_REDUCE_RATIO = 0.3
 
 # ---------------------------- 显示宽度 ----------------------------
 DISPLAY_NAME_WIDTH = 22

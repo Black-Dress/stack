@@ -83,17 +83,22 @@ def run_batch_analysis(api_key=None, target_code=None):
             print(f"未找到代码 {target_code}")
             dl.logout()
             return
-        code, name, cost = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["成本"]
+        code, name, cost, shares = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["成本"], row.iloc[0]["份额"]
         hist = dl.get_daily_data(code, start, today_str)
         if hist is not None:
             hist = dl.calculate_indicators(hist, need_amount_ma=False)
         weekly = dl.get_weekly_data(code, start, today_str)
         real_price = dl.get_realtime_price(code)
+        # 实时价获取失败时使用昨日收盘价
+        if real_price is None and hist is not None and not hist.empty:
+            real_price = hist.iloc[-1]["close"]
+            logger.warning(f"{code} 实时价获取失败，使用昨日收盘 {real_price:.3f}")
         s = state.get(code, {})
         report = analyzer.detailed_analysis(
             code, name, real_price, hist, weekly, env, today, s,
             ai_client=ai_client,
-            cost_price=cost if pd.notna(cost) else None
+            cost_price=cost if pd.notna(cost) else None,
+            shares=int(shares) if pd.notna(shares) else 0
         )
         print(report)
         dl.logout()
@@ -107,15 +112,21 @@ def run_batch_analysis(api_key=None, target_code=None):
         for _, row in etf_list.iterrows():
             code, name = row["代码"], row["名称"]
             cost = row["成本"] if pd.notna(row["成本"]) else None
+            shares = int(row["份额"]) if pd.notna(row["份额"]) else 0
             hist = dl.get_daily_data(code, start, today_str)
             if hist is not None:
                 hist = dl.calculate_indicators(hist, need_amount_ma=False)
             weekly = dl.get_weekly_data(code, start, today_str)
             real_price = dl.get_realtime_price(code)
+            # 实时价获取失败时使用昨日收盘价
+            if real_price is None and hist is not None and not hist.empty:
+                real_price = hist.iloc[-1]["close"]
+                logger.warning(f"{code} 实时价获取失败，使用昨日收盘 {real_price:.3f}")
             s = state.get(code, {})
             futures.append(
                 (code, name, ex.submit(analyzer.analyze_single_etf,
-                                 code, name, real_price, hist, weekly, env, today, s, cost_price=cost))
+                                 code, name, real_price, hist, weekly, env, today, s,
+                                 cost_price=cost, shares=shares))
             )
 
         for code, name, f in futures:
@@ -171,7 +182,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             require_below_ma=LEFT_BUY_REQUIRE_BELOW_MA,
         )
 
-    # ---------- 打印右侧推荐（统一列对齐） ----------
+    # ---------- 打印右侧推荐 ----------
     if right_buy_indices:
         print("\n📈 [趋势扫描] 上涨中继/回调再启动形态：")
         print("-" * 60)

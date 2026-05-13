@@ -114,7 +114,7 @@ def get_trailing_profit_signals(price: float, recent_high: float, atr_pct: float
         return "clear"
     if factor_sell_trailing_stop_half(price, recent_high, atr_pct) > 0:
         return "half"
-    return None   # 修复：返回 Python None，而非字符串 "None"
+    return None
 
 # ---------- TMSV 复合强度 ----------
 def _get_tmsv_weights(market_status, volatility):
@@ -138,9 +138,7 @@ def compute_tmsv(df, market_status="震荡偏弱", volatility=0.02):
         TMSV_MACD_CHANGE_SCALE, TMSV_VOL_RATIO_BASE, TMSV_VOL_RATIO_DIVISOR,
         TMSV_VOL_CONSIST_SCORE, TMSV_TREND_MA20_WEIGHT, TMSV_TREND_MA60_WEIGHT,
         TMSV_TREND_SLOPE_WEIGHT, TMSV_MOM_RSI_WEIGHT, TMSV_MOM_MACD_WEIGHT,
-        TMSV_VOL_RATIO_WEIGHT, TMSV_VOL_CONSIST_WEIGHT, TMSV_VOL_LOW_THRESH,
-        TMSV_VOL_HIGH_THRESH, TMSV_VOL_LOW_FACTOR, TMSV_VOL_HIGH_FACTOR,
-        TMSV_VOL_MID_FACTOR_BASE, TMSV_VOL_MID_FACTOR_SLOPE, TMSV_VOL_BAND_WIDTH,
+        TMSV_VOL_RATIO_WEIGHT, TMSV_VOL_CONSIST_WEIGHT,
     )
     if df is None or len(df) < 20:
         return pd.Series([50.0])
@@ -189,16 +187,9 @@ def compute_tmsv(df, market_status="震荡偏弱", volatility=0.02):
     consistency = np.where(price_up == vol_up, TMSV_VOL_CONSIST_SCORE, 0)
     vol_score = vol_ratio_score * TMSV_VOL_RATIO_WEIGHT + consistency * TMSV_VOL_CONSIST_WEIGHT
 
-    atr_pct = df["atr"] / df["close"].replace(0, np.nan)
-    vol_factor = np.select(
-        [atr_pct < TMSV_VOL_LOW_THRESH, atr_pct > TMSV_VOL_HIGH_THRESH],
-        [TMSV_VOL_LOW_FACTOR, TMSV_VOL_HIGH_FACTOR],
-        TMSV_VOL_MID_FACTOR_BASE - (atr_pct - TMSV_VOL_LOW_THRESH) / TMSV_VOL_BAND_WIDTH * TMSV_VOL_MID_FACTOR_SLOPE
-    )
-    vol_factor = np.nan_to_num(vol_factor, nan=1.0)
-
     w = _get_tmsv_weights(market_status, volatility)
-    tmsv = (trend_score * w["trend"] + mom_score * w["momentum"] + vol_score * w["volume"]) * vol_factor
+    # 去除额外的 vol_factor 双重缩放，仅使用加权和
+    tmsv = trend_score * w["trend"] + mom_score * w["momentum"] + vol_score * w["volume"]
     return tmsv.clip(0, 100).fillna(50)
 
 def factor_buy_reversal_potential(
@@ -211,12 +202,15 @@ def factor_buy_reversal_potential(
     volume: float,
     vol_ma5: float,
     close_open_ratio: float,
+    atr_pct: float = 0.02,      # 新增参数，默认 2% 波动率
 ) -> float:
     score = 0.0
-    if recent_low_20 > 0:
+    # 自适应阈值：低点涨幅不超过 1.5 倍 ATR（原硬编码 0.08）
+    if recent_low_20 > 0 and atr_pct > 0:
         rise = (price - recent_low_20) / recent_low_20
-        if rise <= 0.08:
-            score += 0.35 * (1 - rise / 0.08)
+        threshold_rise = 1.5 * atr_pct
+        if rise <= threshold_rise:
+            score += 0.35 * (1 - rise / threshold_rise)
     if 40 <= rsi <= 60 and rsi - rsi_prev > 2:
         score += 0.30
     if boll_width_ma20 > 0 and boll_width < boll_width_ma20 * 0.8:

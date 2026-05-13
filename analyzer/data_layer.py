@@ -24,6 +24,7 @@ class DataLayer:
     def __init__(self):
         self._logged_in = False
         self._state_file = STATE_FILE
+        self._price_cache = {}          # 简单缓存： {(code, date): price}
 
     def login(self) -> bool:
         with open(os.devnull, "w") as f, redirect_stdout(f):
@@ -64,7 +65,14 @@ class DataLayer:
         df = self.get_daily_data(code, start_date, end_date)
         if df is None:
             return None
-        weekly = df.resample("W-FRI").last()
+        weekly = df.resample("W-FRI").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "amount": "sum"
+        })
         today_ts = pd.Timestamp(datetime.date.today())
         weekly = weekly[weekly.index < today_ts]
         if weekly.empty:
@@ -72,8 +80,13 @@ class DataLayer:
         weekly["ma_short"] = weekly["close"].rolling(ETF_MA).mean()
         return weekly
 
-    def get_realtime_price(self, code: str) -> Optional[float]:
-        """增加简单重试与延迟，避免限流"""
+    def get_realtime_price(self, code: str, cache_ttl_seconds: int = 60) -> Optional[float]:
+        """增加缓存，避免短时间内重复请求"""
+        now = datetime.datetime.now()
+        cache_key = (code, now.strftime("%Y-%m-%d %H:%M"))
+        if cache_key in self._price_cache:
+            return self._price_cache[cache_key]
+
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
@@ -83,7 +96,9 @@ class DataLayer:
                     if r.status_code == 200:
                         parts = r.text.split('"')[1].split(",")
                         if len(parts) > 3 and parts[3]:
-                            return float(parts[3])
+                            price = float(parts[3])
+                            self._price_cache[cache_key] = price
+                            return price
                 return None
             except Exception:
                 if attempt < max_retries:
@@ -93,18 +108,19 @@ class DataLayer:
         return None
 
     def load_positions(self) -> pd.DataFrame:
-        """读取持仓文件，返回包含 [代码, 名称, 成本] 的DataFrame。
-           成本价为 None 表示未持有。
-        """
+        """读取持仓文件，支持 '代码','名称','成本','份额' 列。份额可选，无则置0"""
         try:
             df = pd.read_csv(POSITION_FILE, encoding="utf-8-sig")
         except UnicodeDecodeError:
             df = pd.read_csv(POSITION_FILE, encoding="gbk")
         if "成本" not in df.columns:
             df["成本"] = None
+        if "份额" not in df.columns:
+            df["份额"] = 0
         df["成本"] = pd.to_numeric(df["成本"], errors="coerce")
         df.loc[df["成本"] <= 0, "成本"] = None
-        return df[["代码", "名称", "成本"]]
+        df["份额"] = pd.to_numeric(df["份额"], errors="coerce").fillna(0)
+        return df[["代码", "名称", "成本", "份额"]]
 
     def load_state(self) -> Dict:
         if not os.path.exists(self._state_file):
