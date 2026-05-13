@@ -156,62 +156,60 @@ RSI：{rsi:.0f}
     def get_trend_recommendations(self, buy_candidates: List[Dict], sell_candidates: List[Dict],
                                 market_state: str) -> Dict[str, List]:
         """
-        输入：buy_candidates（未持仓且不弱于均线的ETF数据列表），sell_candidates（所有ETF列表）
+        输入：buy_candidates（经过硬指标筛选的买入候选，已包含type字段），
+            sell_candidates（经过硬指标筛选的卖出候选）
         输出：{"buy": [{"code":..., "direction":..., "advice_text":...}],
             "sell": [{"code":..., "advice_text":...}]}
         """
         if not AI_ENABLE:
             return {"buy": [], "sell": []}
-        # 检查缓存
+        # 缓存检查
         now = time.time()
         if now - self._trend_cache["timestamp"] < AI_CACHE_TTL:
             return self._trend_cache["result"]
         
-        # 构建买入候选JSON（精简）
+        # 构建精简JSON
         buy_json = []
-        for idx, etf in enumerate(buy_candidates):
+        for e in buy_candidates:
             buy_json.append({
-                "code": etf["code"],
-                "name": etf["name"],
-                "score": etf["final_score"],
-                "rsi": etf["rsi"],
-                "vol_ratio": etf.get("vol_ratio", 1.0),
-                "change_pct": etf["change_pct"],
-                "above_ma": etf["above_ma"],
-                "low_rise": etf.get("profit_pct_from_low", 0),
-                "pullback": etf.get("max_drawdown_pct", 0)
+                "code": e["code"],
+                "name": e["name"],
+                "score": e["final_score"],
+                "rsi": e["rsi"],
+                "vol_ratio": e.get("vol_ratio", 1.0),
+                "change": e["change_pct"],
+                "above_ma": e["above_ma"],
+                "low_rise": e.get("profit_pct_from_low", 0),
+                "type": e.get("type", "right")
             })
         sell_json = []
-        for etf in sell_candidates:
+        for e in sell_candidates:
             sell_json.append({
-                "code": etf["code"],
-                "name": etf["name"],
-                "score": etf["final_score"],
-                "rsi": etf["rsi"],
-                "change_pct": etf["change_pct"],
-                "weak_ma": etf.get("has_weak_ma_text", False),
-                "clear_stop": etf.get("has_clear_stop_text", False),
-                "strong_sell": etf.get("has_strong_sell_text", False)
+                "code": e["code"],
+                "name": e["name"],
+                "score": e["final_score"],
+                "rsi": e["rsi"],
+                "change": e["change_pct"],
+                "weak_ma": e.get("weak_ma", False)
             })
         
-        prompt = f"""你是量化交易策略师。根据以下所有ETF数据和市场状态，输出趋势扫描推荐。
+        prompt = f"""你是量化交易策略师。以下候选列表已经过硬指标筛选，请从中选择并输出最终推荐。
 
     市场状态：{market_state}
 
-    买入候选列表（仅未持仓且站上均线的ETF，用于推荐买入，最多4个，需区分左侧买入和右侧买入）：
+    买入候选（已按右侧/左侧分类，需从每类中选最多2个，总数不超过4个）：
     {str(buy_json)[:3000]}
 
-    卖出候选列表（所有ETF，用于推荐卖出，最多3个）：
+    卖出候选（已按风险指标筛选，最多选3个）：
     {str(sell_json)[:2000]}
 
-    任务：
-    1. 推荐最多4个买入标的。每类（左侧/右侧）最多2个，若某类无合适标的可少给。
-    - 右侧买入：价格站上MA20，近5日涨幅>0.5%，RSI>50，放量突破。
-    - 左侧买入：价格低于MA20（但不得弱于均线），RSI<40，低点涨幅<8%，未形成明显上升趋势。
-    - **重要：不要推荐任何 weak_ma 为 true 的ETF。买入候选列表已经排除了weak_ma的ETF，你只需从中选择。**
-    2. 推荐最多3个卖出标的（趋势转弱、破位、连续低分等）。
-    3. 每条输出必须包含ETF代码，方向（left_buy/right_buy/sell），以及20字内的建议文本（可含emoji，但不要使用⚠️符号）。
-    输出格式（纯JSON）：
+    要求：
+    1. 对于买入，必须保留原候选中的 `type` 字段，并在 `direction` 中使用 `right_buy` 或 `left_buy`。
+    2. 对于卖出，直接输出 `sell`。
+    3. 同一只ETF不得同时出现在买入和卖出。
+    4. 输出JSON格式，不要有其他文字。
+
+    输出示例：
     {{
     "buy": [
         {{"code": "sz.159611", "direction": "right_buy", "advice_text": "🔥 右侧买入，放量突破"}},
@@ -220,26 +218,34 @@ RSI：{rsi:.0f}
     "sell": [
         {{"code": "sh.512800", "advice_text": "❗ 卖出，连续低分"}}
     ]
-    }}
-    注意：只输出JSON，不要其他文字。"""
+    }}"""
         try:
             resp = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800,
-                temperature=0.2,
+                temperature=0.1,   # 低随机性
                 timeout=15,
             )
             content = resp.choices[0].message.content
             import json
+            # 提取JSON
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
             result = json.loads(content)
             self._trend_cache = {"result": result, "timestamp": now}
             return result
         except Exception as e:
             logger.error(f"AI趋势扫描失败: {e}")
-            return {"buy": [], "sell": []}   
-        
+            return {"buy": [], "sell": []}    
     
+
+
+
+
     
     # ========== 历史持仓分析（供后续扩展） ==========
     def analyze_position_history(self, code: str, name: str, history: List[Dict]) -> str:
