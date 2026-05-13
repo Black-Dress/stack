@@ -203,7 +203,7 @@ def evaluate_buy_level(scan_info: Dict) -> str:
     # ---- 无持仓成本，纯技术面建议 ----
     if cost_profit is None:
         if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-            return "🤡 大量买入"
+            return "🔥 大量买入"
         if score >= 70 and not above_ma and rsi is not None and rsi < 50:
             return "📈 适量买入"
         if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
@@ -212,7 +212,7 @@ def evaluate_buy_level(scan_info: Dict) -> str:
 
     # ---- 有持仓成本，结合盈亏调整力度 ----
     if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-        return "🤡 大量买入"
+        return "🔥 大量买入"
     if score >= 70 and not above_ma and rsi is not None and rsi < 50:
         return "📈 适量买入"
     if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
