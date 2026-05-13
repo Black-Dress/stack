@@ -17,6 +17,7 @@ from .utils import (
     cap,
     pad_display,
     format_detailed_report,
+    safe_ratio,
 )
 from .factors import (
     factor_buy_price_above_ma20,
@@ -306,9 +307,9 @@ class DataAnalyzer:
 
     def _build_risk_str(self, ctx, state, final_level=""):
         labels = []
-        if ctx.real_price and ctx.hist_df is not None and not ctx.hist_df.empty:
+        if ctx.real_price is not None and ctx.hist_df is not None and not ctx.hist_df.empty:
             d = ctx.hist_df.iloc[-1]
-            vol_ratio = (d["volume"] / d["vol_ma"]) if d["vol_ma"] > 0 else None
+            vol_ratio = safe_ratio(d["volume"], d["vol_ma"], default=None)
             if vol_ratio is not None:
                 if ctx.change_pct > 0 and vol_ratio < 0.8:
                     labels.append("🤔 缩量上涨")

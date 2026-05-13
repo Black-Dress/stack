@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 from typing import Dict, Tuple, Optional, List
 
 from .config import *
+from .trend_scanner import evaluate_buy_level
 from .utils import calc_rsi, calc_macd, calculate_atr, calculate_adx
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,8 @@ class DataLayer:
             code, "date,code,open,high,low,close,volume,amount",
             start_date=start_date, end_date=end_date, frequency="d"
         )
+        if rs is None:
+            return None
         if rs.error_code != "0":
             return None
         data = []

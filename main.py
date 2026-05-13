@@ -8,6 +8,8 @@ import argparse
 import datetime
 import logging
 import os
+from typing import Optional
+
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,11 +17,8 @@ from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer
 from analyzer.ai import AIClient
 from analyzer.data_layer import PositionManager
-from analyzer.trend_scanner import (
-    select_left_buy, select_trend_buy, select_trend_sell
-)
 from analyzer.config import *
-from analyzer.utils import print_unified_table
+from analyzer.utils import print_unified_table, resolve_real_price
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +69,9 @@ def run_batch_analysis(api_key=None, target_code=None):
         if hist is not None:
             hist = dl.calculate_indicators(hist, need_amount_ma=False)
         weekly = dl.get_weekly_data(code, start, today_str)
-        real_price = dl.get_realtime_price(code)
-        if real_price is None and hist is not None and not hist.empty:
-            real_price = hist.iloc[-1]["close"]
+        raw_price = dl.get_realtime_price(code)
+        real_price, use_fallback = resolve_real_price(raw_price, hist)
+        if use_fallback:
             logger.warning(f"{code} 实时价获取失败，使用昨日收盘 {real_price:.3f}")
         s = state.get(code, {})
         report = analyzer.detailed_analysis(
@@ -95,9 +94,9 @@ def run_batch_analysis(api_key=None, target_code=None):
             if hist is not None:
                 hist = dl.calculate_indicators(hist, need_amount_ma=False)
             weekly = dl.get_weekly_data(code, start, today_str)
-            real_price = dl.get_realtime_price(code)
-            if real_price is None and hist is not None and not hist.empty:
-                real_price = hist.iloc[-1]["close"]
+            raw_price = dl.get_realtime_price(code)
+            real_price, use_fallback = resolve_real_price(raw_price, hist)
+            if use_fallback:
                 logger.warning(f"{code} 实时价获取失败，使用昨日收盘 {real_price:.3f}")
             s = state.get(code, {})
             futures.append(
@@ -138,7 +137,15 @@ def run_batch_analysis(api_key=None, target_code=None):
             change_str = f"+{delta}(+{delta_pct:.0f}%)" if delta>0 else (f"{delta}({delta_pct:.0f}%)" if delta!=0 else "0")
             # 构建虚拟上下文
             class SimpleCtx:
-                pass
+                name: str = ""
+                shares: int = 0
+                cost_price: Optional[float] = None
+                real_price: Optional[float] = None
+                rsi: float = 50.0
+                is_weak_ma: bool = False
+                change_pct: float = 0.0
+                hist_df: Optional[pd.DataFrame] = None
+
             ctx = SimpleCtx()
             ctx.name = si.get("display",{}).get("name","")
             ctx.shares = si["shares"]

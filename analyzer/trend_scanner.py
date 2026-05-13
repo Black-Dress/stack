@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """独立趋势扫描模块：基于结构化数据识别形态，不依赖评分或权重"""
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 
 def select_trend_buy(
@@ -180,6 +180,17 @@ def select_left_buy(
     candidates.sort(key=lambda x: x[0])
     return [idx for _, idx in candidates[:max_count]]
 
+
+def _recommend_buy_level(score: float, rsi: Optional[float], above_ma: bool, change: Optional[float]) -> str:
+    if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
+        return "🔥 大量买入"
+    if score >= 70 and not above_ma and rsi is not None and rsi < 50:
+        return "📈 适量买入"
+    if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
+        return "💡 少量买入"
+    return ""
+
+
 def evaluate_buy_level(scan_info: Dict) -> str:
     """
     根据综合条件给出买入力度建议：
@@ -191,33 +202,20 @@ def evaluate_buy_level(scan_info: Dict) -> str:
 
     score = scan_info.get("final_score", 0)
     rsi = scan_info.get("rsi")
-    tmsv = scan_info.get("tmsv")
     change = scan_info.get("change_pct")
     cost_profit = scan_info.get("cost_profit_pct")  # 可能为 None
     above_ma = not scan_info.get("has_weak_ma_text", False)
 
-    # 止损/重大风险时不建议买入
     if scan_info.get("has_clear_stop_text") or scan_info.get("has_strong_sell_text"):
         return ""
 
-    # ---- 无持仓成本，纯技术面建议 ----
+    level = _recommend_buy_level(score, rsi, above_ma, change)
+    if level:
+        return level
+
     if cost_profit is None:
-        if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-            return "🔥 大量买入"
-        if score >= 70 and not above_ma and rsi is not None and rsi < 50:
-            return "📈 适量买入"
-        if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
-            return "💡 少量买入"
         return ""
 
-    # ---- 有持仓成本，结合盈亏调整力度 ----
-    if score >= 85 and rsi is not None and 40 <= rsi <= 65 and above_ma:
-        return "🔥 大量买入"
-    if score >= 70 and not above_ma and rsi is not None and rsi < 50:
-        return "📈 适量买入"
-    if score >= 55 and change is not None and change < 0 and rsi is not None and rsi < 45:
-        return "💡 少量买入"
-    # 若有5%以上浮亏且技术面不差，可少量补仓
     if cost_profit < -0.05 and score >= 50 and rsi is not None and rsi < 40:
         return "💡 少量买入"
     return ""

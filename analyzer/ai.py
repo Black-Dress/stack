@@ -16,8 +16,11 @@ class AIClient:
         # 趋势扫描缓存
         self._trend_cache = {"result": None, "timestamp": 0}
 
-    
-    
+    @staticmethod
+    def _extract_content(resp: Any) -> str:
+        content = getattr(resp.choices[0].message, "content", None)
+        return content.strip() if isinstance(content, str) and content.strip() else ""
+
     # ========== 单只ETF点评（保留用于详细报告） ==========
     def comment_on_etf(self, code: str, name: str, final_score: float,
                        action_level: str, market_state: str, market_factor: float,
@@ -66,8 +69,8 @@ TMSV复合强度：{tmsv:.1f}  ATR波动率：{atr_pct*100:.2f}%
                 temperature=0.3,
                 timeout=10,
             )
-            content = resp.choices[0].message.content
-            return content.strip() if content else "（AI评论生成失败）"
+            content = self._extract_content(resp)
+            return content if content else "（AI评论生成失败）"
         except Exception as e:
             logger.error(f"AI评论生成失败: {e}")
             return "（AI评论生成失败）"
@@ -105,7 +108,7 @@ ETF：{ctx.name}
                 temperature=0.2,
                 timeout=5,
             )
-            return resp.choices[0].message.content.strip()
+            return self._extract_content(resp)
         except Exception as e:
             logger.warning(f"AI仓位建议失败: {e}")
             return ""
@@ -142,7 +145,7 @@ RSI：{rsi:.0f}
                 temperature=0.2,
                 timeout=5,
             )
-            advice = resp.choices[0].message.content.strip()
+            advice = self._extract_content(resp)
             if advice in ["🔥 大量买入", "📈 适量买入", "💡 少量买入"]:
                 return advice
             return ""
@@ -227,10 +230,9 @@ RSI：{rsi:.0f}
                 temperature=0.1,   # 低随机性
                 timeout=15,
             )
-            content = resp.choices[0].message.content
+            content = self._extract_content(resp)
             import json
             # 提取JSON
-            content = content.strip()
             if content.startswith("```json"):
                 content = content[7:]
             if content.endswith("```"):
@@ -265,7 +267,7 @@ ETF：{name}（{code}）
                 temperature=0.2,
                 timeout=8,
             )
-            return resp.choices[0].message.content.strip()
+            return self._extract_content(resp)
         except Exception as e:
             logger.warning(f"AI历史分析失败: {e}")
             return ""

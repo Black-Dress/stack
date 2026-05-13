@@ -43,15 +43,19 @@ def nonlinear_score_transform(raw: float, market_status: str,
     scale = bull_scale if ("牛" in status_lower or "熊" in status_lower) else range_scale
     return math.tanh(scale * raw)
 
-def clip_env_factor(market_factor: float, sentiment_factor: float = 1.0) -> float:
-    raw = market_factor * sentiment_factor
-    center = 1.0
-    scale = 2.0
-    mapped = 0.95 + 0.35 * math.tanh(scale * (raw - center))
-    return max(0.60, min(1.30, mapped))
-
 def cap(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+def resolve_real_price(real_price: Optional[float], hist_df: Optional[pd.DataFrame]) -> Tuple[Optional[float], bool]:
+    """如果实时价不可用，则使用前一日收盘价回退。"""
+    if real_price is not None:
+        return real_price, False
+    if hist_df is not None and not hist_df.empty:
+        return hist_df.iloc[-1]["close"], True
+    return None, False
+
+def safe_ratio(numerator: float, denominator: float, default: Optional[float] = 1.0) -> Optional[float]:
+    return numerator / denominator if denominator else default
 
 def weighted_sum(factors: Dict[str, float], weights: Dict[str, float]) -> float:
     return sum(weights.get(k, 0) * factors[k] for k in factors)
@@ -92,28 +96,23 @@ def calculate_adx(df, period=14) -> pd.DataFrame:
     adx = dx.rolling(period).mean()
     return pd.DataFrame({"plus_di": plus_di, "minus_di": minus_di, "adx": adx}, index=df.index)
 
-def fallback_market_state(above_ma20: bool, above_ma60: bool) -> Tuple[str, float]:
-    if above_ma20 and above_ma60:
-        return "正常牛市", 1.2
-    if not above_ma20 and not above_ma60:
-        return "熊市下跌", 0.8
-    return "震荡偏弱", 1.0
-
 def print_unified_table(rows, title=None, env=None, today_str=None, table_type="main"):
     """
     统一表格打印函数
     table_type: "main" - 主表格（特征标签）, "position" - 持仓表格, "trend" - 趋势扫描综合表格
     """
+    # 打印标题或报告头部
     if title:
         print(f"\n{'='*90}")
         print(f"  {title}")
         print(f"{'='*90}")
-    else:
+    elif env is not None and today_str is not None:
         print(f"\n{'='*90}")
         print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
         if env.get("risk_tip"):
             print(f"  {env['risk_tip']}")
         print(f"{'='*90}")
+    # 如果都没有，则不打印任何头部
 
     if not rows:
         print("  无数据")
@@ -137,7 +136,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
             ("成本", "cost", DISPLAY_PRICE_WIDTH, "left"),
             ("现价", "price", DISPLAY_PRICE_WIDTH, "left"),
             ("盈亏%", "profit_pct", DISPLAY_PRICE_WIDTH, "left"),
-            ("变化", "change", DISPLAY_CODE_WIDTH, "left"),
+            ("变化", "change", DISPLAY_PRICE_WIDTH, "left"),
             ("评分", "score", DISPLAY_SCORE_WIDTH, "left"),
             ("建议", "advice", DISPLAY_TAGS_WIDTH, "left")
         ]
@@ -153,7 +152,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
     else:
         raise ValueError(f"未知表格类型: {table_type}")
 
-    # 打印表头
+    # 打印表头（根据列类型决定对齐方式）
     header_parts = []
     for col_name, col_key, width, align in cols:
         header_parts.append(pad_display(col_name, width, align))
@@ -165,7 +164,6 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
         row_parts = []
         for col_name, col_key, width, align in cols:
             val = row.get(col_key, "")
-            # 格式化数值
             if col_key in ("price", "cost"):
                 if isinstance(val, (int, float)):
                     val_str = f"{val:.3f}"
@@ -195,6 +193,9 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
                 val_str = str(val)
             row_parts.append(pad_display(val_str, width, align))
         print(" ".join(row_parts))
+
+
+
 
 def format_detailed_report(ctx, market, params, action_level, ai_comment, signal_action=None):
     lines = []
