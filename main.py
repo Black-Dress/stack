@@ -3,6 +3,7 @@
 """
 ETF 智能分析系统
 主表格简洁，新增持仓表格，趋势扫描整合为单一表格并支持AI
+（纯AI版：无后备规则）
 """
 import argparse
 import datetime
@@ -17,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer
 from analyzer.ai import AIClient
-from analyzer.data_layer import PositionManager
 from analyzer.config import *
 from analyzer.utils import print_unified_table, resolve_real_price
 from analyzer.trend_scanner import select_trend_buy, select_left_buy, select_trend_sell
@@ -55,7 +55,6 @@ def run_batch_analysis(api_key=None, target_code=None):
 
     state = dl.load_state()
     ai_client = AIClient(api_key) if api_key else None
-    pos_mgr = PositionManager(ai_client)
 
     # 记录当日持仓快照
     dl.append_daily_snapshot(today_str, etf_list)
@@ -128,8 +127,9 @@ def run_batch_analysis(api_key=None, target_code=None):
     main_rows_sorted = sorted(main_rows, key=lambda x: x["final_score"], reverse=True)
     print_unified_table(main_rows_sorted, env=env, today_str=today_str, table_type="main")
 
-    # ---------- 持仓表格 ----------
+    # ---------- 构建持仓表格（暂不含建议） ----------
     position_rows = []
+    position_change_map = {}
     for si in scan_info_list:
         if si.get("shares", 0) > 0 and si.get("cost_price") is not None:
             cost = si["cost_price"]
@@ -137,30 +137,6 @@ def run_batch_analysis(api_key=None, target_code=None):
             profit_pct = (price - cost)/cost*100 if cost>0 else 0
             delta, delta_pct = dl.get_position_change(si.get("display",{}).get("code",""), si["shares"])
             change_str = f"+{delta}(+{delta_pct:.0f}%)" if delta>0 else (f"{delta}({delta_pct:.0f}%)" if delta!=0 else "0")
-            # 构建虚拟上下文
-            class SimpleCtx:
-                name: str = ""
-                shares: int = 0
-                cost_price: Optional[float] = None
-                real_price: Optional[float] = None
-                rsi: float = 50.0
-                is_weak_ma: bool = False
-                change_pct: float = 0.0
-                hist_df: Optional[pd.DataFrame] = None
-
-            ctx = SimpleCtx()
-            ctx.name = si.get("display",{}).get("name","")
-            ctx.shares = si["shares"]
-            ctx.cost_price = cost
-            ctx.real_price = price
-            ctx.rsi = si.get("rsi", 50)
-            ctx.is_weak_ma = si.get("has_weak_ma_text", False)
-            ctx.change_pct = si.get("change_pct", 0) * 100
-            ctx.hist_df = None
-            # 临时建议，稍后被批量建议覆盖
-            advice = pos_mgr.get_unified_advice(ctx, si["final_score"], si.get("display",{}).get("risk_str",""))
-            if not advice:
-                advice = "持有"
             position_rows.append({
                 "name": si.get("display",{}).get("name",""),
                 "code": si.get("display",{}).get("code",""),
@@ -170,11 +146,11 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "profit_pct": profit_pct,
                 "change": change_str,
                 "score": si["final_score"],
-                "advice": advice
+                "advice": ""
             })
+            position_change_map[si.get("display",{}).get("code","")] = change_str
 
-    # ---------- 趋势扫描：生成候选（只用于AI的输入，不直接显示） ----------
-    # 放宽条件参数
+    # ---------- 趋势扫描候选生成 ----------
     BUY_MAX_COUNT = 6
     BUY_LOW_PROFIT_MIN = 0.02
     BUY_LOW_PROFIT_MAX = 0.35
@@ -199,13 +175,11 @@ def run_batch_analysis(api_key=None, target_code=None):
     SELL_INCLUDE_WEAK_MA = True
     SELL_INCLUDE_CLEAR_STOP = True
 
-    # 辅助转换numpy类型
     def to_py_bool(val):
         return bool(val) if isinstance(val, (bool, np.bool_)) else val
     def to_py_float(val):
         return float(val) if isinstance(val, (float, np.floating)) else val
 
-    # 右侧买入候选（仅未持仓）
     right_buy_indices = select_trend_buy(
         scan_info_list,
         max_count=BUY_MAX_COUNT,
@@ -218,7 +192,6 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     right_buy_indices = [idx for idx in right_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
 
-    # 左侧买入候选（仅未持仓）
     left_buy_indices = select_left_buy(
         scan_info_list,
         max_count=LEFT_MAX_COUNT,
@@ -233,7 +206,6 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     left_buy_indices = [idx for idx in left_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
 
-    # 卖出候选（仅持仓）
     sell_indices = select_trend_sell(
         scan_info_list,
         max_count=SELL_MAX_COUNT,
@@ -245,30 +217,26 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     sell_indices = [idx for idx in sell_indices if scan_info_list[idx].get("shares", 0) > 0]
 
-    # 构建用于AI的候选字典（去重）
+    # 构建用于AI的候选字典
     all_need_recommend = {}
-    # 先添加所有持仓的ETF
     for si in scan_info_list:
         if si.get("shares", 0) > 0:
             code = si["display"]["code"]
             all_need_recommend[code] = si
-    # 添加买入候选
     for idx in right_buy_indices + left_buy_indices:
         si = scan_info_list[idx]
         code = si["display"]["code"]
         if code not in all_need_recommend:
             all_need_recommend[code] = si
-    # 添加卖出候选
     for idx in sell_indices:
         si = scan_info_list[idx]
         code = si["display"]["code"]
         if code not in all_need_recommend:
             all_need_recommend[code] = si
 
-    # 调用AI批量生成建议
+    # 仅AI调用，无后备规则
     batch_advice = {}
     if ai_client and AI_ENABLE:
-        # 准备数据（转换numpy类型）
         etf_dict_for_ai = {}
         for code, si in all_need_recommend.items():
             d = si["display"]
@@ -287,34 +255,8 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "change_pct_display": d["change_pct"]
             }
         batch_advice = ai_client.get_batch_recommendations(etf_dict_for_ai, env["state"])
-    else:
-        # 后备：简单规则
-        for code, si in all_need_recommend.items():
-            shares = si.get("shares", 0)
-            score = si["final_score"]
-            if shares == 0:
-                if score >= 70:
-                    batch_advice[code] = "🔥 大量买入"
-                elif score >= 50:
-                    batch_advice[code] = "📈 适量买入"
-                else:
-                    batch_advice[code] = "观望"
-            else:
-                if score <= 40:
-                    batch_advice[code] = "止损卖出"
-                elif score <= 55:
-                    batch_advice[code] = "减仓30%"
-                elif score >= 80:
-                    batch_advice[code] = "持有不动"
-                else:
-                    batch_advice[code] = "持有"
 
-    # 创建 map 便于查询持仓变化
-    position_change_map = {}
-    for row in position_rows:
-        position_change_map[row["code"]] = row.get("change", "")
-
-    # 更新持仓表格的建议（如果今日已减仓且建议是减仓/卖出，则改为已执行）
+    # 更新持仓表格建议
     for row in position_rows:
         code = row["code"]
         if code in batch_advice:
@@ -326,11 +268,10 @@ def run_batch_analysis(api_key=None, target_code=None):
             else:
                 row["advice"] = original_advice
 
-    # 打印持仓表格
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 构建趋势扫描显示：买入建议（未持仓）和卖出建议（持仓，且今日未减仓）
+    # 趋势扫描显示
     buy_rows = []
     sell_rows = []
     for code, advice_text in batch_advice.items():
@@ -341,7 +282,6 @@ def run_batch_analysis(api_key=None, target_code=None):
         is_holding = si.get("shares", 0) > 0
         change_str = position_change_map.get(code, "")
         is_reduced_today = change_str.startswith("-") if change_str else False
-        # 买入建议
         if not is_holding and any(kw in advice_text for kw in ["买入", "吸筹", "低吸"]):
             buy_rows.append({
                 "name": d["name"],
@@ -351,7 +291,6 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "final_score": si["final_score"],
                 "advice": advice_text
             })
-        # 卖出建议：仅持仓且今日未减仓才显示
         elif is_holding and any(kw in advice_text for kw in ["卖出", "止损", "止盈", "减仓", "清仓"]):
             if not is_reduced_today:
                 sell_rows.append({
@@ -362,9 +301,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                     "final_score": si["final_score"],
                     "advice": advice_text
                 })
-        # 其他（持有或无建议）不显示
 
-    # 排序
     buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
     sell_rows.sort(key=lambda x: x["final_score"], reverse=True)
 
