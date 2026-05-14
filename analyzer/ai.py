@@ -3,6 +3,8 @@
 """AI 功能集中模块：单只点评、仓位建议、买入力度、趋势扫描、历史分析"""
 import time
 import logging
+import json
+import numpy as np
 import openai
 from typing import List, Dict, Optional, Any
 from .config import AI_CACHE_TTL, AI_ENABLE
@@ -13,7 +15,6 @@ class AIClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-        # 趋势扫描缓存
         self._trend_cache = {"result": None, "timestamp": 0}
 
     @staticmethod
@@ -21,7 +22,7 @@ class AIClient:
         content = getattr(resp.choices[0].message, "content", None)
         return content.strip() if isinstance(content, str) and content.strip() else ""
 
-    # ========== 单只ETF点评（保留用于详细报告） ==========
+    # ========== 单只ETF点评 ==========
     def comment_on_etf(self, code: str, name: str, final_score: float,
                        action_level: str, market_state: str, market_factor: float,
                        tmsv: float, atr_pct: float,
@@ -75,11 +76,8 @@ TMSV复合强度：{tmsv:.1f}  ATR波动率：{atr_pct*100:.2f}%
             logger.error(f"AI评论生成失败: {e}")
             return "（AI评论生成失败）"
 
-    
-    
     # ========== 仓位管理建议（单个ETF） ==========
     def get_position_advice(self, ctx, final_score: float, risk_str: str) -> str:
-        """根据持仓、技术指标生成仓位操作建议（加仓/减仓/持有/止盈/止损）"""
         if ctx.shares <= 0 or ctx.cost_price is None or ctx.real_price is None:
             return ""
         profit_pct = (ctx.real_price - ctx.cost_price) / ctx.cost_price * 100
@@ -98,8 +96,7 @@ ETF：{ctx.name}
 综合评分：{final_score:.1f}（{level}）
 技术信号：RSI {ctx.rsi}，量比{vol_ratio:.2f}，MACD{macd_status}
 风险标签：{risk_str}
-输出格式示例："加仓20%"或"减仓30%止盈"或"止损卖出"或"持有不动"。”
-"""
+输出格式示例："加仓20%"或"减仓30%止盈"或"止损卖出"或"持有不动"。”"""
         try:
             resp = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -113,11 +110,8 @@ ETF：{ctx.name}
             logger.warning(f"AI仓位建议失败: {e}")
             return ""
 
-    
-    
     # ========== 买入力度建议（仅未持仓） ==========
     def get_buy_level(self, scan_info: dict) -> str:
-        """根据技术指标、评分生成买入力度建议（大量/适量/少量）"""
         score = scan_info.get("final_score", 0)
         rsi = scan_info.get("rsi", 50)
         vol_ratio = scan_info.get("vol_ratio", 1.0)
@@ -153,36 +147,44 @@ RSI：{rsi:.0f}
             logger.warning(f"AI买入力度建议失败: {e}")
             return ""
 
-    
-    
-    # ========== 趋势扫描综合推荐（带缓存） ==========
+    # ========== 趋势扫描综合推荐（增强版，输出买入/卖出程度） ==========
     def get_trend_recommendations(self, buy_candidates: List[Dict], sell_candidates: List[Dict],
-                                market_state: str) -> Dict[str, List]:
+                                  market_state: str) -> Dict[str, List]:
         """
         输入：buy_candidates（经过硬指标筛选的买入候选，已包含type字段），
-            sell_candidates（经过硬指标筛选的卖出候选）
+              sell_candidates（经过硬指标筛选的卖出候选，仅含持仓ETF）
         输出：{"buy": [{"code":..., "direction":..., "advice_text":...}],
-            "sell": [{"code":..., "advice_text":...}]}
+              "sell": [{"code":..., "advice_text":...}]}
+        其中 advice_text 只包含买入/卖出程度，不涉及具体仓位百分比。
         """
         if not AI_ENABLE:
             return {"buy": [], "sell": []}
-        # 缓存检查
         now = time.time()
         if now - self._trend_cache["timestamp"] < AI_CACHE_TTL:
             return self._trend_cache["result"]
         
-        # 构建精简JSON
+        # 辅助函数：安全转换为JSON可序列化类型
+        def make_json_safe(obj):
+            if isinstance(obj, (np.integer, np.floating)):
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return obj
+
         buy_json = []
         for e in buy_candidates:
             buy_json.append({
                 "code": e["code"],
                 "name": e["name"],
-                "score": e["final_score"],
-                "rsi": e["rsi"],
-                "vol_ratio": e.get("vol_ratio", 1.0),
-                "change": e["change_pct"],
-                "above_ma": e["above_ma"],
-                "low_rise": e.get("profit_pct_from_low", 0),
+                "score": make_json_safe(e["final_score"]),
+                "rsi": make_json_safe(e["rsi"]),
+                "vol_ratio": make_json_safe(e.get("vol_ratio", 1.0)),
+                "change": make_json_safe(e["change_pct"]),
+                "above_ma": make_json_safe(e["above_ma"]),
+                "low_rise": make_json_safe(e.get("profit_pct_from_low", 0)),
                 "type": e.get("type", "right")
             })
         sell_json = []
@@ -190,68 +192,154 @@ RSI：{rsi:.0f}
             sell_json.append({
                 "code": e["code"],
                 "name": e["name"],
-                "score": e["final_score"],
-                "rsi": e["rsi"],
-                "change": e["change_pct"],
-                "weak_ma": e.get("weak_ma", False)
+                "score": make_json_safe(e["final_score"]),
+                "rsi": make_json_safe(e["rsi"]),
+                "change": make_json_safe(e["change_pct"]),
+                "weak_ma": make_json_safe(e.get("weak_ma", False))
             })
         
         prompt = f"""你是量化交易策略师。以下候选列表已经过硬指标筛选，请从中选择并输出最终推荐。
 
-    市场状态：{market_state}
+市场状态：{market_state}
 
-    买入候选（已按右侧/左侧分类，需从每类中选最多2个，总数不超过4个）：
-    {str(buy_json)[:3000]}
+买入候选（已按右侧/左侧分类，需从每类中选**至少1个**，总数不超过4个）：
+{json.dumps(buy_json, ensure_ascii=False)[:3000]}
 
-    卖出候选（已按风险指标筛选，最多选3个）：
-    {str(sell_json)[:2000]}
+卖出候选（已按风险指标筛选，最多选3个）：
+{json.dumps(sell_json, ensure_ascii=False)[:2000]}
 
-    要求：
-    1. 对于买入，必须保留原候选中的 `type` 字段，并在 `direction` 中使用 `right_buy` 或 `left_buy`。
-    2. 对于卖出，直接输出 `sell`。
-    3. 同一只ETF不得同时出现在买入和卖出。
-    4. 输出JSON格式，不要有其他文字。
+要求：
+1. 对于买入，必须保留原候选中的 `type` 字段，并在 `direction` 中使用 `right_buy` 或 `left_buy`。
+2. 对于卖出，直接输出 `sell`。
+3. 同一只ETF不得同时出现在买入和卖出。
+4. **输出格式要求**：
+   - 买入建议的 `advice_text` 只包含买入力度等级，格式为："🔥 大量买入" 或 "📈 适量买入" 或 "💡 少量买入"，不要包含百分比仓位。
+   - 卖出建议的 `advice_text` 包含卖出程度，格式为："❗ 强烈卖出" 或 "⚠️ 减仓" 或 "🔻 止盈" 等，不要包含百分比仓位。
+5. 输出JSON格式，不要有其他文字。
 
-    输出示例：
-    {{
-    "buy": [
-        {{"code": "sz.159611", "direction": "right_buy", "advice_text": "🔥 右侧买入，放量突破"}},
-        {{"code": "sh.513210", "direction": "left_buy", "advice_text": "📉 左侧低吸，RSI超卖"}}
-    ],
-    "sell": [
-        {{"code": "sh.512800", "advice_text": "❗ 卖出，连续低分"}}
-    ]
-    }}"""
+输出示例：
+{{
+"buy": [
+    {{"code": "sz.159611", "direction": "right_buy", "advice_text": "🔥 大量买入"}},
+    {{"code": "sh.513210", "direction": "left_buy", "advice_text": "📈 适量买入"}}
+],
+"sell": [
+    {{"code": "sh.512800", "advice_text": "❗ 强烈卖出"}}
+]
+}}"""
         try:
             resp = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800,
-                temperature=0.1,   # 低随机性
+                temperature=0.1,
                 timeout=15,
             )
             content = self._extract_content(resp)
-            import json
-            # 提取JSON
             if content.startswith("```json"):
                 content = content[7:]
             if content.endswith("```"):
                 content = content[:-3]
             result = json.loads(content)
+            if "buy" not in result:
+                result["buy"] = []
+            if "sell" not in result:
+                result["sell"] = []
             self._trend_cache = {"result": result, "timestamp": now}
             return result
         except Exception as e:
             logger.error(f"AI趋势扫描失败: {e}")
-            return {"buy": [], "sell": []}    
+            return {"buy": [], "sell": []}
     
 
 
+    # ========== 趋势扫描综合推荐 持仓和推荐同时判断 ==========
+    def get_batch_recommendations(self, etf_dict: Dict[str, Dict], market_state: str) -> Dict[str, str]:
+        """
+        批量生成ETF操作建议
+        输入：etf_dict = {code: {"name":..., "final_score":..., "rsi":..., "vol_ratio":..., 
+                                "change_pct":..., "above_ma":..., "profit_pct_from_low":...,
+                                "shares":..., "cost_price":..., "risk_str":..., "price":...,
+                                "change_pct_display":...}}
+        输出：{code: advice_text}
+        """
+        if not AI_ENABLE:
+            return {}
+        
+        # 构建请求数据
+        items = []
+        for code, info in etf_dict.items():
+            items.append({
+                "code": code,
+                "name": info["name"],
+                "score": info["final_score"],
+                "rsi": info["rsi"],
+                "vol_ratio": info["vol_ratio"],
+                "change": info["change_pct"],
+                "above_ma": info["above_ma"],
+                "low_rise": info["profit_pct_from_low"],
+                "shares": info["shares"],
+                "cost_price": info.get("cost_price"),
+                "risk_str": info.get("risk_str", ""),
+                "price": info["price"],
+                "change_pct_display": info["change_pct_display"]
+            })
+        
+        prompt = f"""你是ETF投资顾问。以下列表包含当前**持仓**或**值得关注**的ETF。请为每个ETF给出**唯一一个**操作建议，要求：
 
+    **规则**：
+    - 对于**未持仓**（shares=0）的ETF，建议从以下选择：  
+    "🔥 大量买入"、"📈 适量买入"、"💡 少量买入"、"观望"  
+    根据评分、RSI、量比、是否站上均线、低点涨幅综合判断。
+    - 对于**已持仓**（shares>0）的ETF，建议从以下选择：  
+    "加仓20%"、"减仓30%"、"持有不动"、"止损卖出"、"清仓止盈"  
+    结合持仓盈亏（可算出）、风险标签、评分高低给出合理建议。
+    - 如果风险标签中包含"止损"、"止盈"、"连续低分"等，应优先给出相应建议。
+
+    市场状态：{market_state}
+
+    ETF列表：
+    {json.dumps(items, ensure_ascii=False, indent=2)[:4000]}
+
+    输出格式：JSON对象，键为代码，值为建议文本。
+
+    示例：
+    {{
+        "sz.159611": "🔥 大量买入",
+        "sh.515790": "持有不动",
+        "sh.512800": "止损卖出",
+        "sz.159583": "📈 适量买入"
+    }}
+    """
+        try:
+            resp = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0.2,
+                timeout=20,
+            )
+            content = self._extract_content(resp)
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            result = json.loads(content)
+            # 确保返回字典
+            if isinstance(result, dict):
+                return result
+            else:
+                logger.warning(f"批量建议返回格式错误: {result}")
+                return {}
+        except Exception as e:
+            logger.error(f"批量建议生成失败: {e}")
+            return {}
 
     
-    # ========== 历史持仓分析（供后续扩展） ==========
+    
+    
+    # ========== 历史持仓分析 ==========
     def analyze_position_history(self, code: str, name: str, history: List[Dict]) -> str:
-        """分析单个ETF的历史持仓变化，输出中长线评价及优化建议"""
         if not AI_ENABLE or not history:
             return ""
         prompt = f"""你是量化策略分析师。根据以下ETF的历史持仓变化（每日份额、成本），分析中长线逻辑是否合理，并给出优化建议。

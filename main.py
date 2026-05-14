@@ -11,6 +11,7 @@ import os
 from typing import Optional
 
 import pandas as pd
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 from analyzer.data_layer import DataLayer
@@ -19,6 +20,7 @@ from analyzer.ai import AIClient
 from analyzer.data_layer import PositionManager
 from analyzer.config import *
 from analyzer.utils import print_unified_table, resolve_real_price
+from analyzer.trend_scanner import select_trend_buy, select_left_buy, select_trend_sell
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +157,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             ctx.is_weak_ma = si.get("has_weak_ma_text", False)
             ctx.change_pct = si.get("change_pct", 0) * 100
             ctx.hist_df = None
+            # 临时建议，稍后被批量建议覆盖
             advice = pos_mgr.get_unified_advice(ctx, si["final_score"], si.get("display",{}).get("risk_str",""))
             if not advice:
                 advice = "持有"
@@ -169,140 +172,198 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "score": si["final_score"],
                 "advice": advice
             })
+
+    # ---------- 趋势扫描：生成候选（只用于AI的输入，不直接显示） ----------
+    # 放宽条件参数
+    BUY_MAX_COUNT = 6
+    BUY_LOW_PROFIT_MIN = 0.02
+    BUY_LOW_PROFIT_MAX = 0.35
+    BUY_MAX_PULLBACK = 0.08
+    BUY_DAILY_GAIN_MIN = 0.0
+    BUY_DAILY_GAIN_MAX = 0.09
+
+    LEFT_MAX_COUNT = 4
+    LEFT_DAILY_GAIN_MIN = -0.04
+    LEFT_DAILY_GAIN_MAX = 0.04
+    LEFT_LOW_PROFIT_MIN = 0.0
+    LEFT_LOW_PROFIT_MAX = 0.12
+    LEFT_MAX_PULLBACK = 0.10
+    LEFT_MIN_SCORE = 45
+    LEFT_RSI_MAX = 55
+    LEFT_REQUIRE_BELOW_MA = False
+
+    SELL_MAX_COUNT = 5
+    SELL_MIN_DAILY_LOSS = -0.02
+    SELL_MIN_PULLBACK = 0.05
+    SELL_MIN_LOW_PROFIT = 0.15
+    SELL_INCLUDE_WEAK_MA = True
+    SELL_INCLUDE_CLEAR_STOP = True
+
+    # 辅助转换numpy类型
+    def to_py_bool(val):
+        return bool(val) if isinstance(val, (bool, np.bool_)) else val
+    def to_py_float(val):
+        return float(val) if isinstance(val, (float, np.floating)) else val
+
+    # 右侧买入候选（仅未持仓）
+    right_buy_indices = select_trend_buy(
+        scan_info_list,
+        max_count=BUY_MAX_COUNT,
+        low_profit_min=BUY_LOW_PROFIT_MIN,
+        low_profit_max=BUY_LOW_PROFIT_MAX,
+        max_pullback=BUY_MAX_PULLBACK,
+        daily_gain_min=BUY_DAILY_GAIN_MIN,
+        daily_gain_max=BUY_DAILY_GAIN_MAX,
+        prefer_signal=True
+    )
+    right_buy_indices = [idx for idx in right_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
+
+    # 左侧买入候选（仅未持仓）
+    left_buy_indices = select_left_buy(
+        scan_info_list,
+        max_count=LEFT_MAX_COUNT,
+        daily_gain_min=LEFT_DAILY_GAIN_MIN,
+        daily_gain_max=LEFT_DAILY_GAIN_MAX,
+        low_profit_min=LEFT_LOW_PROFIT_MIN,
+        low_profit_max=LEFT_LOW_PROFIT_MAX,
+        max_pullback=LEFT_MAX_PULLBACK,
+        min_score=LEFT_MIN_SCORE,
+        rsi_max=LEFT_RSI_MAX,
+        require_below_ma=LEFT_REQUIRE_BELOW_MA
+    )
+    left_buy_indices = [idx for idx in left_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
+
+    # 卖出候选（仅持仓）
+    sell_indices = select_trend_sell(
+        scan_info_list,
+        max_count=SELL_MAX_COUNT,
+        min_daily_loss=SELL_MIN_DAILY_LOSS,
+        min_pullback=SELL_MIN_PULLBACK,
+        min_low_profit=SELL_MIN_LOW_PROFIT,
+        include_weak_ma=SELL_INCLUDE_WEAK_MA,
+        include_clear_stop=SELL_INCLUDE_CLEAR_STOP
+    )
+    sell_indices = [idx for idx in sell_indices if scan_info_list[idx].get("shares", 0) > 0]
+
+    # 构建用于AI的候选字典（去重）
+    all_need_recommend = {}
+    # 先添加所有持仓的ETF
+    for si in scan_info_list:
+        if si.get("shares", 0) > 0:
+            code = si["display"]["code"]
+            all_need_recommend[code] = si
+    # 添加买入候选
+    for idx in right_buy_indices + left_buy_indices:
+        si = scan_info_list[idx]
+        code = si["display"]["code"]
+        if code not in all_need_recommend:
+            all_need_recommend[code] = si
+    # 添加卖出候选
+    for idx in sell_indices:
+        si = scan_info_list[idx]
+        code = si["display"]["code"]
+        if code not in all_need_recommend:
+            all_need_recommend[code] = si
+
+    # 调用AI批量生成建议
+    batch_advice = {}
+    if ai_client and AI_ENABLE:
+        # 准备数据（转换numpy类型）
+        etf_dict_for_ai = {}
+        for code, si in all_need_recommend.items():
+            d = si["display"]
+            etf_dict_for_ai[code] = {
+                "name": d["name"],
+                "final_score": to_py_float(si["final_score"]),
+                "rsi": to_py_float(si.get("rsi", 50)),
+                "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
+                "change_pct": to_py_float(si.get("change_pct", 0)),
+                "above_ma": to_py_bool(si.get("above_ma", False)),
+                "profit_pct_from_low": to_py_float(si.get("profit_pct_from_low", 0)),
+                "shares": si.get("shares", 0),
+                "cost_price": si.get("cost_price"),
+                "risk_str": d.get("risk_str", ""),
+                "price": d["price"],
+                "change_pct_display": d["change_pct"]
+            }
+        batch_advice = ai_client.get_batch_recommendations(etf_dict_for_ai, env["state"])
+    else:
+        # 后备：简单规则
+        for code, si in all_need_recommend.items():
+            shares = si.get("shares", 0)
+            score = si["final_score"]
+            if shares == 0:
+                if score >= 70:
+                    batch_advice[code] = "🔥 大量买入"
+                elif score >= 50:
+                    batch_advice[code] = "📈 适量买入"
+                else:
+                    batch_advice[code] = "观望"
+            else:
+                if score <= 30:
+                    batch_advice[code] = "止损卖出"
+                elif score <= 45:
+                    batch_advice[code] = "减仓30%"
+                elif score >= 80:
+                    batch_advice[code] = "持有不动"
+                else:
+                    batch_advice[code] = "持有"
+
+    # 更新持仓表格的建议
+    for row in position_rows:
+        code = row["code"]
+        if code in batch_advice:
+            row["advice"] = batch_advice[code]
+
+    # 打印持仓表格
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # ---------- 趋势扫描：硬指标筛选 + AI 精选 ----------
-    buy_candidates = []   # 右侧买入候选
-    left_candidates = []  # 左侧买入候选
-    sell_candidates = []
-
-    for si in scan_info_list:
-        code = si.get("display", {}).get("code", "")
-        name = si.get("display", {}).get("name", "")
-        score = si["final_score"]
-        rsi = si.get("rsi", 50)
-        vol_ratio = si.get("vol_ratio", 1.0)
-        change = si.get("change_pct", 0)
-        above_ma = si.get("above_ma", False)
-        low_rise = si.get("profit_pct_from_low", 0)
-        pullback = si.get("max_drawdown_pct", 0)
-        weak_ma = si.get("has_weak_ma_text", False)
-        clear_stop = si.get("has_clear_stop_text", False)
-        strong_sell = si.get("has_strong_sell_text", False)
-
-        # 买入候选：未持仓
-        if si.get("shares", 0) == 0:
-            # 右侧买入硬指标
-            if (score >= 70 and rsi >= 50 and vol_ratio >= 1.2 and above_ma and change >= 0.005):
-                buy_candidates.append({
-                    "code": code, "name": name, "final_score": score, "rsi": rsi,
-                    "vol_ratio": vol_ratio, "change_pct": change, "above_ma": above_ma,
-                    "profit_pct_from_low": low_rise, "max_drawdown_pct": pullback,
-                    "type": "right"
-                })
-            # 左侧买入硬指标
-            elif (score >= 50 and rsi < 40 and not above_ma and low_rise < 0.08 and pullback < 0.05):
-                left_candidates.append({
-                    "code": code, "name": name, "final_score": score, "rsi": rsi,
-                    "vol_ratio": vol_ratio, "change_pct": change, "above_ma": above_ma,
-                    "profit_pct_from_low": low_rise, "max_drawdown_pct": pullback,
-                    "type": "left"
-                })
-
-        # 卖出候选：所有ETF，满足硬指标
-        sell_conditions = [
-            score < 40,
-            (rsi > 80 and vol_ratio < 0.8),   # 超买缩量
-            weak_ma and change < -0.01,
-            clear_stop or strong_sell,
-            (change < -0.03 and low_rise > 0.15)  # 高位大跌
-        ]
-        if any(sell_conditions):
-            sell_candidates.append({
-                "code": code, "name": name, "final_score": score, "rsi": rsi,
-                "change_pct": change, "weak_ma": weak_ma, "clear_stop": clear_stop,
-                "strong_sell": strong_sell
-            })
-
-    # 按评分排序，保证确定性
-    buy_candidates.sort(key=lambda x: x["final_score"], reverse=True)
-    left_candidates.sort(key=lambda x: x["final_score"], reverse=True)
-    sell_candidates.sort(key=lambda x: x["final_score"], reverse=True)
-
-    # 限制数量
-    buy_candidates = buy_candidates[:4]
-    left_candidates = left_candidates[:2]
-    sell_candidates = sell_candidates[:3]
-
-    # 合并买入候选（先右侧后左侧）
-    all_buy_candidates = buy_candidates + left_candidates
-
-    trend_result = {"buy": [], "sell": []}
-    if ai_client and AI_ENABLE:
-        trend_result = ai_client.get_trend_recommendations(all_buy_candidates, sell_candidates, env["state"])
-
-    # 后备：如果AI没有返回或失败，使用硬编码规则
-    if not trend_result["buy"] and not trend_result["sell"]:
-        buy_codes = set()
-        for cand in buy_candidates[:2]:
-            code = cand["code"]
-            if code not in buy_codes:
-                buy_codes.add(code)
-                trend_result["buy"].append({"code": code, "direction": "right_buy", "advice_text": "🔥 右侧买入"})
-        for cand in left_candidates[:2]:
-            code = cand["code"]
-            if code not in buy_codes:
-                buy_codes.add(code)
-                trend_result["buy"].append({"code": code, "direction": "left_buy", "advice_text": "📉 左侧低吸"})
-        for cand in sell_candidates[:3]:
-            code = cand["code"]
-            if code not in buy_codes:
-                trend_result["sell"].append({"code": code, "advice_text": "❗ 卖出信号"})
-
-    # 强制互斥：删除卖出中与买入重复的
-    buy_codes_final = {rec["code"] for rec in trend_result.get("buy", [])}
-    trend_result["sell"] = [rec for rec in trend_result.get("sell", []) if rec["code"] not in buy_codes_final]
-
-    # 构建趋势扫描行
+    # 构建趋势扫描显示：买入建议（未持仓）和卖出建议（持仓）
     buy_rows = []
     sell_rows = []
-    for rec in trend_result.get("buy", []):
-        code = rec["code"]
-        si = next((s for s in scan_info_list if s.get("display",{}).get("code")==code), None)
-        if si:
-            d = si["display"]
+    for code, advice_text in batch_advice.items():
+        if code not in all_need_recommend:
+            continue
+        si = all_need_recommend[code]
+        d = si["display"]
+        is_holding = si.get("shares", 0) > 0
+        # 判断买入建议
+        if not is_holding and any(kw in advice_text for kw in ["买入", "吸筹", "低吸"]):
             buy_rows.append({
                 "name": d["name"],
                 "code": d["code"],
                 "price": d["price"],
                 "change_pct": d["change_pct"],
                 "final_score": si["final_score"],
-                "advice": rec["advice_text"]
+                "advice": advice_text
             })
-    for rec in trend_result.get("sell", []):
-        code = rec["code"]
-        si = next((s for s in scan_info_list if s.get("display",{}).get("code")==code), None)
-        if si:
-            d = si["display"]
+        # 判断卖出建议
+        elif is_holding and any(kw in advice_text for kw in ["卖出", "止损", "止盈", "减仓", "清仓"]):
             sell_rows.append({
                 "name": d["name"],
                 "code": d["code"],
                 "price": d["price"],
                 "change_pct": d["change_pct"],
                 "final_score": si["final_score"],
-                "advice": rec["advice_text"]
+                "advice": advice_text
             })
-    
+        # 其他（持有或无建议）不显示
+
+    # 排序（按评分降序）
+    buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
+    sell_rows.sort(key=lambda x: x["final_score"], reverse=True)
+
     if buy_rows:
-        print_unified_table(buy_rows, title="📊 [趋势扫描] 综合推荐", table_type="trend")
+        print_unified_table(buy_rows, title="📊 [趋势扫描] 买入推荐", table_type="trend")
     if buy_rows and sell_rows:
-        print("-" * 90)
+        print()
     if sell_rows:
-        print_unified_table(sell_rows, table_type="trend", print_header=False)  # 无标题且无表头
+        print_unified_table(sell_rows, title="📊 [趋势扫描] 卖出警示", table_type="trend")
 
     dl.save_state(state)
     dl.logout()
+
 
 def main():
     parser = argparse.ArgumentParser(description="ETF智能分析系统")
@@ -310,6 +371,7 @@ def main():
     args = parser.parse_args()
     api_key = os.getenv("DEEPSEEK_API_KEY")
     run_batch_analysis(api_key=api_key, target_code=args.code)
+
 
 if __name__ == "__main__":
     main()

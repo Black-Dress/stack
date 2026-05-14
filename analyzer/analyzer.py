@@ -354,20 +354,43 @@ class DataAnalyzer:
                 labels.append("🛑 连续低分")
         return " ".join(labels)
 
-    def get_action(self, score, score_history):
-        hist_scores = [s["score"] for s in score_history]
+    def get_action(self, score, score_history, current_date=None):
+        """
+        current_date: datetime.date 对象，用于识别今天的记录
+        如果未提供，则回退到原有逻辑（但建议总是传入）
+        """
+        # 提取所有历史评分，按日期排序
+        hist_with_dates = sorted(score_history, key=lambda x: x["date"])
+        hist_scores = [item["score"] for item in hist_with_dates]
+        
         buy_thresh = self.params["BUY_THRESHOLD"]
         sell_thresh = self.params["SELL_THRESHOLD"]
+        
         def _get_level(s):
             for th, lvl in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
                 if s >= th:
                     return lvl
             return ACTION_LEVEL_NAMES[-1]
+        
         level = _get_level(score)
+        
+        # 快速买入信号：需要至少一个历史评分，且该评分不是今天的
         if QUICK_BUY_ENABLE and len(hist_scores) >= 1:
-            prev_score = hist_scores[-1]
-            if score >= QUICK_BUY_THRESHOLD and (score - prev_score) >= QUICK_BUY_SCORE_INCREASE:
+            # 如果提供了 current_date，则过滤掉今天的记录
+            if current_date is not None:
+                prev_items = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
+                if prev_items:
+                    prev_score = prev_items[-1]["score"]
+                else:
+                    prev_score = None
+            else:
+                # 兼容未传日期：取最后一个（但可能有今天的记录，错误风险高）
+                prev_score = hist_scores[-1]
+            
+            if prev_score is not None and score >= QUICK_BUY_THRESHOLD and (score - prev_score) >= QUICK_BUY_SCORE_INCREASE:
                 return "BUY", level
+        
+        # 信号确认逻辑（保持不变）
         if len(hist_scores) < self.params["CONFIRM_DAYS"]:
             if score > buy_thresh:
                 return "BUY", level
@@ -375,8 +398,16 @@ class DataAnalyzer:
                 return "SELL", level
             else:
                 return "HOLD", level
+        
         confirm_days = self.params["CONFIRM_DAYS"]
-        recent = hist_scores[-confirm_days:]
+        # 注意：这里取最近 confirm_days 条记录时，需要排除今天的记录（如果 current_date 存在）
+        if current_date is not None:
+            # 取最近的历史记录（不含今天）
+            recent_hist = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
+            recent = [item["score"] for item in recent_hist[-confirm_days:]]
+        else:
+            recent = hist_scores[-confirm_days:]
+        
         if SIGNAL_CONFIRM_MODE == "strict":
             if score > buy_thresh and all(s > buy_thresh for s in recent):
                 return "BUY", level
@@ -389,12 +420,14 @@ class DataAnalyzer:
             if score < sell_thresh and sum(1 for s in recent if s < sell_thresh) >= needed:
                 return "SELL", level
         elif SIGNAL_CONFIRM_MODE == "trend_break":
-            if score > buy_thresh and all(recent[i] < recent[i+1] for i in range(len(recent)-1)) and recent[-1] > buy_thresh:
-                return "BUY", level
-            if score < sell_thresh and all(recent[i] > recent[i+1] for i in range(len(recent)-1)) and recent[-1] < sell_thresh:
-                return "SELL", level
+            if len(recent) >= 2:
+                if score > buy_thresh and all(recent[i] < recent[i+1] for i in range(len(recent)-1)) and recent[-1] > buy_thresh:
+                    return "BUY", level
+                if score < sell_thresh and all(recent[i] > recent[i+1] for i in range(len(recent)-1)) and recent[-1] < sell_thresh:
+                    return "SELL", level
         return "HOLD", level
-
+    
+    
     def _apply_cost_based_overrides(self, action, action_level, ctx):
         if not USE_COST_BASED_OVERRIDE or ctx.cost_price is None or ctx.real_price is None:
             return action, action_level
@@ -424,6 +457,8 @@ class DataAnalyzer:
 
         final = ctx.final_score
         today_str = today.strftime("%Y-%m-%d")
+        action, action_level = self.get_action(final, state.get("score_history", []), current_date=today)
+
         if "score_history" not in state:
             state["score_history"] = []
         found = False
@@ -436,7 +471,7 @@ class DataAnalyzer:
             state["score_history"].append({"date": today_str, "score": final})
         state["score_history"].sort(key=lambda x: x["date"])
 
-        action, action_level = self.get_action(final, state["score_history"])
+        
         if cost_price is not None:
             action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
         else:
@@ -485,7 +520,7 @@ class DataAnalyzer:
             return f"【{name} ({code})】{ctx.error}，无法分析。"
 
         final = ctx.final_score
-        action, action_level = self.get_action(final, state.get("score_history", []))
+        action, action_level = self.get_action(final, state.get("score_history", []), current_date=today)
         if cost_price is not None:
             action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
         else:

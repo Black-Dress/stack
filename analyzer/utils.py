@@ -9,15 +9,13 @@ from typing import Dict, Tuple, Optional
 from .config import *
 
 def get_display_width(text):
-    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(text))
+    return sum(2 if unicodedata.east_asian_width(ch) in "WFA" else 1 for ch in str(text))
 
 def pad_display(text, width, align="left"):
     text = str(text)
     cur = get_display_width(text)
     if cur >= width:
-        # 如果内容过长，截断并添加省略号
         if cur > width:
-            # 尝试截断
             truncated = ""
             for ch in text:
                 if get_display_width(truncated + ch) <= width - 2:
@@ -47,7 +45,6 @@ def cap(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 def resolve_real_price(real_price: Optional[float], hist_df: Optional[pd.DataFrame]) -> Tuple[Optional[float], bool]:
-    """如果实时价不可用，则使用前一日收盘价回退。"""
     if real_price is not None:
         return real_price, False
     if hist_df is not None and not hist_df.empty:
@@ -98,28 +95,25 @@ def calculate_adx(df, period=14) -> pd.DataFrame:
 
 def print_unified_table(rows, title=None, env=None, today_str=None, table_type="main", print_header=True):
     """
-    统一表格打印函数
-    table_type: "main" - 主表格（特征标签）, "position" - 持仓表格, "trend" - 趋势扫描综合表格
-    print_header: 是否打印表头
+    统一表格打印函数，自动计算分隔线长度
     """
-    # 打印标题或报告头部
-    if title:
-        print(f"\n{'='*90}")
-        print(f"  {title}")
-        print(f"{'='*90}")
-    elif env is not None and today_str is not None:
+    # 打印主报告头部（带 = 装饰）
+    if env is not None and today_str is not None:
         print(f"\n{'='*90}")
         print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
         if env.get("risk_tip"):
             print(f"  {env['risk_tip']}")
-        print(f"{'='*90}")
-    # 如果都没有，则不打印任何头部
-
+        
+    elif title:
+        print(f"\n{title}")
+    
+    print(f"{'='*90}")
+    
     if not rows:
         print("  无数据")
         return
 
-    # 定义列宽和对齐方式
+    # 定义列配置
     if table_type == "main":
         cols = [
             ("名称", "name", DISPLAY_NAME_WIDTH, "left"),
@@ -153,16 +147,18 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
     else:
         raise ValueError(f"未知表格类型: {table_type}")
 
-    # 打印表头（根据列类型决定对齐方式）
+    # 计算表头字符串和实际宽度
+    header_parts = []
+    for col_name, col_key, width, align in cols:
+        header_parts.append(pad_display(col_name, width, align))
+    header_line = " ".join(header_parts)
+    total_width = get_display_width(header_line)
+    sep_line = "-" * total_width
+
+    # 打印表头
     if print_header:
-        header_parts = []
-        for col_name, col_key, width, align in cols:
-            header_parts.append(pad_display(col_name, width, align))
-        header_line = " ".join(header_parts)
         print(header_line)
-        # 计算总宽度（包括列之间的空格）
-        total_width = len(header_line)
-        print("-" * total_width)
+        print(sep_line)
 
     # 打印数据行
     for row in rows:
@@ -198,9 +194,6 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
                 val_str = str(val)
             row_parts.append(pad_display(val_str, width, align))
         print(" ".join(row_parts))
-
-
-
 
 def format_detailed_report(ctx, market, params, action_level, ai_comment, signal_action=None):
     lines = []

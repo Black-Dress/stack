@@ -49,9 +49,6 @@ def select_trend_buy(
     return [idx for _, idx in candidates[:max_count]]
 
 
-
-
-
 def select_trend_sell(
     scan_list: List[Dict],
     max_count: int = 3,
@@ -219,7 +216,6 @@ def evaluate_buy_level(scan_info: Dict) -> str:
     if cost_profit < -0.05 and score >= 50 and rsi is not None and rsi < 40:
         return "💡 少量买入"
     return ""
-
 
 
 
