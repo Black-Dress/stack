@@ -78,6 +78,7 @@ TMSV复合强度：{tmsv:.1f}  ATR波动率：{atr_pct*100:.2f}%
 
     # ========== 仓位管理建议（单个ETF） ==========
     def get_position_advice(self, ctx, final_score: float, risk_str: str) -> str:
+        """根据持仓、技术指标生成仓位操作建议（加仓/减仓/持有/止盈/止损），必须包含成本位置"""
         if ctx.shares <= 0 or ctx.cost_price is None or ctx.real_price is None:
             return ""
         profit_pct = (ctx.real_price - ctx.cost_price) / ctx.cost_price * 100
@@ -86,17 +87,22 @@ TMSV复合强度：{tmsv:.1f}  ATR波动率：{atr_pct*100:.2f}%
         macd_status = "金叉" if d is not None and d.get("macd_dif", 0) > d.get("macd_dea", 0) else "死叉"
         level = ""
         for th, lvl in zip([80,70,60,40,20,0,-20,-40,-60,-999],
-                           ["极强","强势","偏强","中性偏强","中性","中性偏弱","偏弱","弱势","极弱","极弱"]):
+                        ["极强","强势","偏强","中性偏强","中性","中性偏弱","偏弱","弱势","极弱","极弱"]):
             if final_score >= th:
                 level = lvl
                 break
-        prompt = f"""你是仓位管理专家。根据以下数据输出**具体操作建议**（20字内，必须含动作和比例或价格）：
-ETF：{ctx.name}
-持仓：{ctx.shares}份，成本{ctx.cost_price:.3f}，现价{ctx.real_price:.3f}，盈亏{profit_pct:.1f}%
-综合评分：{final_score:.1f}（{level}）
-技术信号：RSI {ctx.rsi}，量比{vol_ratio:.2f}，MACD{macd_status}
-风险标签：{risk_str}
-输出格式示例："加仓20%"或"减仓30%止盈"或"止损卖出"或"持有不动"。”"""
+        prompt = f"""你是仓位管理专家。根据以下数据输出**具体操作建议**（20字内），必须包含**成本价位**作为参考点，格式如示例：
+    ETF：{ctx.name}
+    持仓：{ctx.shares}份，成本{ctx.cost_price:.3f}，现价{ctx.real_price:.3f}，盈亏{profit_pct:.1f}%
+    综合评分：{final_score:.1f}（{level}）
+    技术信号：RSI {ctx.rsi}，量比{vol_ratio:.2f}，MACD{macd_status}
+    风险标签：{risk_str}
+    输出格式示例：
+    - "成本{ctx.cost_price:.3f}位置加仓20%"
+    - "成本{ctx.cost_price:.3f}位置减仓30%止盈"
+    - "成本{ctx.cost_price:.3f}位置止损卖出"
+    - "成本{ctx.cost_price:.3f}位置持有不动"
+    请输出建议。"""
         try:
             resp = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -109,7 +115,10 @@ ETF：{ctx.name}
         except Exception as e:
             logger.warning(f"AI仓位建议失败: {e}")
             return ""
-
+        
+    
+    
+    
     # ========== 买入力度建议（仅未持仓） ==========
     def get_buy_level(self, scan_info: dict) -> str:
         score = scan_info.get("final_score", 0)

@@ -300,26 +300,37 @@ def run_batch_analysis(api_key=None, target_code=None):
                 else:
                     batch_advice[code] = "观望"
             else:
-                if score <= 30:
+                if score <= 40:
                     batch_advice[code] = "止损卖出"
-                elif score <= 45:
+                elif score <= 55:
                     batch_advice[code] = "减仓30%"
                 elif score >= 80:
                     batch_advice[code] = "持有不动"
                 else:
                     batch_advice[code] = "持有"
 
-    # 更新持仓表格的建议
+    # 创建 map 便于查询持仓变化
+    position_change_map = {}
+    for row in position_rows:
+        position_change_map[row["code"]] = row.get("change", "")
+
+    # 更新持仓表格的建议（如果今日已减仓且建议是减仓/卖出，则改为已执行）
     for row in position_rows:
         code = row["code"]
         if code in batch_advice:
-            row["advice"] = batch_advice[code]
+            original_advice = batch_advice[code]
+            change_str = position_change_map.get(code, "")
+            is_reduced_today = change_str.startswith("-") if change_str else False
+            if is_reduced_today and any(kw in original_advice for kw in ["减仓", "卖出", "止损"]):
+                row["advice"] = "✅ 已执行减仓"
+            else:
+                row["advice"] = original_advice
 
     # 打印持仓表格
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 构建趋势扫描显示：买入建议（未持仓）和卖出建议（持仓）
+    # 构建趋势扫描显示：买入建议（未持仓）和卖出建议（持仓，且今日未减仓）
     buy_rows = []
     sell_rows = []
     for code, advice_text in batch_advice.items():
@@ -328,7 +339,9 @@ def run_batch_analysis(api_key=None, target_code=None):
         si = all_need_recommend[code]
         d = si["display"]
         is_holding = si.get("shares", 0) > 0
-        # 判断买入建议
+        change_str = position_change_map.get(code, "")
+        is_reduced_today = change_str.startswith("-") if change_str else False
+        # 买入建议
         if not is_holding and any(kw in advice_text for kw in ["买入", "吸筹", "低吸"]):
             buy_rows.append({
                 "name": d["name"],
@@ -338,19 +351,20 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "final_score": si["final_score"],
                 "advice": advice_text
             })
-        # 判断卖出建议
+        # 卖出建议：仅持仓且今日未减仓才显示
         elif is_holding and any(kw in advice_text for kw in ["卖出", "止损", "止盈", "减仓", "清仓"]):
-            sell_rows.append({
-                "name": d["name"],
-                "code": d["code"],
-                "price": d["price"],
-                "change_pct": d["change_pct"],
-                "final_score": si["final_score"],
-                "advice": advice_text
-            })
+            if not is_reduced_today:
+                sell_rows.append({
+                    "name": d["name"],
+                    "code": d["code"],
+                    "price": d["price"],
+                    "change_pct": d["change_pct"],
+                    "final_score": si["final_score"],
+                    "advice": advice_text
+                })
         # 其他（持有或无建议）不显示
 
-    # 排序（按评分降序）
+    # 排序
     buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
     sell_rows.sort(key=lambda x: x["final_score"], reverse=True)
 

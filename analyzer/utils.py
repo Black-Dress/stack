@@ -99,7 +99,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
     """
     # 打印主报告头部（带 = 装饰）
     if env is not None and today_str is not None:
-        print(f"\n{'='*90}")
+        print(f"\n{'='*120}")
         print(f"  ETF 分析报告 - {today_str}  市场状态: {env['state']}  环境因子: {env['factor']:.2f}")
         if env.get("risk_tip"):
             print(f"  {env['risk_tip']}")
@@ -107,7 +107,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
     elif title:
         print(f"\n{title}")
     
-    print(f"{'='*90}")
+    print(f"{'='*120}")
     
     if not rows:
         print("  无数据")
