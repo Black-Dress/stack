@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ETF 智能分析系统
-ATR仓位管理 + 全局仓位约束（按评分分配总仓位上限100%）
+ATR仓位管理 + 全局仓位约束 + 大盘环境对评分的统一折扣（影响评分、仓位分配、AI）
 趋势扫描使用5日涨跌幅 + 连续2日评分过滤
-删除卖出警示表格
 """
 import argparse
 import datetime
@@ -34,7 +33,7 @@ def calculate_atr_advice(
     shares: int,
     cost_price: Optional[float] = None,
     daily_change_shares: int = 0,
-    target_ratio: Optional[float] = None,   # 外部传入的目标占比（已考虑全局约束）
+    target_ratio: Optional[float] = None,
 ) -> str:
     """
     基于 ATR 和实际持仓占比的仓位管理建议。
@@ -302,17 +301,47 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     sell_indices = [idx for idx in sell_indices if scan_info_list[idx].get("shares", 0) > 0]
 
-    # 评分连续性过滤（连续2日评分≥65且历史记录≥2天）
+    # ---------- 大盘环境对买入评分的折扣 ----------
+    market_state = env["state"]
+    market_factor = env["factor"]
+    state_discount = {
+        "强牛": 1.0,
+        "弱牛": 0.9,
+        "震荡": 0.8,
+        "弱熊": 0.7,
+        "强熊": 0.6
+    }
+    discount = state_discount.get(market_state, 0.8)
+    total_discount = discount * market_factor
+    total_discount = max(0.5, min(1.0, total_discount))
+
+    # 为每个 scan_info 添加折扣评分
+    for si in scan_info_list:
+        original_score = si.get("final_score", 50)
+        si["discounted_score"] = original_score * total_discount
+
+    def apply_discount(indices):
+        candidates = []
+        for idx in indices:
+            discounted_score = scan_info_list[idx]["discounted_score"]
+            candidates.append((idx, discounted_score))
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in candidates]
+
+    right_buy_indices = apply_discount(right_buy_indices)
+    left_buy_indices = apply_discount(left_buy_indices)
+
+    # 评分连续性过滤（使用原始评分，保持稳定性）
     SCORE_CONSECUTIVE_DAYS = 2
     SCORE_MIN_THRESHOLD = 65
-    def filter_by_consecutive_score(indices, is_buy=True):
+    def filter_by_consecutive_score(indices):
         filtered = []
         for idx in indices:
             code = scan_info_list[idx]["display"]["code"]
             hist_scores = state.get(code, {}).get("score_history", [])
             if len(hist_scores) < SCORE_CONSECUTIVE_DAYS:
                 continue
-            today_score = scan_info_list[idx]["final_score"]
+            today_score = scan_info_list[idx]["final_score"]  # 原始评分
             today_str_date = today.strftime("%Y-%m-%d")
             yesterday_score = None
             for rec in hist_scores:
@@ -328,7 +357,18 @@ def run_batch_analysis(api_key=None, target_code=None):
     right_buy_indices = filter_by_consecutive_score(right_buy_indices)
     left_buy_indices = filter_by_consecutive_score(left_buy_indices)
 
-    # 构建所有需要关注的ETF（用于全局仓位分配）
+    # 左侧买入额外过滤：避免半山腰
+    filtered_left = []
+    for idx in left_buy_indices:
+        si = scan_info_list[idx]
+        change_5d = si.get("change_5d", 0.0)
+        rsi = si.get("rsi", 50)
+        low_profit = si.get("profit_pct_from_low", 0.0)
+        if change_5d <= -0.03 or (low_profit < 0.05 and rsi < 45):
+            filtered_left.append(idx)
+    left_buy_indices = filtered_left
+
+    # 构建所有需要关注的ETF
     all_need_recommend = {}
     for si in scan_info_list:
         if si.get("shares", 0) > 0:
@@ -345,50 +385,47 @@ def run_batch_analysis(api_key=None, target_code=None):
         if code not in all_need_recommend:
             all_need_recommend[code] = si
 
-    # ---------- 全局仓位约束（方案A） ----------
-    # 收集所有需要参与分配的目标（持仓ETF + 评分>=50的未持仓候选）
+    # ---------- 全局仓位约束（使用折扣评分） ----------
     constraint_items = []
     for code, si in all_need_recommend.items():
-        score = si["final_score"]
+        discounted_score = si.get("discounted_score", 50)
         shares = si.get("shares", 0)
         price = si["display"]["price"]
         current_value = shares * price
         current_ratio = current_value / TOTAL_CAPITAL
-        raw_target = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
-        # 只考虑持仓ETF 或 评分>=50的未持仓ETF（潜在买入）
-        if shares > 0 or score >= 50:
+        # 目标占比基于折扣评分
+        raw_target = max(0.0, min(MAX_POSITION_PCT, (discounted_score - 30) / 70 * MAX_POSITION_PCT))
+        if shares > 0 or discounted_score >= 50:
             constraint_items.append({
                 "code": code,
-                "score": score,
+                "discounted_score": discounted_score,
                 "current_ratio": current_ratio,
                 "raw_target": raw_target,
                 "shares": shares,
                 "si": si,
             })
-    # 按评分降序排序
-    constraint_items.sort(key=lambda x: x["score"], reverse=True)
-    # 分配仓位：总上限100%
+    # 按折扣评分降序排序
+    constraint_items.sort(key=lambda x: x["discounted_score"], reverse=True)
     total_limit = 1.0
     remaining = total_limit
     adjusted_targets = {}
     for item in constraint_items:
-        # 持仓ETF至少保留当前仓位，但目标不能低于当前（减仓另行处理），这里分配上限为目标值
         alloc = min(item["raw_target"], remaining)
         adjusted_targets[item["code"]] = alloc
         remaining -= alloc
         if remaining <= 0:
             break
-    # 对于未分配到的，若当前仓位>0则保持当前仓位，否则目标为0
     for item in constraint_items:
         if item["code"] not in adjusted_targets:
             adjusted_targets[item["code"]] = item["current_ratio"] if item["shares"] > 0 else 0.0
 
-    # 准备AI数据，并计算系统建议（使用调整后的目标占比）
+    # 准备AI数据（使用折扣评分和目标占比）
     etf_dict_for_ai = {}
     sys_advice_map = {}
     for code, si in all_need_recommend.items():
         d = si["display"]
-        score = si["final_score"]
+        original_score = si.get("final_score", 50)
+        discounted_score = si.get("discounted_score", 50)
         atr_pct = si.get("atr_pct", 0.02)
         price = d["price"]
         shares = si.get("shares", 0)
@@ -396,7 +433,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         daily_change = position_change_map.get(code, 0)
         target_ratio = adjusted_targets.get(code)
         sys_advice = calculate_atr_advice(
-            score=score,
+            score=discounted_score,   # 使用折扣评分用于内部计算
             atr_pct=atr_pct,
             price=price,
             shares=shares,
@@ -408,7 +445,7 @@ def run_batch_analysis(api_key=None, target_code=None):
 
         etf_dict_for_ai[code] = {
             "name": d["name"],
-            "final_score": to_py_float(score),
+            "final_score": to_py_float(discounted_score),  # AI 看到折扣评分
             "rsi": to_py_float(si.get("rsi", 50)),
             "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
             "change_pct": to_py_float(si.get("change_5d", 0.0)),
@@ -463,7 +500,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "code": d["code"],
                 "price": d["price"],
                 "change_pct": d["change_pct"],
-                "final_score": si["final_score"],
+                "final_score": si["final_score"],  # 显示原始评分
                 "advice": display_advice
             })
 

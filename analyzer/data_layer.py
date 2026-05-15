@@ -191,6 +191,7 @@ class DataLayer:
                              recent_low_window=20) -> pd.DataFrame:
         df = df.copy()
         df["ma_short"] = df["close"].rolling(ETF_MA).mean()
+        df["ma5"] = df["close"].rolling(5).mean()      # 新增 MA5
         df["vol_ma"] = df["volume"].rolling(ETF_VOL_MA).mean()
         if need_amount_ma:
             df["amount_ma"] = df["amount"].rolling(ETF_VOL_MA).mean()
@@ -236,13 +237,21 @@ class DataLayer:
 
     def get_market_environment(self, market_df: pd.DataFrame) -> Dict:
         d = market_df.iloc[-1]
+        # 计算 MA5 和 MA5 斜率
+        if "ma5" not in market_df.columns:
+            # 如果尚未计算，临时计算
+            market_df["ma5"] = market_df["close"].rolling(5).mean()
+            d = market_df.iloc[-1]   # 重新获取包含 ma5 的行
+        ma5 = d["ma5"]
         ma20 = d["ma_short"]
         ma60 = d.get("ma30", ma20)
+        above_5 = d["close"] > ma5
         above_20 = d["close"] > ma20
         above_60 = d["close"] > ma60
         atr_pct = (d["atr"] / d["close"]) if d["close"] > 0 else 0
         vol_ratio = d["volume"] / d["vol_ma"] if d["vol_ma"] > 0 else 1.0
 
+        # 基础状态（基于 MA20/MA60）
         if above_60 and above_20:
             state = "强牛" if atr_pct < 0.02 else "弱牛"
         elif not above_60 and above_20:
@@ -254,11 +263,34 @@ class DataLayer:
         else:
             state = "震荡"
 
-        pos_score = ((d["close"] / ma20 - 1) * 5).clip(-1, 1)
+        # 使用 MA5 和 MA5 斜率进行状态降级（使短期转弱更快反应）
+        # 计算 MA5 斜率（今日 MA5 相比昨日 MA5 的变化）
+        if len(market_df) >= 2:
+            prev_ma5 = market_df["ma5"].iloc[-2]
+            ma5_slope = (ma5 - prev_ma5) / prev_ma5 if prev_ma5 != 0 else 0
+        else:
+            ma5_slope = 0
+        # 如果收盘价跌破 MA5 且 MA5 斜率 < 0（下行），则状态降级
+        if not above_5 and ma5_slope < 0:
+            downgrade_map = {
+                "强牛": "弱牛",
+                "弱牛": "震荡",
+                "震荡": "弱熊",
+                "弱熊": "强熊",
+                "强熊": "强熊"
+            }
+            state = downgrade_map.get(state, state)
+
+        # 环境因子计算：增加 MA5 偏离度因子
+        # 原 pos_score 基于 MA20 偏离，现在加入 MA5 偏离，各占一半
+        pos_score_ma20 = ((d["close"] / ma20 - 1) * 5).clip(-1, 1) if ma20 > 0 else 0
+        pos_score_ma5 = ((d["close"] / ma5 - 1) * 5).clip(-1, 1) if ma5 > 0 else 0
+        pos_score = (pos_score_ma20 + pos_score_ma5) / 2
+
         rsi_norm = (d["rsi"] - 50) / 50
         vol_norm = (atr_pct - 0.02) / 0.02
         fund_norm = np.tanh((vol_ratio - 1) * 2)
-        env_factor = 1.0 + 0.1 * pos_score + 0.1 * rsi_norm + 0.1 * vol_norm + 0.1 * fund_norm
+        env_factor = 1.0 + 0.1 * (pos_score + rsi_norm + vol_norm + fund_norm)
         env_factor = max(0.8, min(1.2, env_factor))
 
         risk_tip = ""
@@ -266,6 +298,8 @@ class DataLayer:
             risk_tip = "市场偏弱，注意风险控制"
         elif env_factor > 1.1:
             risk_tip = "环境偏暖，但警惕过热"
+        elif not above_5 and ma5_slope < 0:
+            risk_tip = "短期转弱，注意回调"
 
         return {
             "state": state,
@@ -273,6 +307,8 @@ class DataLayer:
             "volatility": atr_pct,
             "above_ma20": above_20,
             "above_ma60": above_60,
+            "above_ma5": above_5,           # 新增
+            "ma5_slope": ma5_slope,         # 新增
             "amount_above_ma20": d.get("amount_ma", 0) > 0 and d["amount"] > d["amount_ma"],
             "ret_market_5d": (d["close"] / market_df.iloc[-5]["close"] - 1)
                              if len(market_df) >= 5 else 0,
