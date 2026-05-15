@@ -70,7 +70,7 @@ PROFIT_TAKE_MODE = "soft"
 COST_HALF_PROFIT_ACTION = "HOLD"
 
 # ---------------------------- ATR 仓位管理参数 ----------------------------
-TOTAL_CAPITAL = 1_000_000      # 总资金（元），可修改
+TOTAL_CAPITAL = 40000      # 总资金（元），可修改
 RISK_PERCENT = 0.01            # 单笔风险占总资金比例（1%）
 MAX_POSITION_PCT = 0.25        # 单只ETF最大仓位占总资金比例（25%）
 MIN_TRADE_SHARES = 100         # 最小交易份额（ETF 100份起）

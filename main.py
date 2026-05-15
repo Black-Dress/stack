@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ETF 智能分析系统
-ATR仓位管理优先 + AI辅助润色，无后备规则，AI失败即退出
+ATR仓位管理（基于实际持仓与目标占比）+ AI辅助，无后备规则
 """
 import argparse
 import datetime
@@ -25,52 +25,68 @@ from analyzer.trend_scanner import select_trend_buy, select_left_buy, select_tre
 logger = logging.getLogger(__name__)
 
 
-def calculate_atr_advice(score: float, atr_pct: float, price: float,
-                         cost_price: Optional[float], shares: int,
-                         is_holding: bool) -> str:
+def calculate_atr_advice(
+    score: float,
+    atr_pct: float,
+    price: float,
+    shares: int,
+    cost_price: Optional[float] = None,
+) -> str:
     """
-    基于 ATR 的仓位管理建议（仅作为AI的参考，但最终以AI为准）
-    未持仓时：返回建议买入股数；已持仓时：返回建议加减仓比例。
-    注意：本函数返回值不直接用于最终建议，仅提供给AI作为上下文。
+    基于 ATR 和实际持仓占比的仓位管理建议。
+    返回格式：
+        - 未持仓: "买入 | 程度：强烈推荐" 或 "买入 | 程度：推荐" 或 "买入 | 程度：谨慎"
+        - 已持仓: "加仓X% | 价位：当前价附近" 或 "减仓Y% | 价位：xx元" 或 "持有不动"
     """
-    direction = max(-1.0, min(1.0, (score - 50) / 50.0))
-    if abs(direction) < 0.1:
+    is_holding = shares > 0
+    # 当前市值占比
+    current_value = shares * price if is_holding else 0.0
+    current_ratio = current_value / TOTAL_CAPITAL
+
+    # 目标占比（基于评分线性映射，30分以下0%，100分时MAX_POSITION_PCT）
+    target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
+
+    # 未持仓情况：直接根据评分决定买入程度
+    if not is_holding:
+        if score < 50:
+            return "买入 | 程度：谨慎"
+        elif score < 70:
+            return "买入 | 程度：推荐"
+        else:
+            return "买入 | 程度：强烈推荐"
+
+    # 已持仓情况：计算仓位缺口
+    gap = target_ratio - current_ratio
+    if abs(gap) < 0.01:  # 差距小于1%仓位
         return "持有不动"
 
-    atr_abs = price * atr_pct if atr_pct > 0 else price * 0.02
-    risk_amount = TOTAL_CAPITAL * RISK_PERCENT
+    # 单次最大调整仓位比例（受波动率影响）
+    vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
+    max_step = 0.10 * vol_factor  # 单次最多调整10%的总资金仓位
 
-    if not is_holding:
-        if direction <= 0:
-            return "观望"
-        risk_mult = 0.5 + direction * 0.5
-        position_value = risk_amount * risk_mult / (atr_abs / price)
-        max_position_value = TOTAL_CAPITAL * MAX_POSITION_PCT
-        position_value = min(position_value, max_position_value)
-        shares_to_buy = int(position_value / price / MIN_TRADE_SHARES) * MIN_TRADE_SHARES
-        if shares_to_buy < MIN_TRADE_SHARES:
-            return "暂不买入"
-        return f"买入{shares_to_buy}股"
-    else:
-        if shares == 0 or cost_price is None:
-            return "持仓异常"
-        position_value = shares * price
-        position_ratio = position_value / TOTAL_CAPITAL
-        target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
-        adjust_ratio = target_ratio - position_ratio
-        if abs(adjust_ratio) < 0.01:
-            return "持有不动"
-        vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
-        max_step = 0.2 * vol_factor
-        step = max(-max_step, min(max_step, adjust_ratio))
-        if step > 0:
-            pct = step * 100
-            return f"加仓{pct:.0f}%"
+    if gap > 0:
+        # 需要加仓
+        step = min(gap, max_step)
+        # 将仓位比例转换为相对于当前持仓的百分比
+        if current_value > 0:
+            pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
+            # 限制单次加仓不超过当前持仓的50%
+            pct_of_current = min(pct_of_current, 50.0)
         else:
-            pct = -step * 100
-            if pct >= 80:
-                return "清仓"
-            return f"减仓{pct:.0f}%"
+            pct_of_current = 100.0
+        return f"加仓{pct_of_current:.0f}% | 价位：当前价附近"
+    else:
+        # 需要减仓
+        step = min(-gap, max_step)
+        if current_value > 0:
+            pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
+            pct_of_current = min(pct_of_current, 50.0)
+            # 如果减仓超过当前持仓的80%，建议清仓
+            if pct_of_current >= 80:
+                return f"清仓 | 价位：{price:.3f}附近"
+            return f"减仓{pct_of_current:.0f}% | 价位：{price:.3f}附近"
+        else:
+            return "持仓异常"
 
 
 def run_batch_analysis(api_key=None, target_code=None):
@@ -108,7 +124,6 @@ def run_batch_analysis(api_key=None, target_code=None):
     state = dl.load_state()
     ai_client = AIClient(api_key)
 
-    # 记录当日持仓快照
     dl.append_daily_snapshot(today_str, etf_list)
 
     if target_code:
@@ -164,7 +179,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                 scan_info = {}
             scan_info_list.append(scan_info)
 
-    # ---------- 主表格（仅特征信息） ----------
+    # ---------- 主表格 ----------
     main_rows = []
     for si in scan_info_list:
         d = si.get("display", {})
@@ -179,7 +194,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     main_rows_sorted = sorted(main_rows, key=lambda x: x["final_score"], reverse=True)
     print_unified_table(main_rows_sorted, env=env, today_str=today_str, table_type="main")
 
-    # ---------- 持仓表格（暂不含建议） ----------
+    # ---------- 持仓表格 ----------
     position_rows = []
     position_change_map = {}
     for si in scan_info_list:
@@ -286,24 +301,34 @@ def run_batch_analysis(api_key=None, target_code=None):
         if code not in all_need_recommend:
             all_need_recommend[code] = si
 
-    # 准备AI所需数据（包含ATR）
+    # 准备AI数据，并计算系统建议（用于AI输入）
     etf_dict_for_ai = {}
+    sys_advice_map = {}
     for code, si in all_need_recommend.items():
         d = si["display"]
+        score = si["final_score"]
+        atr_pct = si.get("atr_pct", 0.02)
+        price = d["price"]
+        shares = si.get("shares", 0)
+        cost = si.get("cost_price")
+        sys_advice = calculate_atr_advice(score, atr_pct, price, shares, cost)
+        sys_advice_map[code] = sys_advice
+
         etf_dict_for_ai[code] = {
             "name": d["name"],
-            "final_score": to_py_float(si["final_score"]),
+            "final_score": to_py_float(score),
             "rsi": to_py_float(si.get("rsi", 50)),
             "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
             "change_pct": to_py_float(si.get("change_pct", 0)),
             "above_ma": to_py_bool(si.get("above_ma", False)),
             "profit_pct_from_low": to_py_float(si.get("profit_pct_from_low", 0)),
-            "shares": si.get("shares", 0),
-            "cost_price": si.get("cost_price"),
+            "shares": shares,
+            "cost_price": cost,
             "risk_str": d.get("risk_str", ""),
-            "price": d["price"],
+            "price": price,
             "change_pct_display": d["change_pct"],
-            "atr_pct": to_py_float(si.get("atr_pct", 0.02)),
+            "atr_pct": to_py_float(atr_pct),
+            "sys_advice": sys_advice,   # 系统建议供AI参考
         }
 
     # 调用AI，失败则退出
@@ -314,11 +339,14 @@ def run_batch_analysis(api_key=None, target_code=None):
         dl.logout()
         sys.exit(1)
 
+    # 最终建议：直接使用AI输出（已包含系统建议的采纳）
+    final_advice_map = batch_advice
+
     # 更新持仓表格建议
     for row in position_rows:
         code = row["code"]
-        if code in batch_advice:
-            original_advice = batch_advice[code]
+        if code in final_advice_map:
+            original_advice = final_advice_map[code]
             change_str = position_change_map.get(code, "")
             is_reduced_today = change_str.startswith("-") if change_str else False
             if is_reduced_today and any(kw in original_advice for kw in ["减仓", "卖出", "清仓"]):
@@ -329,10 +357,10 @@ def run_batch_analysis(api_key=None, target_code=None):
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 趋势扫描表格：买入推荐（未持仓且建议含"买入"）
+    # 趋势扫描表格
     buy_rows = []
     sell_rows = []
-    for code, advice_text in batch_advice.items():
+    for code, advice_text in final_advice_map.items():
         if code not in all_need_recommend:
             continue
         si = all_need_recommend[code]
@@ -342,7 +370,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         is_reduced_today = change_str.startswith("-") if change_str else False
 
         if not is_holding and "买入" in advice_text:
-            # 提取程度（如"强烈推荐"），简化显示
+            # 提取程度
             if "强烈推荐" in advice_text:
                 display_advice = "🔥 强烈推荐买入"
             elif "推荐" in advice_text:

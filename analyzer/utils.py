@@ -131,7 +131,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
             ("成本", "cost", DISPLAY_NUMS_WIDTH, "left"),
             ("现价", "price", DISPLAY_NUMS_WIDTH, "left"),
             ("盈亏%", "profit_pct", DISPLAY_NUMS_WIDTH, "left"),
-            ("变化", "change", DISPLAY_NUMS_WIDTH, "left"),
+            ("变化", "change", DISPLAY_CHANGE_WIDTH, "left"),
             ("评分", "score", DISPLAY_NUMS_WIDTH, "left"),
             ("建议", "advice", DISPLAY_TAGS_WIDTH, "left")
         ]
