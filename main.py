@@ -3,6 +3,8 @@
 """
 ETF 智能分析系统
 ATR仓位管理（基于实际持仓与目标占比）+ AI辅助，无后备规则
+支持识别当日已执行操作，并在此基础上给出后续建议
+已删除趋势扫描中的卖出警示表格
 """
 import argparse
 import datetime
@@ -31,22 +33,45 @@ def calculate_atr_advice(
     price: float,
     shares: int,
     cost_price: Optional[float] = None,
+    daily_change_shares: int = 0,
 ) -> str:
     """
-    基于 ATR 和实际持仓占比的仓位管理建议。
-    返回格式：
-        - 未持仓: "买入 | 程度：强烈推荐" 或 "买入 | 程度：推荐" 或 "买入 | 程度：谨慎"
-        - 已持仓: "加仓X% | 价位：当前价附近" 或 "减仓Y% | 价位：xx元" 或 "持有不动"
+    返回建议字符串：
+      - 未持仓： "买入 | 程度：强烈推荐/推荐/谨慎"
+      - 已持仓当日有操作： "已加仓X股，加仓Y% | 价位：当前价附近" 或 "已减仓X股，减仓Y% | 价位：xx元"
+      - 已持仓无操作： "加仓Y% | 价位：..." 或 "减仓Y% | 价位：..."
+      - 已持仓无缺口： "持有不动"
     """
     is_holding = shares > 0
-    # 当前市值占比
-    current_value = shares * price if is_holding else 0.0
-    current_ratio = current_value / TOTAL_CAPITAL
 
-    # 目标占比（基于评分线性映射，30分以下0%，100分时MAX_POSITION_PCT）
-    target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
+    def _calc_normal_advice() -> str:
+        current_value = shares * price
+        current_ratio = current_value / TOTAL_CAPITAL
+        target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
+        gap = target_ratio - current_ratio
+        if abs(gap) < 0.01:
+            return "持有不动"
+        vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
+        max_step = 0.10 * vol_factor
+        if gap > 0:
+            step = min(gap, max_step)
+            if current_value > 0:
+                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
+                pct_of_current = min(pct_of_current, 50.0)
+                return f"加仓{pct_of_current:.0f}% | 价位：当前价附近"
+            else:
+                return "持有不动"
+        else:
+            step = min(-gap, max_step)
+            if current_value > 0:
+                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
+                pct_of_current = min(pct_of_current, 50.0)
+                if pct_of_current >= 80:
+                    return f"清仓 | 价位：{price:.3f}附近"
+                return f"减仓{pct_of_current:.0f}% | 价位：{price:.3f}附近"
+            else:
+                return "持仓异常"
 
-    # 未持仓情况：直接根据评分决定买入程度
     if not is_holding:
         if score < 50:
             return "买入 | 程度：谨慎"
@@ -55,38 +80,15 @@ def calculate_atr_advice(
         else:
             return "买入 | 程度：强烈推荐"
 
-    # 已持仓情况：计算仓位缺口
-    gap = target_ratio - current_ratio
-    if abs(gap) < 0.01:  # 差距小于1%仓位
-        return "持有不动"
+    normal_advice = _calc_normal_advice()
+    if daily_change_shares == 0:
+        return normal_advice
 
-    # 单次最大调整仓位比例（受波动率影响）
-    vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
-    max_step = 0.10 * vol_factor  # 单次最多调整10%的总资金仓位
-
-    if gap > 0:
-        # 需要加仓
-        step = min(gap, max_step)
-        # 将仓位比例转换为相对于当前持仓的百分比
-        if current_value > 0:
-            pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
-            # 限制单次加仓不超过当前持仓的50%
-            pct_of_current = min(pct_of_current, 50.0)
-        else:
-            pct_of_current = 100.0
-        return f"加仓{pct_of_current:.0f}% | 价位：当前价附近"
+    op_text = f"已加仓{daily_change_shares}股" if daily_change_shares > 0 else f"已减仓{-daily_change_shares}股"
+    if normal_advice == "持有不动":
+        return op_text
     else:
-        # 需要减仓
-        step = min(-gap, max_step)
-        if current_value > 0:
-            pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
-            pct_of_current = min(pct_of_current, 50.0)
-            # 如果减仓超过当前持仓的80%，建议清仓
-            if pct_of_current >= 80:
-                return f"清仓 | 价位：{price:.3f}附近"
-            return f"减仓{pct_of_current:.0f}% | 价位：{price:.3f}附近"
-        else:
-            return "持仓异常"
+        return f"{op_text}，{normal_advice}"
 
 
 def run_batch_analysis(api_key=None, target_code=None):
@@ -179,7 +181,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                 scan_info = {}
             scan_info_list.append(scan_info)
 
-    # ---------- 主表格 ----------
+    # 主表格
     main_rows = []
     for si in scan_info_list:
         d = si.get("display", {})
@@ -194,7 +196,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     main_rows_sorted = sorted(main_rows, key=lambda x: x["final_score"], reverse=True)
     print_unified_table(main_rows_sorted, env=env, today_str=today_str, table_type="main")
 
-    # ---------- 持仓表格 ----------
+    # 持仓表格
     position_rows = []
     position_change_map = {}
     for si in scan_info_list:
@@ -215,9 +217,9 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "score": si["final_score"],
                 "advice": ""
             })
-            position_change_map[si.get("display",{}).get("code","")] = change_str
+            position_change_map[si.get("display",{}).get("code","")] = delta
 
-    # ---------- 趋势扫描候选 ----------
+    # 趋势扫描候选（仅买入）
     BUY_MAX_COUNT = 6
     BUY_LOW_PROFIT_MIN = 0.02
     BUY_LOW_PROFIT_MAX = 0.35
@@ -234,13 +236,6 @@ def run_batch_analysis(api_key=None, target_code=None):
     LEFT_MIN_SCORE = 45
     LEFT_RSI_MAX = 55
     LEFT_REQUIRE_BELOW_MA = False
-
-    SELL_MAX_COUNT = 5
-    SELL_MIN_DAILY_LOSS = -0.02
-    SELL_MIN_PULLBACK = 0.05
-    SELL_MIN_LOW_PROFIT = 0.15
-    SELL_INCLUDE_WEAK_MA = True
-    SELL_INCLUDE_CLEAR_STOP = True
 
     def to_py_bool(val):
         return bool(val) if isinstance(val, (bool, np.bool_)) else val
@@ -273,18 +268,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     )
     left_buy_indices = [idx for idx in left_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
 
-    sell_indices = select_trend_sell(
-        scan_info_list,
-        max_count=SELL_MAX_COUNT,
-        min_daily_loss=SELL_MIN_DAILY_LOSS,
-        min_pullback=SELL_MIN_PULLBACK,
-        min_low_profit=SELL_MIN_LOW_PROFIT,
-        include_weak_ma=SELL_INCLUDE_WEAK_MA,
-        include_clear_stop=SELL_INCLUDE_CLEAR_STOP
-    )
-    sell_indices = [idx for idx in sell_indices if scan_info_list[idx].get("shares", 0) > 0]
-
-    # 构建用于AI的候选字典
+    # 构建用于AI的候选字典（包含所有持仓+买入候选）
     all_need_recommend = {}
     for si in scan_info_list:
         if si.get("shares", 0) > 0:
@@ -295,13 +279,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         code = si["display"]["code"]
         if code not in all_need_recommend:
             all_need_recommend[code] = si
-    for idx in sell_indices:
-        si = scan_info_list[idx]
-        code = si["display"]["code"]
-        if code not in all_need_recommend:
-            all_need_recommend[code] = si
 
-    # 准备AI数据，并计算系统建议（用于AI输入）
     etf_dict_for_ai = {}
     sys_advice_map = {}
     for code, si in all_need_recommend.items():
@@ -311,7 +289,8 @@ def run_batch_analysis(api_key=None, target_code=None):
         price = d["price"]
         shares = si.get("shares", 0)
         cost = si.get("cost_price")
-        sys_advice = calculate_atr_advice(score, atr_pct, price, shares, cost)
+        daily_change = position_change_map.get(code, 0)
+        sys_advice = calculate_atr_advice(score, atr_pct, price, shares, cost, daily_change)
         sys_advice_map[code] = sys_advice
 
         etf_dict_for_ai[code] = {
@@ -328,10 +307,10 @@ def run_batch_analysis(api_key=None, target_code=None):
             "price": price,
             "change_pct_display": d["change_pct"],
             "atr_pct": to_py_float(atr_pct),
-            "sys_advice": sys_advice,   # 系统建议供AI参考
+            "sys_advice": sys_advice,
+            "daily_change": daily_change,
         }
 
-    # 调用AI，失败则退出
     try:
         batch_advice = ai_client.get_batch_recommendations(etf_dict_for_ai, env["state"])
     except Exception as e:
@@ -339,38 +318,25 @@ def run_batch_analysis(api_key=None, target_code=None):
         dl.logout()
         sys.exit(1)
 
-    # 最终建议：直接使用AI输出（已包含系统建议的采纳）
     final_advice_map = batch_advice
 
-    # 更新持仓表格建议
     for row in position_rows:
         code = row["code"]
         if code in final_advice_map:
-            original_advice = final_advice_map[code]
-            change_str = position_change_map.get(code, "")
-            is_reduced_today = change_str.startswith("-") if change_str else False
-            if is_reduced_today and any(kw in original_advice for kw in ["减仓", "卖出", "清仓"]):
-                row["advice"] = "✅ 已执行减仓"
-            else:
-                row["advice"] = original_advice
+            row["advice"] = final_advice_map[code]
 
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 趋势扫描表格
+    # 趋势扫描买入推荐
     buy_rows = []
-    sell_rows = []
     for code, advice_text in final_advice_map.items():
         if code not in all_need_recommend:
             continue
         si = all_need_recommend[code]
         d = si["display"]
         is_holding = si.get("shares", 0) > 0
-        change_str = position_change_map.get(code, "")
-        is_reduced_today = change_str.startswith("-") if change_str else False
-
         if not is_holding and "买入" in advice_text:
-            # 提取程度
             if "强烈推荐" in advice_text:
                 display_advice = "🔥 强烈推荐买入"
             elif "推荐" in advice_text:
@@ -385,25 +351,11 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "final_score": si["final_score"],
                 "advice": display_advice
             })
-        elif is_holding and not is_reduced_today and any(kw in advice_text for kw in ["减仓", "清仓", "卖出", "止损"]):
-            sell_rows.append({
-                "name": d["name"],
-                "code": d["code"],
-                "price": d["price"],
-                "change_pct": d["change_pct"],
-                "final_score": si["final_score"],
-                "advice": advice_text
-            })
 
     buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
-    sell_rows.sort(key=lambda x: x["final_score"], reverse=True)
 
     if buy_rows:
         print_unified_table(buy_rows, title="📊 [趋势扫描] 买入推荐", table_type="trend")
-    if buy_rows and sell_rows:
-        print()
-    if sell_rows:
-        print_unified_table(sell_rows, title="📊 [趋势扫描] 卖出警示", table_type="trend")
 
     dl.save_state(state)
     dl.logout()

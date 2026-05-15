@@ -39,14 +39,20 @@
       {
         "code": "sz.159755",
         "name": "电池ETF",
-        "shares": 7300,
-        "cost": 1.24
+        "shares": 5900,
+        "cost": 1.257
       },
       {
         "code": "sh.515790",
         "name": "光伏",
-        "shares": 10000,
+        "shares": 10400,
         "cost": 1.11
+      },
+      {
+        "code": "sz.159273",
+        "name": "云计算ETF汇添富",
+        "shares": 6800,
+        "cost": 1.556
       }
     ]
   }
