@@ -41,12 +41,10 @@ BUY_THRESHOLD = 50
 SELL_THRESHOLD = -20
 QUICK_BUY_THRESHOLD = 60
 
-# 信号确认软化模式：'strict' / 'majority' / 'trend_break'
 SIGNAL_CONFIRM_MODE = "majority"
 QUICK_BUY_ENABLE = True
 QUICK_BUY_SCORE_INCREASE = 15
 
-# 评分 → 强度映射（用于操作等级，主表格已删除此列，但 analyzer 内部仍使用）
 ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -999]
 ACTION_LEVEL_NAMES = [
     "极强", "强势", "偏强", "中性偏强", "中性",
@@ -68,23 +66,18 @@ COST_TAKE_PROFIT_CLEAR = 0.20
 COST_TAKE_PROFIT_HALF = 0.15
 COST_STOP_LOSS_PCT = -0.08
 USE_COST_BASED_OVERRIDE = True
-PROFIT_TAKE_MODE = "soft"        # 'soft' 仅提示不强制卖出
+PROFIT_TAKE_MODE = "soft"
 COST_HALF_PROFIT_ACTION = "HOLD"
 
-# ---------------------------- 仓位管理参数（后备规则） ----------------------------
-POSITION_ADVICE_ENABLE = True
-POSITION_ADD_THRESHOLD = 65
-POSITION_REDUCE_THRESHOLD = 40
-POSITION_CLEAR_THRESHOLD = 20
-POSITION_ADD_RATIO = 0.2
-POSITION_REDUCE_RATIO = 0.3
+# ---------------------------- ATR 仓位管理参数 ----------------------------
+TOTAL_CAPITAL = 1_000_000      # 总资金（元），可修改
+RISK_PERCENT = 0.01            # 单笔风险占总资金比例（1%）
+MAX_POSITION_PCT = 0.25        # 单只ETF最大仓位占总资金比例（25%）
+MIN_TRADE_SHARES = 100         # 最小交易份额（ETF 100份起）
 
-# ---------------------------- AI 缓存配置 ----------------------------
-AI_CACHE_TTL = 300  # 5分钟
+# ---------------------------- AI 配置 ----------------------------
+AI_CACHE_TTL = 300
 AI_ENABLE = True
-AI_ENABLE_POSITION_ADVICE = True
-AI_ENABLE_BUY_LEVEL = True
-AI_ENABLE_HISTORY_ANALYSIS = True
 
 # ---------------------------- 显示宽度配置 ----------------------------
 DISPLAY_NAME_WIDTH = 22
@@ -93,7 +86,7 @@ DISPLAY_PRICE_WIDTH = 12
 DISPLAY_CHANGE_WIDTH = 12
 DISPLAY_SCORE_WIDTH = 16
 DISPLAY_TAGS_WIDTH = 40 
-DISPLAY_NUMS_WIDTH = 12
+DISPLAY_NUMS_WIDTH = 8
 
 # ---------------------------- 市场状态权重表 ----------------------------
 BUY_WEIGHTS_BULL = {
@@ -213,7 +206,7 @@ TMSV_VOL_RATIO_BASE = 0.8
 TMSV_VOL_RATIO_DIVISOR = 1.2
 TMSV_VOL_CONSIST_SCORE = 100.0
 
-# ---------------------------- 趋势扫描参数（硬编码后备） ----------------------------
+# ---------------------------- 趋势扫描参数（硬编码） ----------------------------
 TREND_BUY_MAX_COUNT = 3
 TREND_BUY_LOW_PROFIT_MIN = 0.05
 TREND_BUY_LOW_PROFIT_MAX = 0.25

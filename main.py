@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 ETF 智能分析系统
-主表格简洁，新增持仓表格，趋势扫描整合为单一表格并支持AI
-（纯AI版：无后备规则）
+ATR仓位管理优先 + AI辅助润色，无后备规则，AI失败即退出
 """
 import argparse
 import datetime
 import logging
 import os
+import sys
 from typing import Optional
 
 import pandas as pd
@@ -25,11 +25,63 @@ from analyzer.trend_scanner import select_trend_buy, select_left_buy, select_tre
 logger = logging.getLogger(__name__)
 
 
+def calculate_atr_advice(score: float, atr_pct: float, price: float,
+                         cost_price: Optional[float], shares: int,
+                         is_holding: bool) -> str:
+    """
+    基于 ATR 的仓位管理建议（仅作为AI的参考，但最终以AI为准）
+    未持仓时：返回建议买入股数；已持仓时：返回建议加减仓比例。
+    注意：本函数返回值不直接用于最终建议，仅提供给AI作为上下文。
+    """
+    direction = max(-1.0, min(1.0, (score - 50) / 50.0))
+    if abs(direction) < 0.1:
+        return "持有不动"
+
+    atr_abs = price * atr_pct if atr_pct > 0 else price * 0.02
+    risk_amount = TOTAL_CAPITAL * RISK_PERCENT
+
+    if not is_holding:
+        if direction <= 0:
+            return "观望"
+        risk_mult = 0.5 + direction * 0.5
+        position_value = risk_amount * risk_mult / (atr_abs / price)
+        max_position_value = TOTAL_CAPITAL * MAX_POSITION_PCT
+        position_value = min(position_value, max_position_value)
+        shares_to_buy = int(position_value / price / MIN_TRADE_SHARES) * MIN_TRADE_SHARES
+        if shares_to_buy < MIN_TRADE_SHARES:
+            return "暂不买入"
+        return f"买入{shares_to_buy}股"
+    else:
+        if shares == 0 or cost_price is None:
+            return "持仓异常"
+        position_value = shares * price
+        position_ratio = position_value / TOTAL_CAPITAL
+        target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
+        adjust_ratio = target_ratio - position_ratio
+        if abs(adjust_ratio) < 0.01:
+            return "持有不动"
+        vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
+        max_step = 0.2 * vol_factor
+        step = max(-max_step, min(max_step, adjust_ratio))
+        if step > 0:
+            pct = step * 100
+            return f"加仓{pct:.0f}%"
+        else:
+            pct = -step * 100
+            if pct >= 80:
+                return "清仓"
+            return f"减仓{pct:.0f}%"
+
+
 def run_batch_analysis(api_key=None, target_code=None):
+    if not api_key:
+        print("错误：未设置 DEEPSEEK_API_KEY 环境变量，AI不可用，程序退出。")
+        sys.exit(1)
+
     dl = DataLayer()
     if not dl.login():
         print("登录 baostock 失败")
-        return
+        sys.exit(1)
 
     analyzer = DataAnalyzer()
     try:
@@ -37,7 +89,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     except Exception as e:
         print(f"加载持仓文件失败: {e}")
         dl.logout()
-        return
+        sys.exit(1)
 
     today = datetime.date.today()
     start = (today - datetime.timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
@@ -47,14 +99,14 @@ def run_batch_analysis(api_key=None, target_code=None):
     if market_df is None:
         print("获取大盘数据失败")
         dl.logout()
-        return
+        sys.exit(1)
     market_df = dl.calculate_indicators(market_df, need_amount_ma=True)
     env = dl.get_market_environment(market_df)
     buy_w, sell_w = dl.select_weights(env["state"])
     analyzer.set_environment(env, buy_w, sell_w)
 
     state = dl.load_state()
-    ai_client = AIClient(api_key) if api_key else None
+    ai_client = AIClient(api_key)
 
     # 记录当日持仓快照
     dl.append_daily_snapshot(today_str, etf_list)
@@ -64,7 +116,7 @@ def run_batch_analysis(api_key=None, target_code=None):
         if row.empty:
             print(f"未找到代码 {target_code}")
             dl.logout()
-            return
+            sys.exit(1)
         code, name, cost, shares = row.iloc[0]["代码"], row.iloc[0]["名称"], row.iloc[0]["成本"], row.iloc[0]["份额"]
         hist = dl.get_daily_data(code, start, today_str)
         if hist is not None:
@@ -112,7 +164,7 @@ def run_batch_analysis(api_key=None, target_code=None):
                 scan_info = {}
             scan_info_list.append(scan_info)
 
-    # ---------- 构建主表格行 ----------
+    # ---------- 主表格（仅特征信息） ----------
     main_rows = []
     for si in scan_info_list:
         d = si.get("display", {})
@@ -127,7 +179,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     main_rows_sorted = sorted(main_rows, key=lambda x: x["final_score"], reverse=True)
     print_unified_table(main_rows_sorted, env=env, today_str=today_str, table_type="main")
 
-    # ---------- 构建持仓表格（暂不含建议） ----------
+    # ---------- 持仓表格（暂不含建议） ----------
     position_rows = []
     position_change_map = {}
     for si in scan_info_list:
@@ -150,7 +202,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             })
             position_change_map[si.get("display",{}).get("code","")] = change_str
 
-    # ---------- 趋势扫描候选生成 ----------
+    # ---------- 趋势扫描候选 ----------
     BUY_MAX_COUNT = 6
     BUY_LOW_PROFIT_MIN = 0.02
     BUY_LOW_PROFIT_MAX = 0.35
@@ -234,27 +286,33 @@ def run_batch_analysis(api_key=None, target_code=None):
         if code not in all_need_recommend:
             all_need_recommend[code] = si
 
-    # 仅AI调用，无后备规则
-    batch_advice = {}
-    if ai_client and AI_ENABLE:
-        etf_dict_for_ai = {}
-        for code, si in all_need_recommend.items():
-            d = si["display"]
-            etf_dict_for_ai[code] = {
-                "name": d["name"],
-                "final_score": to_py_float(si["final_score"]),
-                "rsi": to_py_float(si.get("rsi", 50)),
-                "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
-                "change_pct": to_py_float(si.get("change_pct", 0)),
-                "above_ma": to_py_bool(si.get("above_ma", False)),
-                "profit_pct_from_low": to_py_float(si.get("profit_pct_from_low", 0)),
-                "shares": si.get("shares", 0),
-                "cost_price": si.get("cost_price"),
-                "risk_str": d.get("risk_str", ""),
-                "price": d["price"],
-                "change_pct_display": d["change_pct"]
-            }
+    # 准备AI所需数据（包含ATR）
+    etf_dict_for_ai = {}
+    for code, si in all_need_recommend.items():
+        d = si["display"]
+        etf_dict_for_ai[code] = {
+            "name": d["name"],
+            "final_score": to_py_float(si["final_score"]),
+            "rsi": to_py_float(si.get("rsi", 50)),
+            "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
+            "change_pct": to_py_float(si.get("change_pct", 0)),
+            "above_ma": to_py_bool(si.get("above_ma", False)),
+            "profit_pct_from_low": to_py_float(si.get("profit_pct_from_low", 0)),
+            "shares": si.get("shares", 0),
+            "cost_price": si.get("cost_price"),
+            "risk_str": d.get("risk_str", ""),
+            "price": d["price"],
+            "change_pct_display": d["change_pct"],
+            "atr_pct": to_py_float(si.get("atr_pct", 0.02)),
+        }
+
+    # 调用AI，失败则退出
+    try:
         batch_advice = ai_client.get_batch_recommendations(etf_dict_for_ai, env["state"])
+    except Exception as e:
+        print(f"AI调用失败，程序退出: {e}")
+        dl.logout()
+        sys.exit(1)
 
     # 更新持仓表格建议
     for row in position_rows:
@@ -263,7 +321,7 @@ def run_batch_analysis(api_key=None, target_code=None):
             original_advice = batch_advice[code]
             change_str = position_change_map.get(code, "")
             is_reduced_today = change_str.startswith("-") if change_str else False
-            if is_reduced_today and any(kw in original_advice for kw in ["减仓", "卖出", "止损"]):
+            if is_reduced_today and any(kw in original_advice for kw in ["减仓", "卖出", "清仓"]):
                 row["advice"] = "✅ 已执行减仓"
             else:
                 row["advice"] = original_advice
@@ -271,7 +329,7 @@ def run_batch_analysis(api_key=None, target_code=None):
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 趋势扫描显示
+    # 趋势扫描表格：买入推荐（未持仓且建议含"买入"）
     buy_rows = []
     sell_rows = []
     for code, advice_text in batch_advice.items():
@@ -282,8 +340,25 @@ def run_batch_analysis(api_key=None, target_code=None):
         is_holding = si.get("shares", 0) > 0
         change_str = position_change_map.get(code, "")
         is_reduced_today = change_str.startswith("-") if change_str else False
-        if not is_holding and any(kw in advice_text for kw in ["买入", "吸筹", "低吸"]):
+
+        if not is_holding and "买入" in advice_text:
+            # 提取程度（如"强烈推荐"），简化显示
+            if "强烈推荐" in advice_text:
+                display_advice = "🔥 强烈推荐买入"
+            elif "推荐" in advice_text:
+                display_advice = "📈 推荐买入"
+            else:
+                display_advice = "💡 谨慎买入"
             buy_rows.append({
+                "name": d["name"],
+                "code": d["code"],
+                "price": d["price"],
+                "change_pct": d["change_pct"],
+                "final_score": si["final_score"],
+                "advice": display_advice
+            })
+        elif is_holding and not is_reduced_today and any(kw in advice_text for kw in ["减仓", "清仓", "卖出", "止损"]):
+            sell_rows.append({
                 "name": d["name"],
                 "code": d["code"],
                 "price": d["price"],
@@ -291,16 +366,6 @@ def run_batch_analysis(api_key=None, target_code=None):
                 "final_score": si["final_score"],
                 "advice": advice_text
             })
-        elif is_holding and any(kw in advice_text for kw in ["卖出", "止损", "止盈", "减仓", "清仓"]):
-            if not is_reduced_today:
-                sell_rows.append({
-                    "name": d["name"],
-                    "code": d["code"],
-                    "price": d["price"],
-                    "change_pct": d["change_pct"],
-                    "final_score": si["final_score"],
-                    "advice": advice_text
-                })
 
     buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
     sell_rows.sort(key=lambda x: x["final_score"], reverse=True)

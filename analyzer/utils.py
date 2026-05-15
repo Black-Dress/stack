@@ -118,7 +118,7 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
         cols = [
             ("名称", "name", DISPLAY_NAME_WIDTH, "left"),
             ("代码", "code", DISPLAY_CODE_WIDTH, "left"),
-            ("价格", "price", DISPLAY_PRICE_WIDTH, "left"),
+            ("价格", "price", DISPLAY_NUMS_WIDTH, "left"),
             ("涨跌", "change_pct", DISPLAY_CHANGE_WIDTH, "left"),
             ("评分", "final_score", DISPLAY_SCORE_WIDTH, "left"),
             ("特征标签", "risk_str", DISPLAY_TAGS_WIDTH, "left")
@@ -127,19 +127,19 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
         cols = [
             ("名称", "name", DISPLAY_NAME_WIDTH, "left"),
             ("代码", "code", DISPLAY_CODE_WIDTH, "left"),
-            ("份额", "shares", DISPLAY_PRICE_WIDTH, "left"),
-            ("成本", "cost", DISPLAY_PRICE_WIDTH, "left"),
-            ("现价", "price", DISPLAY_PRICE_WIDTH, "left"),
-            ("盈亏%", "profit_pct", DISPLAY_PRICE_WIDTH, "left"),
-            ("变化", "change", DISPLAY_PRICE_WIDTH, "left"),
-            ("评分", "score", DISPLAY_SCORE_WIDTH, "left"),
+            ("份额", "shares", DISPLAY_NUMS_WIDTH, "left"),
+            ("成本", "cost", DISPLAY_NUMS_WIDTH, "left"),
+            ("现价", "price", DISPLAY_NUMS_WIDTH, "left"),
+            ("盈亏%", "profit_pct", DISPLAY_NUMS_WIDTH, "left"),
+            ("变化", "change", DISPLAY_NUMS_WIDTH, "left"),
+            ("评分", "score", DISPLAY_NUMS_WIDTH, "left"),
             ("建议", "advice", DISPLAY_TAGS_WIDTH, "left")
         ]
     elif table_type == "trend":
         cols = [
             ("名称", "name", DISPLAY_NAME_WIDTH, "left"),
             ("代码", "code", DISPLAY_CODE_WIDTH, "left"),
-            ("价格", "price", DISPLAY_PRICE_WIDTH, "left"),
+            ("价格", "price", DISPLAY_NUMS_WIDTH, "left"),
             ("涨跌", "change_pct", DISPLAY_CHANGE_WIDTH, "left"),
             ("评分", "final_score", DISPLAY_SCORE_WIDTH, "left"),
             ("建议", "advice", DISPLAY_TAGS_WIDTH, "left")
