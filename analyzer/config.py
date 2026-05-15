@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""全局配置、默认权重表（按市场状态）及技术参数"""
+"""全局配置：技术参数、事件阈值、资金参数等"""
 import os
 
-# ---------------------------- 路径 ----------------------------
+# ========== 路径 ==========
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 POSITION_FILE = os.path.join(DATA_DIR, "positions.csv")
 STATE_FILE = os.path.join(DATA_DIR, "etf_state.json")
 POSITION_HISTORY_FILE = os.path.join(DATA_DIR, "position_history.json")
 
-# ---------------------------- ETF 技术参数 ----------------------------
+# ========== 基础技术参数 ==========
 ETF_MA = 20
 ETF_VOL_MA = 5
 MARKET_INDEX = "sh.000001"
@@ -20,7 +20,6 @@ ATR_PERIOD = 14
 HISTORY_DAYS = 200
 MAX_WORKERS = 5
 
-# ---------------------------- 技术指标窗长 ----------------------------
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
@@ -31,64 +30,146 @@ WILLIAMS_WINDOW = 14
 RSI_WINDOW = 14
 MA30_WINDOW = 30
 
-# ---------------------------- 评分合成 ----------------------------
 NONLINEAR_SCALE_BULL = 2.5
 NONLINEAR_SCALE_RANGE = 1.5
 
-# ---------------------------- 信号确认 ----------------------------
-DEFAULT_CONFIRM_DAYS = 2
-BUY_THRESHOLD = 50
-SELL_THRESHOLD = -20
-QUICK_BUY_THRESHOLD = 60
-
-SIGNAL_CONFIRM_MODE = "majority"
-QUICK_BUY_ENABLE = True
-QUICK_BUY_SCORE_INCREASE = 15
-
-ACTION_LEVEL_THRESHOLDS = [80, 70, 60, 40, 20, 0, -20, -40, -60, -999]
-ACTION_LEVEL_NAMES = [
-    "极强", "强势", "偏强", "中性偏强", "中性",
-    "中性偏弱", "偏弱", "弱势", "极弱", "极弱"
-]
-
-# ---------------------------- 风险提示参数 ----------------------------
+# ========== 风险标签参数（用于显示） ==========
 RISK_WARNING_DAYS = 3
 RISK_WARNING_THRESHOLD = 30
 MA30_WEAKNESS_PENALTY = 0.9
 
-# ---------------------------- 动态风险（ATR 倍数） ----------------------------
+# ========== 动态止损（用于风险标签） ==========
 ATR_STOP_MULT = 2.0
 ATR_TRAILING_PROFIT_MULT = 1.5
 RISK_ALERT_DISTANCE_ATR = 0.5
 
-# ---------------------------- 基于成本的止盈止损 ----------------------------
+# ========== 成本止盈止损（仅用于提示，不决策） ==========
 COST_TAKE_PROFIT_CLEAR = 0.20
 COST_TAKE_PROFIT_HALF = 0.15
 COST_STOP_LOSS_PCT = -0.08
-USE_COST_BASED_OVERRIDE = True
 PROFIT_TAKE_MODE = "soft"
-COST_HALF_PROFIT_ACTION = "HOLD"
 
-# ---------------------------- ATR 仓位管理参数 ----------------------------
-TOTAL_CAPITAL = 40000      # 总资金（元），可修改
-RISK_PERCENT = 0.01            # 单笔风险占总资金比例（1%）
-MAX_POSITION_PCT = 0.7        # 单只ETF最大仓位占总资金比例（25%）
-MIN_TRADE_SHARES = 100         # 最小交易份额（ETF 100份起）
+# ========== 全局资金仓位约束 ==========
+TOTAL_CAPITAL = 40000      # 总资金（元）
+MAX_SINGLE_POSITION_RATIO = 0.30    # 单只ETF最大仓位（25%）
+MAX_TOTAL_CAPITAL_RATIO = 0.9       # 所有ETF总仓位上限（100%）
 
-# ---------------------------- AI 配置 ----------------------------
+# ========== 底仓参数 ==========
+BASE_POSITION_RATIO = 0.07      # 底仓占总资金比例（7%）
+
+# ========== 买入事件参数 ==========
+# 早期预警
+EARLY_WARNING_MA_SHORT = 5
+EARLY_WARNING_MA_MEDIUM = 10
+EARLY_WARNING_VOL_RATIO = 1.2
+
+# 初步加仓（趋势反转）
+REVERSAL_MA = 10
+REVERSAL_MACD_HIST_CONSECUTIVE = 2
+REVERSAL_RSI_MIN = 40
+REVERSAL_VOL_RATIO = 1.2
+TREND_ADD_PCT = 0.5                 # 每次加仓占底仓的比例（50%）
+MAX_TREND_ADD_RATIO = 0.10          # 总趋势加仓上限占总资金比例（10%）
+
+# 确认加仓
+CONFIRM_MA_SHORT = 10
+CONFIRM_MA_LONG = 20
+CONFIRN_SCORE_MIN = 70              # 原始评分最低要求
+
+# ========== 卖出事件参数 ==========
+# 卖出早期预警
+SELL_EARLY_WARNING_MA = 10
+SELL_EARLY_WARNING_MACD_HIST = 2
+SELL_EARLY_WARNING_VOL_RATIO = 1.2
+
+# 初步减仓
+SELL_PRELIMINARY_MA = 10
+SELL_PRELIMINARY_PULLBACK = 0.05    # 5%
+SELL_PRELIMINARY_REDUCE_PCT = 0.20  # 减仓20%
+
+# 确认减仓
+SELL_CONFIRM_MA = 20
+SELL_CONFIRM_PULLBACK = 0.10        # 10%
+SELL_CONFIRM_SCORE_THRESHOLD = 40
+
+# ========== 深度回撤补仓参数 ==========
+DIP_HIGH_PERIOD = 10
+DIP_THRESHOLD = 0.06                # 回撤6%
+DIP_RSI_THRESHOLD = 35
+ADD_BASE_PCT = 0.30                 # 每次补仓占底仓的比例（30%）
+MAX_ADD_RATIO = 0.15                # 总补仓上限占总资金比例（15%）
+
+# ========== 过热止盈参数 ==========
+OVERHEAT_RSI_THRESHOLD = 80
+OVERHEAT_RSI_DAYS = 2
+OVERHEAT_MA20_DEVIATION = 0.15
+OVERHEAT_MA60_DEVIATION = 0.25
+OVERHEAT_VOL_RATIO = 2.0
+OVERHEAT_ATR_MULT = 1.5
+OVERHEAT_3DAY_GAIN = 0.15
+OVERHEAT_PROFIT_PCT = 0.20
+
+OVERHEAT_SELL_PCT = 0.30            # 首次止盈卖出30%
+OVERHEAT_SELL_PCT2 = 0.30           # 二次止盈卖出30%
+OVERHEAT_MIN_CONDITIONS = 2         # 最少满足条件数
+
+# ========== 大盘状态折扣（用于评分调整，已保留但不再用于事件） ==========
+STATE_DISCOUNT = {
+    "强牛": 1.0,
+    "弱牛": 0.9,
+    "震荡": 0.8,
+    "弱熊": 0.7,
+    "强熊": 0.6
+}
+
+# 强牛时补仓回撤阈值降低
+BULL_MARKET_DIP_THRESHOLD = 0.05
+
+# ========== AI 配置 ==========
 AI_CACHE_TTL = 300
 AI_ENABLE = True
 
-# ---------------------------- 显示宽度配置 ----------------------------
+# ========== 显示宽度 ==========
 DISPLAY_NAME_WIDTH = 22
-DISPLAY_CODE_WIDTH = 16
-DISPLAY_PRICE_WIDTH = 12
-DISPLAY_CHANGE_WIDTH = 12
-DISPLAY_SCORE_WIDTH = 16
-DISPLAY_TAGS_WIDTH = 40 
+DISPLAY_CODE_WIDTH = 12
+DISPLAY_PRICE_WIDTH = 10
+DISPLAY_CHANGE_WIDTH = 14
+DISPLAY_SCORE_WIDTH = 10
+DISPLAY_TAGS_WIDTH = 60
 DISPLAY_NUMS_WIDTH = 8
 
-# ---------------------------- 市场状态权重表 ----------------------------
+# ========== TMSV 参数（保留，供 analyzer 使用） ==========
+TMSV_HIGH_VOL_THRESH = 0.03
+TMSV_TREND_REDUCE = 0.05
+TMSV_MIN_TREND_WEIGHT = 0.15
+TMSV_TREND_MA20_WEIGHT = 0.5
+TMSV_TREND_MA60_WEIGHT = 0.3
+TMSV_TREND_SLOPE_WEIGHT = 0.2
+TMSV_MOM_RSI_WEIGHT = 0.6
+TMSV_MOM_MACD_WEIGHT = 0.4
+TMSV_VOL_RATIO_WEIGHT = 0.7
+TMSV_VOL_CONSIST_WEIGHT = 0.3
+TMSV_VOL_LOW_THRESH = 0.01
+TMSV_VOL_HIGH_THRESH = 0.03
+TMSV_VOL_LOW_FACTOR = 1.5
+TMSV_VOL_HIGH_FACTOR = 0.6
+TMSV_VOL_MID_FACTOR_BASE = 1.2
+TMSV_VOL_MID_FACTOR_SLOPE = 0.6
+TMSV_VOL_BAND_WIDTH = 0.02
+TMSV_MA20_WINDOW = 20
+TMSV_MA60_WINDOW = 60
+TMSV_ATR_WINDOW = 14
+TMSV_VOL_MA_WINDOW = 20
+TMSV_PRICE_DIVISOR = 0.1
+TMSV_SLOPE_SCALE = 10.0
+TMSV_RSI_SCALE = 3.33
+TMSV_MACD_DIFF_EPS = 0.001
+TMSV_MACD_CHANGE_SCALE = 100.0
+TMSV_VOL_RATIO_BASE = 0.8
+TMSV_VOL_RATIO_DIVISOR = 1.2
+TMSV_VOL_CONSIST_SCORE = 100.0
+
+
 BUY_WEIGHTS_BULL = {
     "price_above_ma20": 0.18,
     "volume_above_ma5": 0.10,
@@ -171,76 +252,3 @@ SELL_WEIGHTS_BEAR = {
     "downside_momentum": 0.10,
     "max_drawdown_stop": 0.10,
 }
-
-BUY_FACTOR_NAMES = list(BUY_WEIGHTS_BULL.keys())
-SELL_FACTOR_NAMES = list(SELL_WEIGHTS_BULL.keys())
-
-# ---------------------------- TMSV 动态权重与参数 ----------------------------
-TMSV_HIGH_VOL_THRESH = 0.03
-TMSV_TREND_REDUCE = 0.05
-TMSV_MIN_TREND_WEIGHT = 0.15
-TMSV_TREND_MA20_WEIGHT = 0.5
-TMSV_TREND_MA60_WEIGHT = 0.3
-TMSV_TREND_SLOPE_WEIGHT = 0.2
-TMSV_MOM_RSI_WEIGHT = 0.6
-TMSV_MOM_MACD_WEIGHT = 0.4
-TMSV_VOL_RATIO_WEIGHT = 0.7
-TMSV_VOL_CONSIST_WEIGHT = 0.3
-TMSV_VOL_LOW_THRESH = 0.01
-TMSV_VOL_HIGH_THRESH = 0.03
-TMSV_VOL_LOW_FACTOR = 1.5
-TMSV_VOL_HIGH_FACTOR = 0.6
-TMSV_VOL_MID_FACTOR_BASE = 1.2
-TMSV_VOL_MID_FACTOR_SLOPE = 0.6
-TMSV_VOL_BAND_WIDTH = 0.02
-TMSV_MA20_WINDOW = 20
-TMSV_MA60_WINDOW = 60
-TMSV_ATR_WINDOW = 14
-TMSV_VOL_MA_WINDOW = 20
-TMSV_PRICE_DIVISOR = 0.1
-TMSV_SLOPE_SCALE = 10.0
-TMSV_RSI_SCALE = 3.33
-TMSV_MACD_DIFF_EPS = 0.001
-TMSV_MACD_CHANGE_SCALE = 100.0
-TMSV_VOL_RATIO_BASE = 0.8
-TMSV_VOL_RATIO_DIVISOR = 1.2
-TMSV_VOL_CONSIST_SCORE = 100.0
-
-# ---------------------------- 趋势扫描参数（硬编码） ----------------------------
-TREND_BUY_MAX_COUNT = 3
-TREND_BUY_LOW_PROFIT_MIN = 0.05
-TREND_BUY_LOW_PROFIT_MAX = 0.25
-TREND_BUY_MAX_PULLBACK = 0.05
-TREND_BUY_DAILY_GAIN_MIN = 0.005
-TREND_BUY_DAILY_GAIN_MAX = 0.06
-TREND_BUY_PREFER_SIGNAL = True
-
-TREND_SELL_MAX_COUNT = 5
-TREND_SELL_MIN_DAILY_LOSS = -0.03
-TREND_SELL_MIN_PULLBACK = 0.06
-TREND_SELL_MIN_LOW_PROFIT = 0.18
-TREND_SELL_INCLUDE_WEAK_MA = True
-TREND_SELL_INCLUDE_CLEAR_STOP = True
-
-LEFT_BUY_ENABLE = True
-LEFT_BUY_DAILY_GAIN_MIN = -0.03
-LEFT_BUY_DAILY_GAIN_MAX = 0.03
-LEFT_BUY_LOW_PROFIT_MIN = 0.0
-LEFT_BUY_LOW_PROFIT_MAX = 0.15
-LEFT_BUY_MAX_PULLBACK = 0.08
-LEFT_BUY_MIN_SCORE = 50
-LEFT_BUY_RSI_MAX = 55
-LEFT_BUY_REQUIRE_BELOW_MA = False
-LEFT_BUY_MAX_COUNT = 4
-
-BUY_ADVICE_ENABLE = True
-
-def get_email_config():
-    return {
-        "smtp_server": os.getenv("SMTP_SERVER", "smtp.qq.com"),
-        "smtp_port": int(os.getenv("SMTP_PORT", "587")),
-        "sender_email": os.getenv("SENDER_EMAIL", ""),
-        "sender_password": os.getenv("SENDER_PASSWORD", ""),
-        "receiver_email": os.getenv("RECEIVER_EMAIL", ""),
-        "send_email": os.getenv("SEND_EMAIL", "false").lower() == "true",
-    }

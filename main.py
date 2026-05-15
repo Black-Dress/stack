@@ -1,100 +1,28 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-ETF 智能分析系统
-ATR仓位管理 + 全局仓位约束 + 大盘环境对评分的统一折扣（影响评分、仓位分配、AI）
-趋势扫描使用5日涨跌幅 + 连续2日评分过滤
-"""
+"""ETF 事件驱动仓位管理引擎 - 主入口"""
 import argparse
 import datetime
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Dict, List, Optional, Any
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 
 from analyzer.data_layer import DataLayer
 from analyzer.analyzer import DataAnalyzer
 from analyzer.ai import AIClient
+from analyzer.event_detector import detect_events
 from analyzer.config import *
 from analyzer.utils import print_unified_table, resolve_real_price
-from analyzer.trend_scanner import select_trend_buy, select_left_buy, select_trend_sell
 
 logger = logging.getLogger(__name__)
 
 
-def calculate_atr_advice(
-    score: float,
-    atr_pct: float,
-    price: float,
-    shares: int,
-    cost_price: Optional[float] = None,
-    daily_change_shares: int = 0,
-    target_ratio: Optional[float] = None,
-) -> str:
-    """
-    基于 ATR 和实际持仓占比的仓位管理建议。
-    如果 target_ratio 不为 None，则直接使用该目标占比；否则根据 score 计算。
-    """
-    is_holding = shares > 0
-
-    def _calc_normal_advice(use_target_ratio: float) -> str:
-        current_value = shares * price
-        current_ratio = current_value / TOTAL_CAPITAL
-        gap = use_target_ratio - current_ratio
-        if abs(gap) < 0.01:
-            return "持有不动"
-        vol_factor = max(0.5, min(1.5, 0.02 / max(atr_pct, 0.01)))
-        max_step = 0.10 * vol_factor
-        if gap > 0:
-            step = min(gap, max_step)
-            if current_value > 0:
-                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
-                pct_of_current = min(pct_of_current, 50.0)
-                return f"加仓{pct_of_current:.0f}% | 价位：当前价附近"
-            else:
-                return "持有不动"
-        else:
-            step = min(-gap, max_step)
-            if current_value > 0:
-                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100
-                pct_of_current = min(pct_of_current, 50.0)
-                if pct_of_current >= 80:
-                    return f"清仓 | 价位：{price:.3f}附近"
-                return f"减仓{pct_of_current:.0f}% | 价位：{price:.3f}附近"
-            else:
-                return "持仓异常"
-
-    # 未持仓
-    if not is_holding:
-        if target_ratio is not None and target_ratio <= 0:
-            return "推荐但无仓位（总仓位已满）"
-        if score < 50:
-            return "买入 | 程度：谨慎"
-        elif score < 70:
-            return "买入 | 程度：推荐"
-        else:
-            return "买入 | 程度：强烈推荐"
-
-    # 已持仓：确定目标占比
-    if target_ratio is None:
-        target_ratio = max(0.0, min(MAX_POSITION_PCT, (score - 30) / 70 * MAX_POSITION_PCT))
-    normal_advice = _calc_normal_advice(target_ratio)
-
-    if daily_change_shares == 0:
-        return normal_advice
-
-    op_text = f"已加仓{daily_change_shares}股" if daily_change_shares > 0 else f"已减仓{-daily_change_shares}股"
-    if normal_advice == "持有不动":
-        return op_text
-    else:
-        return f"{op_text}，{normal_advice}"
-
-
-def run_batch_analysis(api_key=None, target_code=None):
+def run_batch_analysis(api_key: str = None, target_code: str = None):
     if not api_key:
         print("错误：未设置 DEEPSEEK_API_KEY 环境变量，AI不可用，程序退出。")
         sys.exit(1)
@@ -147,16 +75,18 @@ def run_batch_analysis(api_key=None, target_code=None):
         if use_fallback:
             logger.warning(f"{code} 实时价获取失败，使用昨日收盘 {real_price:.3f}")
         s = state.get(code, {})
-        report = analyzer.detailed_analysis(
+        # 详细分析（仅打印评分）
+        _, _, new_state, score, _, scan_info = analyzer.analyze_single_etf(
             code, name, real_price, hist, weekly, env, today, s,
-            ai_client=ai_client, cost_price=cost if pd.notna(cost) else None, shares=int(shares) if pd.notna(shares) else 0
+            cost_price=cost if pd.notna(cost) else None, shares=int(shares) if pd.notna(shares) else 0
         )
-        print(report)
+        print(f"详细分析 - 代码: {code}, 评分: {score:.1f}")
+        dl.save_state(new_state)
         dl.logout()
         return
 
-    scan_info_list = []
-
+    # 并发获取所有ETF的技术指标
+    scan_info_list: List[Dict] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
         for _, row in etf_list.iterrows():
@@ -184,7 +114,29 @@ def run_batch_analysis(api_key=None, target_code=None):
                 scan_info = {}
             scan_info_list.append(scan_info)
 
-    # ---------- 主表格 ----------
+    # 同步用户操作（比较当前份额与上次记录的份额）
+    for si in scan_info_list:
+        code = si["display"]["code"]
+        current_shares = si.get("shares", 0)
+        last_known = state.get(code, {}).get("last_known_shares", 0)
+        if current_shares != last_known:
+            if code not in state:
+                state[code] = {}
+            state[code]["last_known_shares"] = current_shares
+            if si.get("cost_price") is not None:
+                state[code]["last_known_cost"] = si["cost_price"]
+            if current_shares == 0:
+                state[code]["trend_add_count"] = 0
+                state[code]["dip_add_count"] = 0
+                state[code]["overheat_triggered"] = False
+                state[code]["overheat_count"] = 0
+                state[code]["position_state"] = "CLEARED"
+            elif last_known == 0 and current_shares > 0:
+                state[code]["trend_add_count"] = 0
+                state[code]["dip_add_count"] = 0
+                state[code]["position_state"] = "BASE_HOLD"
+
+    # 主表格
     main_rows = []
     for si in scan_info_list:
         d = si.get("display", {})
@@ -199,316 +151,136 @@ def run_batch_analysis(api_key=None, target_code=None):
     main_rows_sorted = sorted(main_rows, key=lambda x: x["final_score"], reverse=True)
     print_unified_table(main_rows_sorted, env=env, today_str=today_str, table_type="main")
 
-    # ---------- 持仓表格 ----------
+    # 事件检测
+    event_results: Dict[str, Dict] = {}
+    for si in scan_info_list:
+        code = si["display"]["code"]
+        current_state = state.get(code, {})
+        # 准备数据字典
+        data_dict = {
+            "price": si["display"]["price"],
+            "final_score": si.get("final_score", 50),
+            "rsi": si.get("rsi", 50),
+            "vol_ratio": si.get("vol_ratio", 1.0),
+            "profit_pct_from_low": si.get("profit_pct_from_low", 0.0),
+            "atr_pct": si.get("atr_pct", 0.02),
+            "ma5": si.get("ma5"),
+            "ma10": si.get("ma10"),
+            "ma20": si.get("ma20"),
+            "ma10_trend": si.get("ma10_trend", 0),
+            "ma20_trend": si.get("ma20_trend", 0),
+            "recent_high_10": si.get("recent_high_10", si["display"]["price"]),
+            "recent_high_20": si.get("recent_high_20", si["display"]["price"]),
+            "macd_hist": si.get("macd_hist", 0.0),
+            "cost_profit_pct": si.get("cost_profit_pct"),
+            "shares": si.get("shares", 0),
+        }
+        # 更新 MACD 历史
+        last_macd_hist = current_state.get("last_macd_hist", 0.0)
+        current_state["last_macd_hist"] = data_dict["macd_hist"]
+        macd_shrink_days = current_state.get("macd_shrink_days", 0)
+        if data_dict["macd_hist"] > last_macd_hist:
+            macd_shrink_days += 1
+        else:
+            macd_shrink_days = 0
+        current_state["macd_shrink_days"] = macd_shrink_days
+        # 调用事件检测
+        event, advice, need_update = detect_events(
+            code, data_dict, env["state"], current_state
+        )
+        if need_update:
+            # 更新计数器
+            if event == "trend_reversal":
+                current_state["trend_add_count"] = current_state.get("trend_add_count", 0) + 1
+            elif event == "trend_confirm":
+                current_state["trend_add_count"] = current_state.get("trend_add_count", 0) + 1
+            elif event == "dip":
+                current_state["dip_add_count"] = current_state.get("dip_add_count", 0) + 1
+            elif event == "overheat":
+                current_state["overheat_triggered"] = True
+                current_state["overheat_count"] = current_state.get("overheat_count", 0) + 1
+            elif event in ("sell_prelim", "sell_confirm"):
+                current_state["trend_add_count"] = 0
+                current_state["dip_add_count"] = 0
+            elif event == "clear":
+                current_state["trend_add_count"] = 0
+                current_state["dip_add_count"] = 0
+                current_state["overheat_triggered"] = False
+                current_state["overheat_count"] = 0
+                current_state["position_state"] = "CLEARED"
+            elif event == "buy":
+                current_state["position_state"] = "BASE_HOLD"
+                current_state["trend_add_count"] = 0
+                current_state["dip_add_count"] = 0
+        event_results[code] = {
+            "advice": advice,
+            "name": si["display"]["name"],
+            "score": si["final_score"],
+            "event": event,
+        }
+
+    # AI 润色
+    if ai_client and AI_ENABLE:
+        try:
+            # 提取建议映射 {code: advice}
+            advice_map = {code: data["advice"] for code, data in event_results.items()}
+            # 调用 AI 润色
+            enhanced_advice = ai_client.get_batch_recommendations(advice_map, env["state"])
+            # 更新 event_results 中的 advice
+            for code, new_advice in enhanced_advice.items():
+                if code in event_results:
+                    event_results[code]["advice"] = new_advice
+        except Exception as e:
+            logger.warning(f"AI润色失败: {e}")
+
+    # 持仓表格
     position_rows = []
-    position_change_map = {}
     for si in scan_info_list:
         if si.get("shares", 0) > 0 and si.get("cost_price") is not None:
+            code = si["display"]["code"]
             cost = si["cost_price"]
-            price = si.get("display", {}).get("price", 0)
+            price = si["display"]["price"]
             profit_pct = (price - cost)/cost*100 if cost>0 else 0
-            delta, delta_pct = dl.get_position_change(si.get("display",{}).get("code",""), si["shares"])
+            delta, delta_pct = dl.get_position_change(code, si["shares"])
             change_str = f"+{delta}(+{delta_pct:.0f}%)" if delta>0 else (f"{delta}({delta_pct:.0f}%)" if delta!=0 else "0")
+            advice = event_results.get(code, {}).get("advice", "")
             position_rows.append({
-                "name": si.get("display",{}).get("name",""),
-                "code": si.get("display",{}).get("code",""),
+                "name": si["display"]["name"],
+                "code": code,
                 "shares": si["shares"],
                 "cost": cost,
                 "price": price,
                 "profit_pct": profit_pct,
                 "change": change_str,
                 "score": si["final_score"],
-                "advice": ""
+                "advice": advice
             })
-            position_change_map[si.get("display",{}).get("code","")] = delta
-
-    # ---------- 趋势扫描候选（使用5日涨跌幅 + 连续2日评分过滤） ----------
-    BUY_MAX_COUNT = 6
-    BUY_LOW_PROFIT_MIN = 0.02
-    BUY_LOW_PROFIT_MAX = 0.35
-    BUY_MAX_PULLBACK = 0.08
-    BUY_DAILY_GAIN_MIN = -0.15
-    BUY_DAILY_GAIN_MAX = 0.30
-
-    LEFT_MAX_COUNT = 4
-    LEFT_DAILY_GAIN_MIN = -0.15
-    LEFT_DAILY_GAIN_MAX = 0.30
-    LEFT_LOW_PROFIT_MIN = 0.0
-    LEFT_LOW_PROFIT_MAX = 0.12
-    LEFT_MAX_PULLBACK = 0.10
-    LEFT_MIN_SCORE = 45
-    LEFT_RSI_MAX = 55
-    LEFT_REQUIRE_BELOW_MA = False
-
-    SELL_MAX_COUNT = 5
-    SELL_MIN_DAILY_LOSS = -0.02
-    SELL_MIN_PULLBACK = 0.05
-    SELL_MIN_LOW_PROFIT = 0.15
-    SELL_INCLUDE_WEAK_MA = True
-    SELL_INCLUDE_CLEAR_STOP = True
-
-    def to_py_bool(val):
-        return bool(val) if isinstance(val, (bool, np.bool_)) else val
-    def to_py_float(val):
-        return float(val) if isinstance(val, (float, np.floating)) else val
-
-    # 复制列表并将 change_pct 替换为 change_5d
-    scan_info_list_5d = []
-    for si in scan_info_list:
-        new_si = si.copy()
-        new_si["change_pct"] = si.get("change_5d", 0.0)
-        scan_info_list_5d.append(new_si)
-
-    right_buy_indices = select_trend_buy(
-        scan_info_list_5d,
-        max_count=BUY_MAX_COUNT,
-        low_profit_min=BUY_LOW_PROFIT_MIN,
-        low_profit_max=BUY_LOW_PROFIT_MAX,
-        max_pullback=BUY_MAX_PULLBACK,
-        daily_gain_min=BUY_DAILY_GAIN_MIN,
-        daily_gain_max=BUY_DAILY_GAIN_MAX,
-        prefer_signal=True
-    )
-    right_buy_indices = [idx for idx in right_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
-
-    scan_info_list_5d_left = []
-    for si in scan_info_list:
-        new_si = si.copy()
-        new_si["change_pct"] = si.get("change_5d", 0.0)
-        scan_info_list_5d_left.append(new_si)
-    left_buy_indices = select_left_buy(
-        scan_info_list_5d_left,
-        max_count=LEFT_MAX_COUNT,
-        daily_gain_min=LEFT_DAILY_GAIN_MIN,
-        daily_gain_max=LEFT_DAILY_GAIN_MAX,
-        low_profit_min=LEFT_LOW_PROFIT_MIN,
-        low_profit_max=LEFT_LOW_PROFIT_MAX,
-        max_pullback=LEFT_MAX_PULLBACK,
-        min_score=LEFT_MIN_SCORE,
-        rsi_max=LEFT_RSI_MAX,
-        require_below_ma=LEFT_REQUIRE_BELOW_MA
-    )
-    left_buy_indices = [idx for idx in left_buy_indices if scan_info_list[idx].get("shares", 0) == 0]
-
-    sell_indices = select_trend_sell(
-        scan_info_list,
-        max_count=SELL_MAX_COUNT,
-        min_daily_loss=SELL_MIN_DAILY_LOSS,
-        min_pullback=SELL_MIN_PULLBACK,
-        min_low_profit=SELL_MIN_LOW_PROFIT,
-        include_weak_ma=SELL_INCLUDE_WEAK_MA,
-        include_clear_stop=SELL_INCLUDE_CLEAR_STOP
-    )
-    sell_indices = [idx for idx in sell_indices if scan_info_list[idx].get("shares", 0) > 0]
-
-    # ---------- 大盘环境对买入评分的折扣 ----------
-    market_state = env["state"]
-    market_factor = env["factor"]
-    state_discount = {
-        "强牛": 1.0,
-        "弱牛": 0.9,
-        "震荡": 0.8,
-        "弱熊": 0.7,
-        "强熊": 0.6
-    }
-    discount = state_discount.get(market_state, 0.8)
-    total_discount = discount * market_factor
-    total_discount = max(0.5, min(1.0, total_discount))
-
-    # 为每个 scan_info 添加折扣评分
-    for si in scan_info_list:
-        original_score = si.get("final_score", 50)
-        si["discounted_score"] = original_score * total_discount
-
-    def apply_discount(indices):
-        candidates = []
-        for idx in indices:
-            discounted_score = scan_info_list[idx]["discounted_score"]
-            candidates.append((idx, discounted_score))
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        return [idx for idx, _ in candidates]
-
-    right_buy_indices = apply_discount(right_buy_indices)
-    left_buy_indices = apply_discount(left_buy_indices)
-
-    # 评分连续性过滤（使用原始评分，保持稳定性）
-    SCORE_CONSECUTIVE_DAYS = 2
-    SCORE_MIN_THRESHOLD = 65
-    def filter_by_consecutive_score(indices):
-        filtered = []
-        for idx in indices:
-            code = scan_info_list[idx]["display"]["code"]
-            hist_scores = state.get(code, {}).get("score_history", [])
-            if len(hist_scores) < SCORE_CONSECUTIVE_DAYS:
-                continue
-            today_score = scan_info_list[idx]["final_score"]  # 原始评分
-            today_str_date = today.strftime("%Y-%m-%d")
-            yesterday_score = None
-            for rec in hist_scores:
-                if rec["date"] != today_str_date:
-                    yesterday_score = rec["score"]
-                    break
-            if (today_score >= SCORE_MIN_THRESHOLD and 
-                yesterday_score is not None and 
-                yesterday_score >= SCORE_MIN_THRESHOLD):
-                filtered.append(idx)
-        return filtered
-
-    right_buy_indices = filter_by_consecutive_score(right_buy_indices)
-    left_buy_indices = filter_by_consecutive_score(left_buy_indices)
-
-    # 左侧买入额外过滤：避免半山腰
-    filtered_left = []
-    for idx in left_buy_indices:
-        si = scan_info_list[idx]
-        change_5d = si.get("change_5d", 0.0)
-        rsi = si.get("rsi", 50)
-        low_profit = si.get("profit_pct_from_low", 0.0)
-        if change_5d <= -0.03 or (low_profit < 0.05 and rsi < 45):
-            filtered_left.append(idx)
-    left_buy_indices = filtered_left
-
-    # 构建所有需要关注的ETF
-    all_need_recommend = {}
-    for si in scan_info_list:
-        if si.get("shares", 0) > 0:
-            code = si["display"]["code"]
-            all_need_recommend[code] = si
-    for idx in right_buy_indices + left_buy_indices:
-        si = scan_info_list[idx]
-        code = si["display"]["code"]
-        if code not in all_need_recommend:
-            all_need_recommend[code] = si
-    for idx in sell_indices:
-        si = scan_info_list[idx]
-        code = si["display"]["code"]
-        if code not in all_need_recommend:
-            all_need_recommend[code] = si
-
-    # ---------- 全局仓位约束（使用折扣评分） ----------
-    constraint_items = []
-    for code, si in all_need_recommend.items():
-        discounted_score = si.get("discounted_score", 50)
-        shares = si.get("shares", 0)
-        price = si["display"]["price"]
-        current_value = shares * price
-        current_ratio = current_value / TOTAL_CAPITAL
-        # 目标占比基于折扣评分
-        raw_target = max(0.0, min(MAX_POSITION_PCT, (discounted_score - 30) / 70 * MAX_POSITION_PCT))
-        if shares > 0 or discounted_score >= 50:
-            constraint_items.append({
-                "code": code,
-                "discounted_score": discounted_score,
-                "current_ratio": current_ratio,
-                "raw_target": raw_target,
-                "shares": shares,
-                "si": si,
-            })
-    # 按折扣评分降序排序
-    constraint_items.sort(key=lambda x: x["discounted_score"], reverse=True)
-    total_limit = 1.0
-    remaining = total_limit
-    adjusted_targets = {}
-    for item in constraint_items:
-        alloc = min(item["raw_target"], remaining)
-        adjusted_targets[item["code"]] = alloc
-        remaining -= alloc
-        if remaining <= 0:
-            break
-    for item in constraint_items:
-        if item["code"] not in adjusted_targets:
-            adjusted_targets[item["code"]] = item["current_ratio"] if item["shares"] > 0 else 0.0
-
-    # 准备AI数据（使用折扣评分和目标占比）
-    etf_dict_for_ai = {}
-    sys_advice_map = {}
-    for code, si in all_need_recommend.items():
-        d = si["display"]
-        original_score = si.get("final_score", 50)
-        discounted_score = si.get("discounted_score", 50)
-        atr_pct = si.get("atr_pct", 0.02)
-        price = d["price"]
-        shares = si.get("shares", 0)
-        cost = si.get("cost_price")
-        daily_change = position_change_map.get(code, 0)
-        target_ratio = adjusted_targets.get(code)
-        sys_advice = calculate_atr_advice(
-            score=discounted_score,   # 使用折扣评分用于内部计算
-            atr_pct=atr_pct,
-            price=price,
-            shares=shares,
-            cost_price=cost,
-            daily_change_shares=daily_change,
-            target_ratio=target_ratio,
-        )
-        sys_advice_map[code] = sys_advice
-
-        etf_dict_for_ai[code] = {
-            "name": d["name"],
-            "final_score": to_py_float(discounted_score),  # AI 看到折扣评分
-            "rsi": to_py_float(si.get("rsi", 50)),
-            "vol_ratio": to_py_float(si.get("vol_ratio", 1.0)),
-            "change_pct": to_py_float(si.get("change_5d", 0.0)),
-            "above_ma": to_py_bool(si.get("above_ma", False)),
-            "profit_pct_from_low": to_py_float(si.get("profit_pct_from_low", 0)),
-            "shares": shares,
-            "cost_price": cost,
-            "risk_str": d.get("risk_str", ""),
-            "price": price,
-            "change_pct_display": d["change_pct"],
-            "atr_pct": to_py_float(atr_pct),
-            "sys_advice": sys_advice,
-            "daily_change": daily_change,
-        }
-
-    # 调用AI
-    try:
-        batch_advice = ai_client.get_batch_recommendations(etf_dict_for_ai, env["state"])
-    except Exception as e:
-        print(f"AI调用失败，程序退出: {e}")
-        dl.logout()
-        sys.exit(1)
-
-    final_advice_map = batch_advice
-
-    # 更新持仓表格建议
-    for row in position_rows:
-        code = row["code"]
-        if code in final_advice_map:
-            row["advice"] = final_advice_map[code]
-
     if position_rows:
         print_unified_table(position_rows, title="📋 当前持仓详情", table_type="position")
 
-    # 趋势扫描买入推荐（仅输出）
+    # 趋势扫描买入推荐
     buy_rows = []
-    for code, advice_text in final_advice_map.items():
-        if code not in all_need_recommend:
-            continue
-        si = all_need_recommend[code]
-        d = si["display"]
-        is_holding = si.get("shares", 0) > 0
-        if not is_holding and "买入" in advice_text:
-            if "强烈推荐" in advice_text:
-                display_advice = "🔥 强烈推荐买入"
-            elif "推荐" in advice_text:
-                display_advice = "📈 推荐买入"
-            else:
-                display_advice = "💡 谨慎买入"
-            buy_rows.append({
-                "name": d["name"],
-                "code": d["code"],
-                "price": d["price"],
-                "change_pct": d["change_pct"],
-                "final_score": si["final_score"],  # 显示原始评分
-                "advice": display_advice
-            })
-
-    buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
-
+    for si in scan_info_list:
+        code = si["display"]["code"]
+        if si.get("shares", 0) == 0:
+            event = event_results.get(code, {}).get("event", "")
+            if event in ("trend_reversal", "trend_confirm", "buy"):
+                advice = event_results[code].get("advice", "")
+                if "买入" in advice or "加仓" in advice:
+                    display_advice = "🔥 强烈推荐买入" if event == "trend_confirm" else "📈 推荐买入"
+                    buy_rows.append({
+                        "name": si["display"]["name"],
+                        "code": code,
+                        "price": si["display"]["price"],
+                        "change_pct": si["display"]["change_pct"],
+                        "final_score": si["final_score"],
+                        "advice": display_advice
+                    })
     if buy_rows:
+        buy_rows.sort(key=lambda x: x["final_score"], reverse=True)
         print_unified_table(buy_rows, title="📊 [趋势扫描] 买入推荐", table_type="trend")
 
+    # 保存状态
     dl.save_state(state)
     dl.logout()
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""统一数据与环境层：获取行情、计算指标、评估市场状态（无外部情绪爬虫）"""
+"""数据层：行情获取、指标计算、持仓历史记录 + 状态管理（合并 state_manager）"""
 import os
 import json
 import datetime
@@ -12,8 +12,8 @@ import pandas as pd
 import numpy as np
 import baostock as bs
 from contextlib import redirect_stdout
-from typing import Dict, Tuple, Optional, List
-
+from typing import Dict, Tuple, Optional, List, Any
+from .config import BUY_WEIGHTS_BULL, BUY_WEIGHTS_RANGE, BUY_WEIGHTS_BEAR, SELL_WEIGHTS_BULL, SELL_WEIGHTS_RANGE, SELL_WEIGHTS_BEAR
 from .config import *
 from .utils import calc_rsi, calc_macd, calculate_atr, calculate_adx
 
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 class DataLayer:
     def __init__(self):
         self._logged_in = False
-        self._state_file = STATE_FILE
         self._price_cache = {}
 
     def login(self) -> bool:
@@ -171,19 +170,99 @@ class DataLayer:
         pct_change = (delta / prev_shares * 100) if prev_shares > 0 else 100.0 if delta > 0 else 0.0
         return (delta, pct_change)
 
+    # ---------- 状态管理 (原 state_manager 功能) ----------
     def load_state(self) -> Dict:
-        if not os.path.exists(self._state_file):
+        if not os.path.exists(STATE_FILE):
             return {}
         try:
-            with open(self._state_file, "r", encoding="utf-8") as f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             logger.warning("状态文件损坏，已重置")
             return {}
 
     def save_state(self, state: Dict):
-        with open(self._state_file, "w", encoding="utf-8") as f:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+
+    def sync_user_operations(self, state: Dict, current_etf_data: Dict[str, Dict]) -> Dict:
+        """
+        同步用户操作：比较 state 中记录的 last_known_shares 与当前实际份额，
+        更新内部计数器（trend_add_count, dip_add_count, overheat 等）
+        返回更新后的 state。
+        """
+        for code, data in current_etf_data.items():
+            current_shares = data.get("shares", 0)
+            last_known = state.get(code, {}).get("last_known_shares", 0)
+            if current_shares == last_known:
+                continue
+            if code not in state:
+                state[code] = {}
+            # 更新份额和成本
+            state[code]["last_known_shares"] = current_shares
+            if data.get("cost_price") is not None:
+                state[code]["last_known_cost"] = data["cost_price"]
+            # 处理份额归零
+            if current_shares == 0:
+                state[code]["trend_add_count"] = 0
+                state[code]["dip_add_count"] = 0
+                state[code]["overheat_triggered"] = False
+                state[code]["overheat_count"] = 0
+                state[code]["position_state"] = "CLEARED"
+                continue
+            # 新买入（从0到>0）
+            if last_known == 0 and current_shares > 0:
+                state[code]["trend_add_count"] = 0
+                state[code]["dip_add_count"] = 0
+                state[code]["overheat_triggered"] = False
+                state[code]["overheat_count"] = 0
+                state[code]["position_state"] = "BASE_HOLD"
+                continue
+            # 份额增加（用户手动加仓）
+            if current_shares > last_known:
+                added_shares = current_shares - last_known
+                # 估算加仓比例（相对于当前持仓），粗略认为一次加仓操作对应 trend_add_count +1
+                # 为避免过度增加，限制最多2次
+                new_count = state[code].get("trend_add_count", 0) + 1
+                state[code]["trend_add_count"] = min(new_count, 2)
+            # 份额减少（用户手动减仓）
+            elif current_shares < last_known:
+                # 减仓后重置加仓计数，允许重新加仓
+                state[code]["trend_add_count"] = 0
+                state[code]["dip_add_count"] = 0
+                # 如果减仓幅度很大，可重置 overheat
+                if current_shares < last_known / 2:
+                    state[code]["overheat_triggered"] = False
+                    state[code]["overheat_count"] = 0
+        return state
+
+    def update_state_counters(self, state: Dict, code: str, event: str):
+        """根据触发的事件更新内部计数器"""
+        if code not in state:
+            state[code] = {}
+        if event == "trend_reversal":
+            state[code]["trend_add_count"] = state[code].get("trend_add_count", 0) + 1
+        elif event == "trend_confirm":
+            state[code]["trend_add_count"] = state[code].get("trend_add_count", 0) + 1
+        elif event == "dip":
+            state[code]["dip_add_count"] = state[code].get("dip_add_count", 0) + 1
+        elif event == "overheat":
+            state[code]["overheat_triggered"] = True
+            state[code]["overheat_count"] = state[code].get("overheat_count", 0) + 1
+        elif event in ("sell_prelim", "sell_confirm"):
+            # 减仓后重置加仓计数
+            state[code]["trend_add_count"] = 0
+            state[code]["dip_add_count"] = 0
+        elif event == "clear":
+            state[code]["trend_add_count"] = 0
+            state[code]["dip_add_count"] = 0
+            state[code]["overheat_triggered"] = False
+            state[code]["overheat_count"] = 0
+            state[code]["position_state"] = "CLEARED"
+        elif event == "buy":
+            state[code]["position_state"] = "BASE_HOLD"
+            state[code]["trend_add_count"] = 0
+            state[code]["dip_add_count"] = 0
 
     def calculate_indicators(self, df: pd.DataFrame,
                              need_amount_ma=False,
@@ -191,13 +270,14 @@ class DataLayer:
                              recent_low_window=20) -> pd.DataFrame:
         df = df.copy()
         df["ma_short"] = df["close"].rolling(ETF_MA).mean()
-        df["ma5"] = df["close"].rolling(5).mean()      # 新增 MA5
+        df["ma5"] = df["close"].rolling(5).mean()
+        df["ma10"] = df["close"].rolling(10).mean()
         df["vol_ma"] = df["volume"].rolling(ETF_VOL_MA).mean()
         if need_amount_ma:
             df["amount_ma"] = df["amount"].rolling(ETF_VOL_MA).mean()
         df["ma30"] = df["close"].rolling(MA30_WINDOW).mean()
 
-        df["macd_dif"], df["macd_dea"], _ = calc_macd(df["close"])
+        df["macd_dif"], df["macd_dea"], df["macd_hist"] = calc_macd(df["close"])
 
         low_n = df["low"].rolling(KDJ_N).min()
         high_n = df["high"].rolling(KDJ_N).max()
@@ -237,11 +317,12 @@ class DataLayer:
 
     def get_market_environment(self, market_df: pd.DataFrame) -> Dict:
         d = market_df.iloc[-1]
-        # 计算 MA5 和 MA5 斜率
         if "ma5" not in market_df.columns:
-            # 如果尚未计算，临时计算
             market_df["ma5"] = market_df["close"].rolling(5).mean()
-            d = market_df.iloc[-1]   # 重新获取包含 ma5 的行
+            d = market_df.iloc[-1]
+        if "ma10" not in market_df.columns:
+            market_df["ma10"] = market_df["close"].rolling(10).mean()
+            d = market_df.iloc[-1]
         ma5 = d["ma5"]
         ma20 = d["ma_short"]
         ma60 = d.get("ma30", ma20)
@@ -251,7 +332,6 @@ class DataLayer:
         atr_pct = (d["atr"] / d["close"]) if d["close"] > 0 else 0
         vol_ratio = d["volume"] / d["vol_ma"] if d["vol_ma"] > 0 else 1.0
 
-        # 基础状态（基于 MA20/MA60）
         if above_60 and above_20:
             state = "强牛" if atr_pct < 0.02 else "弱牛"
         elif not above_60 and above_20:
@@ -263,14 +343,12 @@ class DataLayer:
         else:
             state = "震荡"
 
-        # 使用 MA5 和 MA5 斜率进行状态降级（使短期转弱更快反应）
-        # 计算 MA5 斜率（今日 MA5 相比昨日 MA5 的变化）
+        # 使用 MA5 降级
         if len(market_df) >= 2:
             prev_ma5 = market_df["ma5"].iloc[-2]
             ma5_slope = (ma5 - prev_ma5) / prev_ma5 if prev_ma5 != 0 else 0
         else:
             ma5_slope = 0
-        # 如果收盘价跌破 MA5 且 MA5 斜率 < 0（下行），则状态降级
         if not above_5 and ma5_slope < 0:
             downgrade_map = {
                 "强牛": "弱牛",
@@ -281,12 +359,10 @@ class DataLayer:
             }
             state = downgrade_map.get(state, state)
 
-        # 环境因子计算：增加 MA5 偏离度因子
-        # 原 pos_score 基于 MA20 偏离，现在加入 MA5 偏离，各占一半
+        # 环境因子计算
         pos_score_ma20 = ((d["close"] / ma20 - 1) * 5).clip(-1, 1) if ma20 > 0 else 0
         pos_score_ma5 = ((d["close"] / ma5 - 1) * 5).clip(-1, 1) if ma5 > 0 else 0
         pos_score = (pos_score_ma20 + pos_score_ma5) / 2
-
         rsi_norm = (d["rsi"] - 50) / 50
         vol_norm = (atr_pct - 0.02) / 0.02
         fund_norm = np.tanh((vol_ratio - 1) * 2)
@@ -307,8 +383,8 @@ class DataLayer:
             "volatility": atr_pct,
             "above_ma20": above_20,
             "above_ma60": above_60,
-            "above_ma5": above_5,           # 新增
-            "ma5_slope": ma5_slope,         # 新增
+            "above_ma5": above_5,
+            "ma5_slope": ma5_slope,
             "amount_above_ma20": d.get("amount_ma", 0) > 0 and d["amount"] > d["amount_ma"],
             "ret_market_5d": (d["close"] / market_df.iloc[-5]["close"] - 1)
                              if len(market_df) >= 5 else 0,

@@ -1,24 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""核心分析引擎：ETF 评分与信号生成，权重由环境决定，已纳入成本价止盈止损覆盖（止盈软提示）"""
+"""核心分析引擎：仅负责计算评分和技术指标，不生成信号或仓位建议"""
 import datetime
 import logging
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Union
-import json
-import re
+from typing import Dict, List, Tuple, Optional
 
 from .config import *
-from .utils import (
-    weighted_sum,
-    nonlinear_score_transform,
-    cap,
-    pad_display,
-    format_detailed_report,
-    safe_ratio,
-)
+from .utils import weighted_sum, nonlinear_score_transform, safe_ratio
 from .factors import (
     factor_buy_price_above_ma20,
     factor_buy_volume_above_ma5,
@@ -56,7 +47,7 @@ class ETFContext:
     shares: int = 0
 
     change_pct: float = 0.0
-    change_5d: float = 0.0          # 新增5日涨跌幅
+    change_5d: float = 0.0
     atr_pct: float = 0.0
     tmsv: float = 50.0
     tmsv_strength: float = 0.5
@@ -94,10 +85,6 @@ class DataAnalyzer:
         self.buy_weights = {}
         self.sell_weights = {}
         self.params = {
-            "CONFIRM_DAYS": DEFAULT_CONFIRM_DAYS,
-            "BUY_THRESHOLD": BUY_THRESHOLD,
-            "SELL_THRESHOLD": SELL_THRESHOLD,
-            "QUICK_BUY_THRESHOLD": QUICK_BUY_THRESHOLD,
             "RECENT_HIGH_WINDOW": 10,
             "RECENT_LOW_WINDOW": 14,
         }
@@ -107,7 +94,6 @@ class DataAnalyzer:
         self.buy_weights = buy_w
         self.sell_weights = sell_w
 
-    # ---------- 辅助计算 ----------
     @staticmethod
     def calc_change_pct(real_price, hist_df, today):
         if real_price is None or hist_df is None or hist_df.empty:
@@ -120,51 +106,82 @@ class DataAnalyzer:
             base_close = hist_df.iloc[-1]["close"]
         return (real_price - base_close) / base_close * 100 if base_close > 0 else 0.0
 
-    @staticmethod
-    def generate_risk_alerts(price, recent_high, recent_low, atr):
-        if atr <= 0:
-            return {"stop_loss": None, "trail_profit": None, "alert": None}
-        stop_price = recent_high - ATR_STOP_MULT * atr
-        trail_price = recent_high - ATR_TRAILING_PROFIT_MULT * atr
-        alert = None
-        if price <= stop_price:
-            alert = f"🔴 动态止损({stop_price:.3f})"
-        elif price - stop_price < RISK_ALERT_DISTANCE_ATR * atr:
-            alert = f"🟡 近止损({stop_price:.3f})"
-        elif trail_price and price - trail_price < RISK_ALERT_DISTANCE_ATR * atr:
-            alert = f"🟢 近止盈({trail_price:.3f})"
-        return {"stop_loss": stop_price, "trail_profit": trail_price, "alert": alert}
+    def _core_analysis(self, ctx: ETFContext) -> ETFContext:
+        real_price = ctx.real_price
+        hist_df = ctx.hist_df
+        if real_price is None or hist_df is None or len(hist_df) < 20:
+            ctx.error = "数据不足" if hist_df is not None else "实时价格获取失败"
+            return ctx
 
-    @staticmethod
-    def evaluate_cost_based_stop_profit(price, cost, recent_high, atr, trailing_profit_level):
-        if cost is None or cost <= 0:
-            return {"action_override": None, "level_override": None}
-        profit_pct = (price - cost) / cost
-        if profit_pct <= COST_STOP_LOSS_PCT:
-            return {"action_override": "SELL", "level_override": "止损卖出"}
-        is_clear = profit_pct >= COST_TAKE_PROFIT_CLEAR and trailing_profit_level == "clear"
-        is_half = profit_pct >= COST_TAKE_PROFIT_HALF and trailing_profit_level in ("half", "clear")
-        if PROFIT_TAKE_MODE == "hard":
-            if is_clear:
-                return {"action_override": "SELL", "level_override": "清仓止盈"}
-            if is_half and COST_HALF_PROFIT_ACTION == "SELL":
-                return {"action_override": "SELL", "level_override": "半仓止盈"}
+        ctx.change_pct = self.calc_change_pct(real_price, hist_df, ctx.today)
+        if len(hist_df) >= 5:
+            close_5d_ago = hist_df.iloc[-5]["close"]
+            ctx.change_5d = (real_price - close_5d_ago) / close_5d_ago
         else:
-            if is_clear:
-                return {"action_override": None, "level_override": "清仓止盈(提示)"}
-            if is_half:
-                return {"action_override": None, "level_override": "半仓止盈(提示)"}
-        return {"action_override": None, "level_override": None}
+            ctx.change_5d = 0.0
+
+        d = hist_df.iloc[-1]
+        ctx.atr_pct = d["atr"] / real_price if real_price > 0 else 0
+        ctx.rsi = d["rsi"]
+        ctx.above_ma30 = real_price > d["ma30"] if "ma30" in d and not pd.isna(d["ma30"]) else True
+        ctx.is_weak_ma = not ctx.above_ma30
+
+        ctx.weekly_above = ctx.weekly_below = False
+        if ctx.weekly_df is not None and not ctx.weekly_df.empty:
+            w = ctx.weekly_df.iloc[-1]
+            if "ma_short" in w.index and not pd.isna(w["ma_short"]):
+                ctx.weekly_above = w["close"] > w["ma_short"]
+                ctx.weekly_below = w["close"] < w["ma_short"]
+
+        market_state = ctx.market.get("state", "震荡")
+        try:
+            tmsv_series = compute_tmsv(hist_df, market_state, ctx.market.get("volatility", 0.02))
+            ctx.tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
+            ctx.tmsv_strength = ctx.tmsv / 100.0
+        except Exception:
+            ctx.tmsv = 50.0
+            ctx.tmsv_strength = 0.5
+
+        ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
+        self._evaluate_take_profit(ctx)
+
+        if ctx.cost_price is not None and ctx.cost_price > 0:
+            ctx.cost_profit_pct = (real_price - ctx.cost_price) / ctx.cost_price
+
+        ctx.buy_weights_used = self.buy_weights.copy()
+        ctx.sell_weights_used = self.sell_weights.copy()
+        self._compute_factors(ctx, d)
+
+        ctx.buy_score = weighted_sum(ctx.buy_factors, ctx.buy_weights_used)
+        ctx.sell_score = weighted_sum(ctx.sell_factors, ctx.sell_weights_used)
+
+        if not ctx.above_ma30:
+            ctx.buy_score *= MA30_WEAKNESS_PENALTY
+        if ctx.buy_factors.get("macd_golden_cross", 0) == 0 and ctx.buy_factors.get("kdj_golden_cross", 0) == 0:
+            ctx.buy_score *= 0.95
+
+        ctx.raw_score = ctx.buy_score - ctx.sell_score
+        env_factor = ctx.market["factor"]
+        transformed = nonlinear_score_transform(ctx.raw_score, market_state, NONLINEAR_SCALE_BULL, NONLINEAR_SCALE_RANGE)
+        ctx.final_score = (transformed * env_factor) * 50 + 50
+        ctx.final_score = max(1.0, min(99.0, ctx.final_score))
+
+        if ctx.profit_pct_from_low > 0.12:
+            ctx.final_score *= 0.92
+        if ctx.rsi > 75:
+            ctx.final_score *= 0.95
+        ctx.final_score = max(1.0, min(99.0, ctx.final_score))
+        return ctx
 
     def _evaluate_take_profit(self, ctx):
         if ctx.real_price is None or ctx.hist_df is None or ctx.hist_df.empty:
             return
         price = ctx.real_price
         d = ctx.hist_df.iloc[-1]
-        recent_high = d.get(f"recent_high_{ctx.params['RECENT_HIGH_WINDOW']}",
-                            ctx.hist_df["high"].rolling(ctx.params['RECENT_HIGH_WINDOW']).max().iloc[-1])
-        recent_low = d.get(f"recent_low_{ctx.params['RECENT_LOW_WINDOW']}",
-                           ctx.hist_df["low"].rolling(ctx.params['RECENT_LOW_WINDOW']).min().iloc[-1])
+        recent_high = d.get(f"recent_high_{self.params['RECENT_HIGH_WINDOW']}",
+                            ctx.hist_df["high"].rolling(self.params['RECENT_HIGH_WINDOW']).max().iloc[-1])
+        recent_low = d.get(f"recent_low_{self.params['RECENT_LOW_WINDOW']}",
+                           ctx.hist_df["low"].rolling(self.params['RECENT_LOW_WINDOW']).min().iloc[-1])
         ctx.recent_high_price = recent_high
         ctx.recent_low_price = recent_low
         ctx.max_drawdown_pct = (recent_high - price) / recent_high if recent_high > 0 else 0.0
@@ -245,75 +262,83 @@ class DataAnalyzer:
             "max_drawdown_stop":     factor_sell_max_drawdown_stop(ctx.max_drawdown_pct),
         }
 
-    def _core_analysis(self, ctx):
-        real_price = ctx.real_price
-        hist_df = ctx.hist_df
-        if real_price is None or hist_df is None or len(hist_df) < 20:
-            ctx.error = "数据不足" if hist_df is not None else "实时价格获取失败"
-            return ctx
+    def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
+                           market, today, state, cost_price=None, shares=0) -> Tuple[str, Optional[dict], dict, float, Optional[dict], Optional[dict]]:
+        ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
+                         cost_price=cost_price, shares=shares)
+        ctx = self._core_analysis(ctx)
 
-        ctx.change_pct = self.calc_change_pct(real_price, hist_df, ctx.today)
-        # 计算5日涨跌幅
-        if len(hist_df) >= 5:
-            close_5d_ago = hist_df.iloc[-5]["close"]
-            ctx.change_5d = (real_price - close_5d_ago) / close_5d_ago
-        else:
-            ctx.change_5d = 0.0
+        if ctx.error:
+            return "", None, state, -100.0, None, None
 
-        d = hist_df.iloc[-1]
-        ctx.atr_pct = d["atr"] / real_price if real_price > 0 else 0
-        ctx.rsi = d["rsi"]
-        ctx.above_ma30 = real_price > d["ma30"] if "ma30" in d and not pd.isna(d["ma30"]) else True
-        ctx.is_weak_ma = not ctx.above_ma30
+        final = ctx.final_score
+        today_str = today.strftime("%Y-%m-%d")
 
-        ctx.weekly_above = ctx.weekly_below = False
-        if ctx.weekly_df is not None and not ctx.weekly_df.empty:
-            w = ctx.weekly_df.iloc[-1]
-            if "ma_short" in w.index and not pd.isna(w["ma_short"]):
-                ctx.weekly_above = w["close"] > w["ma_short"]
-                ctx.weekly_below = w["close"] < w["ma_short"]
+        if "score_history" not in state:
+            state["score_history"] = []
+        found = False
+        for item in state["score_history"]:
+            if item["date"] == today_str:
+                item["score"] = final
+                found = True
+                break
+        if not found:
+            state["score_history"].append({"date": today_str, "score": final})
+        state["score_history"].sort(key=lambda x: x["date"])
 
-        market_state = ctx.market.get("state", "震荡")
-        try:
-            tmsv_series = compute_tmsv(hist_df, market_state, ctx.market.get("volatility", 0.02))
-            ctx.tmsv = tmsv_series.iloc[-1] if not tmsv_series.empty else 50.0
-            ctx.tmsv_strength = ctx.tmsv / 100.0
-        except Exception:
-            ctx.tmsv = 50.0
-            ctx.tmsv_strength = 0.5
+        # 构建风险标签
+        risk_str = self._build_risk_str(ctx, state, "")
+        # 构建数据字典供事件检测使用
+        # 注意：需要从 hist_df 中提取 ma5, ma10, ma20_trend 等
+        d = ctx.hist_df.iloc[-1] if ctx.hist_df is not None else None
+        ma5 = d["ma5"] if d is not None else None
+        ma10 = d["ma10"] if d is not None else None
+        ma20 = d["ma_short"] if d is not None else None
+        # 趋势简单计算（今日与前日比较）
+        ma10_trend = 0
+        if d is not None and len(ctx.hist_df) >= 2:
+            prev_ma10 = ctx.hist_df["ma10"].iloc[-2]
+            ma10_trend = 1 if ma10 > prev_ma10 else -1 if ma10 < prev_ma10 else 0
+        ma20_trend = 0
+        if d is not None and len(ctx.hist_df) >= 2:
+            prev_ma20 = ctx.hist_df["ma_short"].iloc[-2]
+            ma20_trend = 1 if ma20 > prev_ma20 else -1 if ma20 < prev_ma20 else 0
+        # 近期高点
+        recent_high_10 = d.get(f"recent_high_10", ctx.recent_high_price) if d is not None else ctx.recent_high_price
+        recent_high_20 = d.get(f"recent_high_20", ctx.recent_high_price) if d is not None else ctx.recent_high_price
+        macd_hist = d["macd_hist"] if d is not None else 0.0
 
-        ctx.downside_momentum = d.get("downside_momentum_raw", 0.0)
-        self._evaluate_take_profit(ctx)
+        scan_info = {
+            "profit_pct_from_low": ctx.profit_pct_from_low or 0.0,
+            "max_drawdown_pct": ctx.max_drawdown_pct or 0.0,
+            "change_pct": ctx.change_pct / 100.0,
+            "change_5d": ctx.change_5d,
+            "final_score": final,
+            "rsi": ctx.rsi,
+            "tmsv": ctx.tmsv,
+            "cost_profit_pct": ctx.cost_profit_pct,
+            "cost_price": ctx.cost_price,
+            "shares": shares,
+            "above_ma": ctx.real_price > ma20 if ma20 is not None else False,
+            "vol_ratio": d["volume"] / d["vol_ma"] if d is not None else 1.0,
+            "atr_pct": ctx.atr_pct,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
+            "ma10_trend": ma10_trend,
+            "ma20_trend": ma20_trend,
+            "recent_high_10": recent_high_10,
+            "recent_high_20": recent_high_20,
+            "macd_hist": macd_hist,
+            "price": ctx.real_price,
+            "display": {
+                "name": name, "code": code, "price": ctx.real_price, "change_pct": ctx.change_pct,
+                "final_score": final, "action_level": "中性", "risk_str": risk_str,
+            }
+        }
+        return "", None, state, final, None, scan_info
 
-        if ctx.cost_price is not None and ctx.cost_price > 0:
-            ctx.cost_profit_pct = (real_price - ctx.cost_price) / ctx.cost_price
-
-        ctx.buy_weights_used = self.buy_weights.copy()
-        ctx.sell_weights_used = self.sell_weights.copy()
-        self._compute_factors(ctx, d)
-
-        ctx.buy_score = weighted_sum(ctx.buy_factors, ctx.buy_weights_used)
-        ctx.sell_score = weighted_sum(ctx.sell_factors, ctx.sell_weights_used)
-
-        if not ctx.above_ma30:
-            ctx.buy_score *= MA30_WEAKNESS_PENALTY
-        if ctx.buy_factors.get("macd_golden_cross", 0) == 0 and ctx.buy_factors.get("kdj_golden_cross", 0) == 0:
-            ctx.buy_score *= 0.95
-
-        ctx.raw_score = ctx.buy_score - ctx.sell_score
-        env_factor = ctx.market["factor"]
-        transformed = nonlinear_score_transform(ctx.raw_score, market_state, NONLINEAR_SCALE_BULL, NONLINEAR_SCALE_RANGE)
-        ctx.final_score = (transformed * env_factor) * 50 + 50
-        ctx.final_score = max(1.0, min(99.0, ctx.final_score))
-
-        if ctx.profit_pct_from_low > 0.12:
-            ctx.final_score *= 0.92
-        if ctx.rsi > 75:
-            ctx.final_score *= 0.95
-        ctx.final_score = max(1.0, min(99.0, ctx.final_score))
-        return ctx
-
-    def _build_risk_str(self, ctx, state, final_level=""):
+    def _build_risk_str(self, ctx, state, final_level):
         labels = []
         if ctx.real_price is not None and ctx.hist_df is not None and not ctx.hist_df.empty:
             d = ctx.hist_df.iloc[-1]
@@ -334,24 +359,6 @@ class DataAnalyzer:
                     labels.append(f"💰浮盈 {pct:.1f}%")
                 elif pct <= COST_STOP_LOSS_PCT * 100:
                     labels.append(f"🔻浮亏 {pct:.1f}%")
-            if ctx.profit_pct_from_low >= 0.12:
-                if ctx.profit_level == 'clear':
-                    labels.append("⛔ 清仓止盈(提示)")
-                elif ctx.profit_level == 'half':
-                    labels.append("💸 半仓止盈(提示)")
-                else:
-                    labels.append("🤭 止盈关注")
-            if ctx.trailing_profit_level == 'clear':
-                labels.append("⛔ 移动止盈(提示)")
-            elif ctx.trailing_profit_level == 'half':
-                labels.append("💸 移动止盈(提示)")
-            if "止损卖出" not in final_level and "清仓止盈" not in final_level:
-                if ctx.real_price and ctx.recent_high_price and ctx.atr_pct:
-                    atr_abs = ctx.atr_pct * ctx.real_price
-                    alerts = self.generate_risk_alerts(ctx.real_price, ctx.recent_high_price, 0, atr_abs)
-                    alert_text = alerts.get("alert")
-                    if isinstance(alert_text, str):
-                        labels.append(alert_text)
         if ctx.profit_pct_from_low is not None and ctx.profit_pct_from_low <= 0.03:
             labels.append("📉 低位")
         if ctx.is_weak_ma:
@@ -361,191 +368,3 @@ class DataAnalyzer:
             if all(s < RISK_WARNING_THRESHOLD for s in recent_scores):
                 labels.append("🛑 连续低分")
         return " ".join(labels)
-
-    def get_action(self, score, score_history, current_date=None):
-        hist_with_dates = sorted(score_history, key=lambda x: x["date"])
-        hist_scores = [item["score"] for item in hist_with_dates]
-        
-        buy_thresh = self.params["BUY_THRESHOLD"]
-        sell_thresh = self.params["SELL_THRESHOLD"]
-        
-        def _get_level(s):
-            for th, lvl in zip(ACTION_LEVEL_THRESHOLDS, ACTION_LEVEL_NAMES):
-                if s >= th:
-                    return lvl
-            return ACTION_LEVEL_NAMES[-1]
-        
-        level = _get_level(score)
-        
-        if QUICK_BUY_ENABLE and len(hist_scores) >= 1:
-            if current_date is not None:
-                prev_items = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
-                if prev_items:
-                    prev_score = prev_items[-1]["score"]
-                else:
-                    prev_score = None
-            else:
-                prev_score = hist_scores[-1]
-            
-            if prev_score is not None and score >= QUICK_BUY_THRESHOLD and (score - prev_score) >= QUICK_BUY_SCORE_INCREASE:
-                return "BUY", level
-        
-        if len(hist_scores) < self.params["CONFIRM_DAYS"]:
-            if score > buy_thresh:
-                return "BUY", level
-            elif score < sell_thresh:
-                return "SELL", level
-            else:
-                return "HOLD", level
-        
-        confirm_days = self.params["CONFIRM_DAYS"]
-        if current_date is not None:
-            recent_hist = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
-            recent = [item["score"] for item in recent_hist[-confirm_days:]]
-        else:
-            recent = hist_scores[-confirm_days:]
-        
-        if SIGNAL_CONFIRM_MODE == "strict":
-            if score > buy_thresh and all(s > buy_thresh for s in recent):
-                return "BUY", level
-            if score < sell_thresh and all(s < sell_thresh for s in recent):
-                return "SELL", level
-        elif SIGNAL_CONFIRM_MODE == "majority":
-            needed = (confirm_days // 2) + 1
-            if score > buy_thresh and sum(1 for s in recent if s > buy_thresh) >= needed:
-                return "BUY", level
-            if score < sell_thresh and sum(1 for s in recent if s < sell_thresh) >= needed:
-                return "SELL", level
-        elif SIGNAL_CONFIRM_MODE == "trend_break":
-            if len(recent) >= 2:
-                if score > buy_thresh and all(recent[i] < recent[i+1] for i in range(len(recent)-1)) and recent[-1] > buy_thresh:
-                    return "BUY", level
-                if score < sell_thresh and all(recent[i] > recent[i+1] for i in range(len(recent)-1)) and recent[-1] < sell_thresh:
-                    return "SELL", level
-        return "HOLD", level
-    
-    
-    def _apply_cost_based_overrides(self, action, action_level, ctx):
-        if not USE_COST_BASED_OVERRIDE or ctx.cost_price is None or ctx.real_price is None:
-            return action, action_level
-        atr_abs = ctx.atr_pct * ctx.real_price if ctx.atr_pct else 0.0
-        decision = self.evaluate_cost_based_stop_profit(
-            price=ctx.real_price,
-            cost=ctx.cost_price,
-            recent_high=ctx.recent_high_price,
-            atr=atr_abs,
-            trailing_profit_level=ctx.trailing_profit_level,
-        )
-        if decision["action_override"] == "SELL":
-            return "SELL", decision["level_override"] or action_level
-        elif decision["level_override"]:
-            return action, decision["level_override"]
-        return action, action_level
-
-    def analyze_single_etf(self, code, name, real_price, hist_df, weekly_df,
-                           market, today, state, cost_price=None, shares=0) -> Tuple[str, Optional[dict], dict, float, Optional[dict], Optional[dict]]:
-        ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
-                         cost_price=cost_price, shares=shares)
-        ctx = self._core_analysis(ctx)
-
-        if ctx.error:
-            out = ""
-            return out, None, state, -100.0, None, None
-
-        final = ctx.final_score
-        today_str = today.strftime("%Y-%m-%d")
-        action, action_level = self.get_action(final, state.get("score_history", []), current_date=today)
-
-        if "score_history" not in state:
-            state["score_history"] = []
-        found = False
-        for item in state["score_history"]:
-            if item["date"] == today_str:
-                item["score"] = final
-                found = True
-                break
-        if not found:
-            state["score_history"].append({"date": today_str, "score": final})
-        state["score_history"].sort(key=lambda x: x["date"])
-
-        
-        if cost_price is not None:
-            action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
-        else:
-            final_level = action_level
-
-        risk_str = self._build_risk_str(ctx, state, final_level)
-
-        output = ""
-        signal = {"action": action, "name": name, "code": code, "score": final} if action in ("BUY", "SELL") else None
-        risk_data = {
-            "price": ctx.real_price, "recent_high": ctx.recent_high_price,
-            "recent_low": ctx.recent_low_price,
-            "atr": ctx.atr_pct * ctx.real_price if ctx.atr_pct and ctx.real_price else 0.0,
-            "cost": ctx.cost_price, "cost_profit_pct": ctx.cost_profit_pct,
-        }
-        scan_info = {
-            "profit_pct_from_low": ctx.profit_pct_from_low or 0.0,
-            "max_drawdown_pct": ctx.max_drawdown_pct or 0.0,
-            "change_pct": ctx.change_pct / 100.0,
-            "change_5d": ctx.change_5d,   # 新增5日涨跌幅
-            "has_weak_ma_text": ctx.is_weak_ma,
-            "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
-            "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
-            "has_buy_signal": action == "BUY",
-            "has_sell_signal": action == "SELL",
-            "final_score": final,
-            "rsi": ctx.rsi,
-            "tmsv": ctx.tmsv,
-            "cost_profit_pct": ctx.cost_profit_pct,
-            "cost_price": ctx.cost_price,
-            "shares": shares,
-            "above_ma": ctx.real_price > ctx.hist_df.iloc[-1]["ma_short"] if ctx.hist_df is not None else False,
-            "vol_ratio": ctx.hist_df.iloc[-1]["volume"] / ctx.hist_df.iloc[-1]["vol_ma"] if ctx.hist_df is not None else 1.0,
-            "atr_pct": ctx.atr_pct,
-            "display": {
-                "name": name, "code": code, "price": real_price, "change_pct": ctx.change_pct,
-                "final_score": final, "action_level": final_level, "risk_str": risk_str,
-            }
-        }
-        return output, signal, state, final, risk_data, scan_info
-
-    def detailed_analysis(self, code, name, real_price, hist_df, weekly_df,
-                          market, today, state, ai_client=None, cost_price=None, shares=0) -> str:
-        ctx = ETFContext(code, name, real_price, hist_df, weekly_df, today, market, self.params.copy(),
-                         cost_price=cost_price, shares=shares)
-        ctx = self._core_analysis(ctx)
-        if ctx.error:
-            return f"【{name} ({code})】{ctx.error}，无法分析。"
-
-        final = ctx.final_score
-        action, action_level = self.get_action(final, state.get("score_history", []), current_date=today)
-        if cost_price is not None:
-            action, final_level = self._apply_cost_based_overrides(action, action_level, ctx)
-        else:
-            final_level = action_level
-
-        risk_str = self._build_risk_str(ctx, state, final_level)
-
-        ai_comment = None
-        if ai_client:
-            try:
-                d = ctx.hist_df.iloc[-1] if ctx.hist_df is not None else None
-                macd_status = ""
-                if d is not None and pd.notna(d.get("macd_dif")) and pd.notna(d.get("macd_dea")):
-                    macd_status = "金叉" if d["macd_dif"] > d["macd_dea"] else "死叉"
-                vol_ratio = None
-                if d is not None and d.get("volume") and d.get("vol_ma") and d["vol_ma"] > 0:
-                    vol_ratio = d["volume"] / d["vol_ma"]
-                ai_comment = ai_client.comment_on_etf(
-                    code=code, name=name, final_score=ctx.final_score,
-                    action_level=final_level, market_state=market["state"], market_factor=market["factor"],
-                    tmsv=ctx.tmsv, atr_pct=ctx.atr_pct, cost_price=ctx.cost_price,
-                    cost_profit_pct=ctx.cost_profit_pct, signal_action=action if action in ("BUY","SELL") else None,
-                    risk_tags=risk_str, rsi=ctx.rsi, macd_status=macd_status, vol_ratio=vol_ratio,
-                )
-            except Exception as e:
-                logger.warning(f"AI评论生成失败: {e}")
-                ai_comment = "（AI评论生成失败）"
-        return format_detailed_report(ctx, market, self.params, final_level, ai_comment,
-                                      signal_action=action if action in ("BUY","SELL") else None)

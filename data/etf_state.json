@@ -37,7 +37,9 @@
         "date": "2026-05-15",
         "score": 78.17028311082909
       }
-    ]
+    ],
+    "last_macd_hist": 0.03705102662686835,
+    "macd_shrink_days": 0
   },
   "sh.515050": {
     "score_history": [
@@ -125,7 +127,16 @@
         "date": "2026-05-15",
         "score": 27.216826754780026
       }
-    ]
+    ],
+    "last_known_shares": 5900,
+    "last_known_cost": 1.257,
+    "trend_add_count": 0,
+    "dip_add_count": 0,
+    "position_state": "CLEARED",
+    "last_macd_hist": -0.006702791400632315,
+    "macd_shrink_days": 0,
+    "overheat_triggered": false,
+    "overheat_count": 0
   },
   "sz.159622": {
     "score_history": [
@@ -165,7 +176,9 @@
         "date": "2026-05-15",
         "score": 14.601262208007412
       }
-    ]
+    ],
+    "last_macd_hist": -0.004837718707955186,
+    "macd_shrink_days": 0
   },
   "sz.159157": {
     "score_history": [
@@ -205,7 +218,9 @@
         "date": "2026-05-15",
         "score": 25.10141359930503
       }
-    ]
+    ],
+    "last_macd_hist": 0.004156499188877055,
+    "macd_shrink_days": 0
   },
   "sz.159599": {
     "score_history": [
@@ -289,7 +304,9 @@
         "date": "2026-05-15",
         "score": 75.3363934572633
       }
-    ]
+    ],
+    "last_macd_hist": 0.01026145483329307,
+    "macd_shrink_days": 0
   },
   "sz.159206": {
     "score_history": [
@@ -357,7 +374,9 @@
         "date": "2026-05-15",
         "score": 38.21901794952307
       }
-    ]
+    ],
+    "last_macd_hist": -0.002190017148437828,
+    "macd_shrink_days": 0
   },
   "sh.515790": {
     "score_history": [
@@ -397,7 +416,16 @@
         "date": "2026-05-15",
         "score": 88.27108660962726
       }
-    ]
+    ],
+    "last_known_shares": 10400,
+    "last_known_cost": 1.11,
+    "trend_add_count": 0,
+    "dip_add_count": 0,
+    "position_state": "CLEARED",
+    "last_macd_hist": 0.009155615527973508,
+    "macd_shrink_days": 0,
+    "overheat_triggered": false,
+    "overheat_count": 0
   },
   "sz.159273": {
     "score_history": [
@@ -437,7 +465,14 @@
         "date": "2026-05-15",
         "score": 87.79918990102644
       }
-    ]
+    ],
+    "last_known_shares": 6800,
+    "last_known_cost": 1.556,
+    "trend_add_count": 0,
+    "dip_add_count": 0,
+    "position_state": "BASE_HOLD",
+    "last_macd_hist": 0.007680248420803185,
+    "macd_shrink_days": 0
   },
   "sh.513210": {
     "score_history": [
@@ -477,7 +512,9 @@
         "date": "2026-05-15",
         "score": 40.571830707899686
       }
-    ]
+    ],
+    "last_macd_hist": 0.0010557146638833998,
+    "macd_shrink_days": 0
   },
   "sz.159637": {
     "score_history": [
@@ -517,7 +554,9 @@
         "date": "2026-05-15",
         "score": 34.445725389558575
       }
-    ]
+    ],
+    "last_macd_hist": -0.004058934739327228,
+    "macd_shrink_days": 0
   },
   "sh.562800": {
     "score_history": [
@@ -557,7 +596,9 @@
         "date": "2026-05-15",
         "score": 31.148791138882462
       }
-    ]
+    ],
+    "last_macd_hist": -0.0007770783345494581,
+    "macd_shrink_days": 0
   },
   "sz.159129": {
     "score_history": [
@@ -593,7 +634,9 @@
         "date": "2026-05-15",
         "score": 28.9302627405957
       }
-    ]
+    ],
+    "last_macd_hist": -0.0039910606890348095,
+    "macd_shrink_days": 0
   },
   "sz.601179": {},
   "sh.601179": {
@@ -627,7 +670,9 @@
         "date": "2026-05-15",
         "score": 83.11767754043618
       }
-    ]
+    ],
+    "last_macd_hist": 0.007299765607733334,
+    "macd_shrink_days": 0
   },
   "sz.563230": {},
   "sh.159583": {},
@@ -657,7 +702,9 @@
         "date": "2026-05-15",
         "score": 24.653186435906804
       }
-    ]
+    ],
+    "last_macd_hist": 0.006304971352413473,
+    "macd_shrink_days": 0
   },
   "sz.159558": {
     "score_history": [
@@ -681,7 +728,9 @@
         "date": "2026-05-15",
         "score": 81.59791141394389
       }
-    ]
+    ],
+    "last_macd_hist": 0.009934905495471422,
+    "macd_shrink_days": 0
   },
   "sh.601985": {
     "score_history": [
@@ -705,7 +754,9 @@
         "date": "2026-05-15",
         "score": 77.76790695324026
       }
-    ]
+    ],
+    "last_macd_hist": 0.04320316942566686,
+    "macd_shrink_days": 0
   },
   "sh.515880": {
     "score_history": [
@@ -717,7 +768,9 @@
         "date": "2026-05-15",
         "score": 84.82528196445917
       }
-    ]
+    ],
+    "last_macd_hist": 0.0216814877378428,
+    "macd_shrink_days": 0
   },
   "sz.159530": {
     "score_history": [
@@ -725,6 +778,8 @@
         "date": "2026-05-15",
         "score": 80.91498972943698
       }
-    ]
+    ],
+    "last_macd_hist": 0.01221272941011986,
+    "macd_shrink_days": 0
   }
 }
