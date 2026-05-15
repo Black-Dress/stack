@@ -196,10 +196,11 @@ def print_unified_table(rows, title=None, env=None, today_str=None, table_type="
         print(" ".join(row_parts))
 
 def format_detailed_report(ctx, market, params, action_level, ai_comment, signal_action=None):
+    from .config import TOTAL_CAPITAL, MAX_POSITION_PCT
     lines = []
-    lines.append(f"  {ctx.name} ({ctx.code})  评分: {ctx.final_score:.1f}  等级: {action_level}")
+    lines.append(f"  {ctx.name} ({ctx.code})  综合评分: {ctx.final_score:.1f}  等级: {action_level}")
     if signal_action:
-        lines.append(f"  信号: {signal_action}")
+        lines.append(f"  系统信号: {signal_action}")
     lines.append(f"  价格: {ctx.real_price:.3f}  涨跌: {ctx.change_pct:+.2f}%  ATR: {ctx.atr_pct*100:.2f}%")
     lines.append(f"  市场状态: {market['state']}  环境因子: {market['factor']:.2f}")
 
@@ -210,17 +211,83 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment, signal
             cost_str += f"  浮动盈亏: {profit_pct:+.2%}"
         lines.append(f"  💰 {cost_str}")
 
+    # ---------- 因子得分明细 ----------
+    lines.append("  " + "─" * 50)
+    lines.append("  【因子得分明细】")
+    lines.append("  买入因子 (权重 * 得分 = 贡献):")
+    for k, v in ctx.buy_factors.items():
+        w = ctx.buy_weights_used.get(k, 0)
+        contrib = w * v
+        lines.append(f"    {k:25} = {v:.3f}  * 权重 {w:.2f} = {contrib:.3f}")
+    lines.append(f"  买入总分: {ctx.buy_score:.3f}")
+    lines.append("  卖出因子 (权重 * 得分 = 贡献):")
+    for k, v in ctx.sell_factors.items():
+        w = ctx.sell_weights_used.get(k, 0)
+        contrib = w * v
+        lines.append(f"    {k:25} = {v:.3f}  * 权重 {w:.2f} = {contrib:.3f}")
+    lines.append(f"  卖出总分: {ctx.sell_score:.3f}")
+
+    # ---------- 推导过程 ----------
+    lines.append("  " + "─" * 50)
+    lines.append("  【评分推导】")
+    raw = ctx.raw_score
+    transformed = nonlinear_score_transform(raw, market["state"], NONLINEAR_SCALE_BULL, NONLINEAR_SCALE_RANGE)
+    env_factor = market["factor"]
+    final = ctx.final_score
+    lines.append(f"  原始差值 = 买入总分 - 卖出总分 = {ctx.buy_score:.3f} - {ctx.sell_score:.3f} = {raw:.3f}")
+    scale = NONLINEAR_SCALE_BULL if "牛" in market['state'] else NONLINEAR_SCALE_RANGE
+    lines.append(f"  非线性变换: f({raw:.3f}) = tanh({scale} * {raw:.3f}) = {transformed:.4f}")
+    lines.append(f"  环境因子: {env_factor:.4f}")
+    lines.append(f"  最终评分 = 50 + 50 * (变换值 * 环境因子) = 50 + 50 * ({transformed:.4f} * {env_factor:.4f}) = {final:.2f}")
+    if ctx.profit_pct_from_low > 0.12:
+        lines.append(f"  修正: 低点涨幅{ctx.profit_pct_from_low:.1%} > 12%，评分乘以0.92 → {final:.2f}")
+    if ctx.rsi > 75:
+        lines.append(f"  修正: RSI {ctx.rsi:.1f} > 75，评分乘以0.95 → {final:.2f}")
+
+    # ---------- 仓位管理建议（ATR模型） ----------
+    lines.append("  " + "─" * 50)
+    lines.append("  【仓位管理建议】")
+    is_holding = ctx.shares > 0
+    if not is_holding:
+        if final < 50:
+            advice = "买入 | 程度：谨慎"
+        elif final < 70:
+            advice = "买入 | 程度：推荐"
+        else:
+            advice = "买入 | 程度：强烈推荐"
+    else:
+        current_value = ctx.shares * ctx.real_price
+        current_ratio = current_value / TOTAL_CAPITAL
+        target_ratio = max(0.0, min(MAX_POSITION_PCT, (final - 30) / 70 * MAX_POSITION_PCT))
+        gap = target_ratio - current_ratio
+        if abs(gap) < 0.01:
+            advice = "持有不动"
+        else:
+            vol_factor = max(0.5, min(1.5, 0.02 / max(ctx.atr_pct, 0.01)))
+            max_step = 0.10 * vol_factor
+            if gap > 0:
+                step = min(gap, max_step)
+                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100 if current_value > 0 else 0
+                pct_of_current = min(pct_of_current, 50.0)
+                advice = f"加仓{pct_of_current:.0f}% | 价位：当前价附近"
+            else:
+                step = min(-gap, max_step)
+                pct_of_current = (step * TOTAL_CAPITAL) / current_value * 100 if current_value > 0 else 0
+                pct_of_current = min(pct_of_current, 50.0)
+                if pct_of_current >= 80:
+                    advice = f"清仓 | 价位：{ctx.real_price:.3f}附近"
+                else:
+                    advice = f"减仓{pct_of_current:.0f}% | 价位：{ctx.real_price:.3f}附近"
+    lines.append(f"  {advice}")
+    if is_holding:
+        lines.append(f"  当前仓位占比: {current_ratio:.2%}  目标占比: {target_ratio:.2%}  总资金: {TOTAL_CAPITAL:,.0f}")
+
+    # 技术指标
     indicators = _format_indicators(ctx)
     if indicators:
         lines.append("  " + "─" * 50)
         lines.append("  【技术指标】")
         lines.append("  " + indicators)
-
-    factor_detail = _format_factor_details(ctx)
-    if factor_detail:
-        lines.append("  " + "─" * 50)
-        lines.append("  【因子评分】")
-        lines.append("  " + factor_detail)
 
     if ctx.trailing_profit_level and ctx.trailing_profit_level != "None":
         fall = (ctx.recent_high_price - ctx.real_price) / ctx.recent_high_price if ctx.recent_high_price > 0 else 0
@@ -236,8 +303,6 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment, signal
             lines.append(f"  ⛔ 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (清仓级)")
         elif ctx.profit_level == 'half':
             lines.append(f"  💸 低点涨幅止盈: {ctx.profit_pct_from_low:.1%} (半仓级)")
-        else:
-            lines.append(f"  🤭 止盈关注: 低点涨幅{ctx.profit_pct_from_low:.1%}")
 
     if ai_comment:
         lines.append("  " + "─" * 50)
@@ -254,6 +319,7 @@ def format_detailed_report(ctx, market, params, action_level, ai_comment, signal
             lines.append(f"     {comment}")
 
     return "\n".join(lines)
+
 
 def _format_indicators(ctx) -> str:
     if ctx.hist_df is None or ctx.hist_df.empty:
@@ -316,6 +382,8 @@ def _format_indicators(ctx) -> str:
     lines.append(f"近期高点: {rh_str}  低点: {rl_str}  最大回撤: {dd_str}  低点涨幅: {lp_str}")
 
     return "\n  ".join(lines)
+
+
 
 def _format_factor_details(ctx) -> str:
     parts = []

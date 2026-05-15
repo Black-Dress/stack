@@ -56,6 +56,7 @@ class ETFContext:
     shares: int = 0
 
     change_pct: float = 0.0
+    change_5d: float = 0.0          # 新增5日涨跌幅
     atr_pct: float = 0.0
     tmsv: float = 50.0
     tmsv_strength: float = 0.5
@@ -252,6 +253,13 @@ class DataAnalyzer:
             return ctx
 
         ctx.change_pct = self.calc_change_pct(real_price, hist_df, ctx.today)
+        # 计算5日涨跌幅
+        if len(hist_df) >= 5:
+            close_5d_ago = hist_df.iloc[-5]["close"]
+            ctx.change_5d = (real_price - close_5d_ago) / close_5d_ago
+        else:
+            ctx.change_5d = 0.0
+
         d = hist_df.iloc[-1]
         ctx.atr_pct = d["atr"] / real_price if real_price > 0 else 0
         ctx.rsi = d["rsi"]
@@ -355,11 +363,6 @@ class DataAnalyzer:
         return " ".join(labels)
 
     def get_action(self, score, score_history, current_date=None):
-        """
-        current_date: datetime.date 对象，用于识别今天的记录
-        如果未提供，则回退到原有逻辑（但建议总是传入）
-        """
-        # 提取所有历史评分，按日期排序
         hist_with_dates = sorted(score_history, key=lambda x: x["date"])
         hist_scores = [item["score"] for item in hist_with_dates]
         
@@ -374,9 +377,7 @@ class DataAnalyzer:
         
         level = _get_level(score)
         
-        # 快速买入信号：需要至少一个历史评分，且该评分不是今天的
         if QUICK_BUY_ENABLE and len(hist_scores) >= 1:
-            # 如果提供了 current_date，则过滤掉今天的记录
             if current_date is not None:
                 prev_items = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
                 if prev_items:
@@ -384,13 +385,11 @@ class DataAnalyzer:
                 else:
                     prev_score = None
             else:
-                # 兼容未传日期：取最后一个（但可能有今天的记录，错误风险高）
                 prev_score = hist_scores[-1]
             
             if prev_score is not None and score >= QUICK_BUY_THRESHOLD and (score - prev_score) >= QUICK_BUY_SCORE_INCREASE:
                 return "BUY", level
         
-        # 信号确认逻辑（保持不变）
         if len(hist_scores) < self.params["CONFIRM_DAYS"]:
             if score > buy_thresh:
                 return "BUY", level
@@ -400,9 +399,7 @@ class DataAnalyzer:
                 return "HOLD", level
         
         confirm_days = self.params["CONFIRM_DAYS"]
-        # 注意：这里取最近 confirm_days 条记录时，需要排除今天的记录（如果 current_date 存在）
         if current_date is not None:
-            # 取最近的历史记录（不含今天）
             recent_hist = [item for item in hist_with_dates if item["date"] != current_date.strftime("%Y-%m-%d")]
             recent = [item["score"] for item in recent_hist[-confirm_days:]]
         else:
@@ -491,6 +488,7 @@ class DataAnalyzer:
             "profit_pct_from_low": ctx.profit_pct_from_low or 0.0,
             "max_drawdown_pct": ctx.max_drawdown_pct or 0.0,
             "change_pct": ctx.change_pct / 100.0,
+            "change_5d": ctx.change_5d,   # 新增5日涨跌幅
             "has_weak_ma_text": ctx.is_weak_ma,
             "has_clear_stop_text": "清仓止盈" in risk_str or "止损卖出" in final_level,
             "has_strong_sell_text": "强烈卖出" in final_level or "连续低分" in risk_str,
@@ -504,6 +502,7 @@ class DataAnalyzer:
             "shares": shares,
             "above_ma": ctx.real_price > ctx.hist_df.iloc[-1]["ma_short"] if ctx.hist_df is not None else False,
             "vol_ratio": ctx.hist_df.iloc[-1]["volume"] / ctx.hist_df.iloc[-1]["vol_ma"] if ctx.hist_df is not None else 1.0,
+            "atr_pct": ctx.atr_pct,
             "display": {
                 "name": name, "code": code, "price": real_price, "change_pct": ctx.change_pct,
                 "final_score": final, "action_level": final_level, "risk_str": risk_str,
